@@ -1789,79 +1789,64 @@ import time
 import warnings
 from io import BytesIO
 
+# Ensure Agg backend is used before importing pyplot
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import VisConfig, BufferConfig, StatsConfig, DQNConfig
-
-# --- Matplotlib Style Configuration ---
-try:
-    plt.style.use("dark_background")
-    plt.rcParams.update(
-        {
-            "font.size": 8,  # Slightly smaller default font
-            "axes.labelsize": 8,
-            "axes.titlesize": 9,  # Slightly smaller title
-            "xtick.labelsize": 7,  # Smaller ticks
-            "ytick.labelsize": 7,
-            "legend.fontsize": 6,  # Smaller legend
-            "figure.facecolor": "#262626",
-            "axes.facecolor": "#303030",
-            "axes.edgecolor": "#707070",
-            "axes.labelcolor": "#D0D0D0",
-            "xtick.color": "#C0C0C0",
-            "ytick.color": "#C0C0C0",
-            "grid.color": "#505050",
-            "grid.linestyle": "--",
-            "grid.alpha": 0.5,
-        }
-    )
-except Exception as e:
-    print(f"Warning: Failed to set Matplotlib style: {e}")
-# --- End Style Configuration ---
-
-
-def normalize_color_for_matplotlib(
-    color_tuple_0_255: Tuple[int, int, int],
-) -> Tuple[float, float, float]:
-    if isinstance(color_tuple_0_255, tuple) and len(color_tuple_0_255) == 3:
-        return tuple(c / 255.0 for c in color_tuple_0_255)
-    else:
-        print(f"Warning: Invalid color tuple {color_tuple_0_255}, returning black.")
-        return (0.0, 0.0, 0.0)
+from .plot_utils import (
+    render_single_plot,
+    normalize_color_for_matplotlib,
+)  # Import helper
 
 
 class Plotter:
+    """Handles creation and caching of the multi-plot Matplotlib surface."""
+
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        self.plot_update_interval: float = 1.0
+        self.plot_update_interval: float = 1.0  # Update plot every second
         self.rolling_window_size = StatsConfig.STATS_AVG_WINDOW
-        self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW  # Max points to plot
-        self.default_line_width = 1.0  # Thinner default line
-        self.avg_line_width = 1.5  # Thinner avg line
+        self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
+        self.default_line_width = 1.0
+        self.avg_line_width = 1.5
         self.avg_line_alpha = 0.7
+
+        # Define colors once
+        self.colors = {
+            "rl_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
+            "game_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[1]),
+            "loss": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[3]),
+            "len": normalize_color_for_matplotlib(VisConfig.BLUE),
+            "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
+            "best_game": normalize_color_for_matplotlib((255, 165, 0)),
+            "lr": normalize_color_for_matplotlib((255, 0, 255)),
+            "buffer": normalize_color_for_matplotlib(VisConfig.RED),
+            "beta": normalize_color_for_matplotlib((100, 100, 255)),
+            "avg": normalize_color_for_matplotlib(VisConfig.YELLOW),
+            "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
+        }
 
     def create_plot_surface(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
+        """Creates the Matplotlib figure and renders subplots."""
         if target_width <= 10 or target_height <= 10 or not plot_data:
             return None
 
-        data_lists = {
-            key: list(plot_data.get(key, deque()))
-            for key in [
-                "episode_scores",
-                "game_scores",
-                "losses",
-                "episode_lengths",
-                "sps_values",
-                "best_game_score_history",
-                "lr_values",
-                "buffer_sizes",
-                "beta_values",
-            ]
-        }
+        data_keys = [
+            "episode_scores",
+            "game_scores",
+            "losses",
+            "episode_lengths",
+            "sps_values",
+            "best_game_score_history",
+            "lr_values",
+            "buffer_sizes",
+            "beta_values",
+        ]
+        data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
         if not any(data_lists.values()):
             return None
@@ -1870,130 +1855,141 @@ class Plotter:
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=UserWarning)
-
-                # --- MODIFIED: Slightly higher DPI ---
                 dpi = 90
                 fig_width_in = target_width / dpi
                 fig_height_in = target_height / dpi
-
                 fig, axes = plt.subplots(
                     3, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
-                # --- MODIFIED: Tighter subplot adjustments ---
                 fig.subplots_adjust(
-                    hspace=0.55,  # Reduced vertical space
-                    wspace=0.35,  # Reduced horizontal space
-                    left=0.10,  # Reduced left margin
-                    right=0.98,  # Reduced right margin
-                    bottom=0.12,  # Reduced bottom margin
-                    top=0.95,  # Reduced top margin
+                    hspace=0.55,
+                    wspace=0.35,
+                    left=0.10,
+                    right=0.98,
+                    bottom=0.12,
+                    top=0.95,
                 )
-                # --- END MODIFIED ---
                 axes_flat = axes.flatten()
 
-                colors = {
-                    "rl_score": normalize_color_for_matplotlib(
-                        VisConfig.GOOGLE_COLORS[0]
-                    ),
-                    "game_score": normalize_color_for_matplotlib(
-                        VisConfig.GOOGLE_COLORS[1]
-                    ),
-                    "loss": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[3]),
-                    "len": normalize_color_for_matplotlib(VisConfig.BLUE),
-                    "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
-                    "best_game": normalize_color_for_matplotlib((255, 165, 0)),
-                    "lr": normalize_color_for_matplotlib((255, 0, 255)),
-                    "buffer": normalize_color_for_matplotlib(VisConfig.RED),
-                    "beta": normalize_color_for_matplotlib((100, 100, 255)),
-                    "avg": normalize_color_for_matplotlib(VisConfig.YELLOW),
-                    "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
-                }
+                max_len = max((len(d) for d in data_lists.values() if d), default=0)
+                plot_window_label = f"Latest {min(self.plot_data_window, max_len)} Pts"
 
-                # --- MODIFIED: X-axis label reflects plot window ---
-                plot_window_label = f"Latest {min(self.plot_data_window, max(len(d) for d in data_lists.values() if d))} Points"
-                # --- END MODIFIED ---
-
-                self._plot_data_list(
+                # --- Render Subplots using Helper ---
+                render_single_plot(
                     axes_flat[0],
                     data_lists["episode_scores"],
                     "RL Score",
-                    colors["rl_score"],
-                    colors["avg"],
+                    self.colors["rl_score"],
+                    self.colors["avg"],
+                    self.rolling_window_size,
                     xlabel=plot_window_label,
+                    default_line_width=self.default_line_width,
+                    avg_line_width=self.avg_line_width,
+                    avg_line_alpha=self.avg_line_alpha,
                 )
-                self._plot_data_list(
+                render_single_plot(
                     axes_flat[1],
                     data_lists["game_scores"],
                     "Game Score",
-                    colors["game_score"],
-                    colors["avg"],
+                    self.colors["game_score"],
+                    self.colors["avg"],
+                    self.rolling_window_size,
                     xlabel=plot_window_label,
+                    default_line_width=self.default_line_width,
+                    avg_line_width=self.avg_line_width,
+                    avg_line_alpha=self.avg_line_alpha,
                 )
-                self._plot_data_list(
+                render_single_plot(
                     axes_flat[2],
                     data_lists["losses"],
                     "Loss",
-                    colors["loss"],
-                    colors["avg"],
+                    self.colors["loss"],
+                    self.colors["avg"],
+                    self.rolling_window_size,
                     xlabel=plot_window_label,
                     show_placeholder=True,
                     placeholder_text="Loss data after Learn Start",
+                    default_line_width=self.default_line_width,
+                    avg_line_width=self.avg_line_width,
+                    avg_line_alpha=self.avg_line_alpha,
                 )
-                self._plot_data_list(
+                render_single_plot(
                     axes_flat[3],
                     data_lists["episode_lengths"],
                     "Ep Length",
-                    colors["len"],
-                    colors["avg"],
+                    self.colors["len"],
+                    self.colors["avg"],
+                    self.rolling_window_size,
                     xlabel=plot_window_label,
+                    default_line_width=self.default_line_width,
+                    avg_line_width=self.avg_line_width,
+                    avg_line_alpha=self.avg_line_alpha,
                 )
-                self._plot_data_list(
+                render_single_plot(
                     axes_flat[4],
                     data_lists["best_game_score_history"],
                     "Best Game Score",
-                    colors["best_game"],
+                    self.colors["best_game"],
                     None,
+                    self.rolling_window_size,
                     xlabel=plot_window_label,
+                    default_line_width=self.default_line_width,
+                    avg_line_width=self.avg_line_width,
+                    avg_line_alpha=self.avg_line_alpha,
                 )
-                self._plot_data_list(
+                render_single_plot(
                     axes_flat[5],
                     data_lists["sps_values"],
                     "Steps/Sec",
-                    colors["sps"],
-                    colors["avg"],
+                    self.colors["sps"],
+                    self.colors["avg"],
+                    self.rolling_window_size,
                     xlabel=plot_window_label,
+                    default_line_width=self.default_line_width,
+                    avg_line_width=self.avg_line_width,
+                    avg_line_alpha=self.avg_line_alpha,
                 )
-                self._plot_data_list(
+                render_single_plot(
                     axes_flat[6],
                     data_lists["lr_values"],
                     "Learning Rate",
-                    colors["lr"],
+                    self.colors["lr"],
                     None,
+                    self.rolling_window_size,
                     xlabel=plot_window_label,
                     y_log_scale=True,
+                    default_line_width=self.default_line_width,
+                    avg_line_width=self.avg_line_width,
+                    avg_line_alpha=self.avg_line_alpha,
                 )
-
                 buffer_fill_percent = [
                     (s / max(1, BufferConfig.REPLAY_BUFFER_SIZE) * 100)
                     for s in data_lists["buffer_sizes"]
                 ]
-                self._plot_data_list(
+                render_single_plot(
                     axes_flat[7],
                     buffer_fill_percent,
                     "Buffer Fill %",
-                    colors["buffer"],
-                    colors["avg"],
+                    self.colors["buffer"],
+                    self.colors["avg"],
+                    self.rolling_window_size,
                     xlabel=plot_window_label,
+                    default_line_width=self.default_line_width,
+                    avg_line_width=self.avg_line_width,
+                    avg_line_alpha=self.avg_line_alpha,
                 )
-
                 if BufferConfig.USE_PER:
-                    self._plot_data_list(
+                    render_single_plot(
                         axes_flat[8],
                         data_lists["beta_values"],
                         "PER Beta",
-                        colors["beta"],
-                        colors["avg"],
+                        self.colors["beta"],
+                        self.colors["avg"],
+                        self.rolling_window_size,
                         xlabel=plot_window_label,
+                        default_line_width=self.default_line_width,
+                        avg_line_width=self.avg_line_width,
+                        avg_line_alpha=self.avg_line_alpha,
                     )
                 else:
                     axes_flat[8].text(
@@ -2004,10 +2000,11 @@ class Plotter:
                         va="center",
                         transform=axes_flat[8].transAxes,
                         fontsize=8,
-                        color=colors["placeholder"],
+                        color=self.colors["placeholder"],
                     )
                     axes_flat[8].set_yticks([])
                     axes_flat[8].set_xticks([])
+                # --- End Subplot Rendering ---
 
                 for ax in axes_flat:
                     ax.tick_params(axis="x", rotation=0)
@@ -2031,7 +2028,6 @@ class Plotter:
                     plot_img_surface = pygame.transform.smoothscale(
                         plot_img_surface, (target_width, target_height)
                     )
-
                 return plot_img_surface
 
         except Exception as e:
@@ -2044,152 +2040,12 @@ class Plotter:
             if fig is not None:
                 plt.close(fig)
 
-    def _plot_data_list(
-        self,
-        ax,
-        data: List[Union[float, int]],
-        label: str,
-        color,
-        avg_color: Optional[Tuple[float, float, float]],
-        xlabel: Optional[str] = None,
-        show_placeholder: bool = True,
-        placeholder_text: Optional[str] = None,
-        y_log_scale: bool = False,
-    ):
-        n_points = len(data)
-        latest_val_str = ""
-        avg_window = self.rolling_window_size  # Window for rolling average line
-
-        if data:
-            current_val = data[-1]
-            if n_points >= avg_window and avg_color is not None:
-                try:
-                    latest_avg = np.mean(data[-avg_window:])
-                    latest_val_str = (
-                        f" (Now: {current_val:.3g}, Avg{avg_window}: {latest_avg:.3g})"
-                    )
-                except Exception:
-                    latest_val_str = f" (Now: {current_val:.3g})"
-            else:
-                latest_val_str = f" (Now: {current_val:.3g})"
-        ax.set_title(
-            f"{label}{latest_val_str}", fontsize=plt.rcParams["axes.titlesize"]
-        )
-
-        placeholder_text_color = normalize_color_for_matplotlib(VisConfig.GRAY)
-        if n_points == 0:
-            if show_placeholder:
-                p_text = (
-                    placeholder_text if placeholder_text else f"{label}\n(No data yet)"
-                )
-                ax.text(
-                    0.5,
-                    0.5,
-                    p_text,
-                    ha="center",
-                    va="center",
-                    transform=ax.transAxes,
-                    fontsize=8,
-                    color=placeholder_text_color,
-                )
-            ax.set_yticks([])
-            ax.set_xticks([])
-            return
-
-        try:
-            x_coords = np.arange(n_points)
-            ax.plot(
-                x_coords,
-                data,
-                color=color,
-                linewidth=self.default_line_width,
-                label=f"{label} (Raw)",
-            )
-
-            if avg_color is not None and n_points >= avg_window:
-                weights = np.ones(avg_window) / avg_window
-                rolling_avg = np.convolve(data, weights, mode="valid")
-                avg_x_coords = np.arange(avg_window - 1, n_points)
-                ax.plot(
-                    avg_x_coords,
-                    rolling_avg,
-                    color=avg_color,
-                    linewidth=self.avg_line_width,
-                    alpha=self.avg_line_alpha,
-                    label=f"{label} (Avg {avg_window})",
-                )
-
-            ax.tick_params(axis="both", which="major")
-            if xlabel:
-                ax.set_xlabel(xlabel)
-            ax.grid(
-                True,
-                linestyle=plt.rcParams["grid.linestyle"],
-                alpha=plt.rcParams["grid.alpha"],
-            )
-
-            min_val = np.min(data)
-            max_val = np.max(data)
-            padding = (
-                (max_val - min_val) * 0.1
-                if max_val > min_val
-                else max(abs(max_val * 0.1), 1.0)
-            )
-            padding = max(padding, 1e-6)
-            ax.set_ylim(min_val - padding, max_val + padding)
-
-            if y_log_scale and min_val > 1e-9:
-                ax.set_yscale("log")
-                ax.set_ylim(bottom=max(min_val * 0.9, 1e-9))
-            else:
-                ax.set_yscale("linear")
-
-            if n_points > 1:
-                ax.set_xlim(-0.02 * n_points, n_points - 1 + 0.02 * n_points)
-            elif n_points == 1:
-                ax.set_xlim(-0.5, 0.5)
-
-            # --- MODIFIED: Adjust x-ticks based on number of points ---
-            if n_points > 1000:
-                ax.xaxis.set_major_locator(
-                    plt.MaxNLocator(integer=True, nbins=4)
-                )  # Fewer ticks for many points
-
-                # Optionally format as 'k' or 'M'
-                def format_func(value, tick_number):
-                    if value >= 1_000_000:
-                        return f"{value/1_000_000:.1f}M"
-                    if value >= 1_000:
-                        return f"{value/1_000:.0f}k"
-                    return f"{int(value)}"
-
-                ax.xaxis.set_major_formatter(plt.FuncFormatter(format_func))
-            elif n_points > 10:
-                ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
-            # --- END MODIFIED ---
-
-        except Exception as plot_err:
-            print(f"ERROR during _plot_data_list for '{label}': {plot_err}")
-            error_text_color = normalize_color_for_matplotlib(VisConfig.RED)
-            ax.text(
-                0.5,
-                0.5,
-                f"Plotting Error\n({label})",
-                ha="center",
-                va="center",
-                transform=ax.transAxes,
-                fontsize=8,
-                color=error_text_color,
-            )
-            ax.set_yticks([])
-            ax.set_xticks([])
-
     def get_cached_or_updated_plot(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
+        """Returns the cached plot surface or generates a new one if needed."""
         current_time = time.time()
         has_data = any(plot_data.values())
-
         needs_update_time = (
             current_time - self.last_plot_update_time > self.plot_update_interval
         )
@@ -2389,6 +2245,193 @@ class OverlayRenderer:
             return False  # Message render failed
 
 
+File: ui/plot_utils.py
+# File: ui/plot_utils.py
+import pygame
+import numpy as np
+from typing import Dict, Optional, Deque, List, Union, Tuple
+import matplotlib
+import warnings
+from io import BytesIO
+
+# Ensure Agg backend is used before importing pyplot
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+from config import VisConfig, BufferConfig, StatsConfig, DQNConfig
+
+# --- Matplotlib Style Configuration ---
+# Moved here for better organization
+try:
+    plt.style.use("dark_background")
+    plt.rcParams.update(
+        {
+            "font.size": 8,
+            "axes.labelsize": 8,
+            "axes.titlesize": 9,
+            "xtick.labelsize": 7,
+            "ytick.labelsize": 7,
+            "legend.fontsize": 6,
+            "figure.facecolor": "#262626",
+            "axes.facecolor": "#303030",
+            "axes.edgecolor": "#707070",
+            "axes.labelcolor": "#D0D0D0",
+            "xtick.color": "#C0C0C0",
+            "ytick.color": "#C0C0C0",
+            "grid.color": "#505050",
+            "grid.linestyle": "--",
+            "grid.alpha": 0.5,
+        }
+    )
+except Exception as e:
+    print(f"Warning: Failed to set Matplotlib style: {e}")
+# --- End Style Configuration ---
+
+
+def normalize_color_for_matplotlib(
+    color_tuple_0_255: Tuple[int, int, int],
+) -> Tuple[float, float, float]:
+    """Converts RGB 0-255 tuple to Matplotlib's 0.0-1.0 tuple."""
+    if isinstance(color_tuple_0_255, tuple) and len(color_tuple_0_255) == 3:
+        return tuple(c / 255.0 for c in color_tuple_0_255)
+    else:
+        print(f"Warning: Invalid color tuple {color_tuple_0_255}, returning black.")
+        return (0.0, 0.0, 0.0)
+
+
+# --- Extracted Subplot Rendering Logic ---
+def render_single_plot(
+    ax,
+    data: List[Union[float, int]],
+    label: str,
+    color: Tuple[float, float, float],
+    avg_color: Optional[Tuple[float, float, float]],
+    rolling_window_size: int,
+    xlabel: Optional[str] = None,
+    show_placeholder: bool = True,
+    placeholder_text: Optional[str] = None,
+    y_log_scale: bool = False,
+    default_line_width: float = 1.0,
+    avg_line_width: float = 1.5,
+    avg_line_alpha: float = 0.7,
+):
+    """Renders data onto a single Matplotlib Axes object."""
+    n_points = len(data)
+    latest_val_str = ""
+    avg_window = rolling_window_size
+
+    if data:
+        current_val = data[-1]
+        if n_points >= avg_window and avg_color is not None:
+            try:
+                latest_avg = np.mean(data[-avg_window:])
+                latest_val_str = (
+                    f" (Now: {current_val:.3g}, Avg{avg_window}: {latest_avg:.3g})"
+                )
+            except Exception:
+                latest_val_str = f" (Now: {current_val:.3g})"
+        else:
+            latest_val_str = f" (Now: {current_val:.3g})"
+    ax.set_title(f"{label}{latest_val_str}", fontsize=plt.rcParams["axes.titlesize"])
+
+    placeholder_text_color = normalize_color_for_matplotlib(VisConfig.GRAY)
+    if n_points == 0:
+        if show_placeholder:
+            p_text = placeholder_text if placeholder_text else f"{label}\n(No data yet)"
+            ax.text(
+                0.5,
+                0.5,
+                p_text,
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=8,
+                color=placeholder_text_color,
+            )
+        ax.set_yticks([])
+        ax.set_xticks([])
+        return
+
+    try:
+        x_coords = np.arange(n_points)
+        ax.plot(
+            x_coords, data, color=color, linewidth=default_line_width, label=f"{label}"
+        )
+
+        if avg_color is not None and n_points >= avg_window:
+            weights = np.ones(avg_window) / avg_window
+            rolling_avg = np.convolve(data, weights, mode="valid")
+            avg_x_coords = np.arange(avg_window - 1, n_points)
+            ax.plot(
+                avg_x_coords,
+                rolling_avg,
+                color=avg_color,
+                linewidth=avg_line_width,
+                alpha=avg_line_alpha,
+                label=f"Avg {avg_window}",
+            )
+
+        ax.tick_params(axis="both", which="major")
+        if xlabel:
+            ax.set_xlabel(xlabel)
+        ax.grid(
+            True,
+            linestyle=plt.rcParams["grid.linestyle"],
+            alpha=plt.rcParams["grid.alpha"],
+        )
+
+        min_val = np.min(data)
+        max_val = np.max(data)
+        padding = (
+            (max_val - min_val) * 0.1
+            if max_val > min_val
+            else max(abs(max_val * 0.1), 1.0)
+        )
+        padding = max(padding, 1e-6)
+        ax.set_ylim(min_val - padding, max_val + padding)
+
+        if y_log_scale and min_val > 1e-9:
+            ax.set_yscale("log")
+            ax.set_ylim(bottom=max(min_val * 0.9, 1e-9))
+        else:
+            ax.set_yscale("linear")
+
+        if n_points > 1:
+            ax.set_xlim(-0.02 * n_points, n_points - 1 + 0.02 * n_points)
+        elif n_points == 1:
+            ax.set_xlim(-0.5, 0.5)
+
+        if n_points > 1000:
+            ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=4))
+
+            def format_func(value, tick_number):
+                if value >= 1_000_000:
+                    return f"{value/1_000_000:.1f}M"
+                if value >= 1_000:
+                    return f"{value/1_000:.0f}k"
+                return f"{int(value)}"
+
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(format_func))
+        elif n_points > 10:
+            ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
+
+    except Exception as plot_err:
+        print(f"ERROR during render_single_plot for '{label}': {plot_err}")
+        error_text_color = normalize_color_for_matplotlib(VisConfig.RED)
+        ax.text(
+            0.5,
+            0.5,
+            f"Plotting Error\n({label})",
+            ha="center",
+            va="center",
+            transform=ax.transAxes,
+            fontsize=8,
+            color=error_text_color,
+        )
+        ax.set_yticks([])
+        ax.set_xticks([])
+
+
 File: ui/input_handler.py
 # File: ui/input_handler.py
 # (No significant changes needed, this file was already reasonably focused)
@@ -2583,7 +2626,6 @@ __all__ = ["LeftPanelRenderer", "GameAreaRenderer"]
 
 File: ui/panels/game_area.py
 # File: ui/panels/game_area.py
-# --- Game Area Rendering Logic ---
 import pygame
 import math
 import traceback
@@ -2592,7 +2634,7 @@ from config import VisConfig, EnvConfig
 from environment.game_state import GameState
 from environment.shape import Shape
 from environment.triangle import Triangle
-import numpy as np  # Import numpy
+import numpy as np
 
 
 class GameAreaRenderer:
@@ -2615,7 +2657,6 @@ class GameAreaRenderer:
         return fonts
 
     def render(self, envs: List[GameState], num_envs: int, env_config: EnvConfig):
-        # ... (render method remains mostly the same, calls _render_env_grid)
         current_width, current_height = self.screen.get_size()
         lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
         ga_rect = pygame.Rect(lp_width, 0, current_width - lp_width, current_height)
@@ -2632,8 +2673,7 @@ class GameAreaRenderer:
             ga_rect, num_to_render
         )
 
-        # Check minimum size *before* trying to render grid or message
-        min_cell_dim = 30  # Adjust as needed
+        min_cell_dim = 30
         if cell_w > min_cell_dim and cell_h > min_cell_dim:
             self._render_env_grid(
                 envs,
@@ -2654,7 +2694,6 @@ class GameAreaRenderer:
     def _calculate_grid_layout(
         self, ga_rect: pygame.Rect, num_to_render: int
     ) -> Tuple[int, int, int, int]:
-        # ... (this method remains the same)
         aspect_ratio = ga_rect.width / max(1, ga_rect.height)
         cols_env = max(1, int(math.sqrt(num_to_render * aspect_ratio)))
         rows_env = max(1, math.ceil(num_to_render / cols_env))
@@ -2667,7 +2706,6 @@ class GameAreaRenderer:
     def _render_env_grid(
         self, envs, num_to_render, env_config, ga_rect, cols, rows, cell_w, cell_h
     ):
-        """Iterates through the grid positions and renders each environment."""
         env_idx = 0
         for r in range(rows):
             for c in range(cols):
@@ -2677,17 +2715,13 @@ class GameAreaRenderer:
                 env_y = ga_rect.y + self.vis_config.ENV_SPACING * (r + 1) + r * cell_h
                 env_rect = pygame.Rect(env_x, env_y, cell_w, cell_h)
 
-                # Clip the rect to the screen to prevent subsurface errors
                 clipped_env_rect = env_rect.clip(self.screen.get_rect())
                 if clipped_env_rect.width <= 0 or clipped_env_rect.height <= 0:
                     env_idx += 1
-                    continue  # Skip rendering if clipped rect is invalid
+                    continue
 
                 try:
-                    # Use the clipped rect for the subsurface
                     sub_surf = self.screen.subsurface(clipped_env_rect)
-                    # Adjust rendering position if clipped (sub_surf topleft is relative)
-                    # We'll handle offsets inside _render_single_env now
                     self._render_single_env(sub_surf, envs[env_idx], env_config)
 
                 except ValueError as subsurface_error:
@@ -2702,38 +2736,31 @@ class GameAreaRenderer:
 
                 env_idx += 1
 
-    # --- REPLACED: _render_single_env ---
     def _render_single_env(
         self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
     ):
-        """Renders the grid, shapes, scores, and overlays for a single environment cell."""
         cell_w = surf.get_width()
         cell_h = surf.get_height()
         if cell_w <= 0 or cell_h <= 0:
             return
 
-        # --- MODIFIED: Background Color Logic ---
-        # Determine background color based on env state, checking flash first
-        bg_color = VisConfig.GRAY  # Default background
+        # --- Background Color Logic (Flash takes precedence) ---
+        bg_color = VisConfig.GRAY
         if env.is_line_clearing():  # Check flash first
             bg_color = VisConfig.LINE_CLEAR_FLASH_COLOR
         elif env.is_blinking():
             bg_color = VisConfig.YELLOW
         elif env.is_frozen() and not env.is_over():
-            bg_color = (30, 30, 100)  # Frozen blue
+            bg_color = (30, 30, 100)
         elif env.is_over():
-            bg_color = (40, 20, 20)  # Game over dark red
-        # else: bg_color remains VisConfig.GRAY
+            bg_color = (40, 20, 20)
         surf.fill(bg_color)
-        # --- END MODIFIED ---
 
-        # --- Define Areas ---
-        shape_area_height_ratio = 0.20  # Use 20% for shapes
+        shape_area_height_ratio = 0.20
         grid_area_height = math.floor(cell_h * (1.0 - shape_area_height_ratio))
         shape_area_height = cell_h - grid_area_height
         shape_area_y = grid_area_height
 
-        # Create subsurfaces for grid and shapes if dimensions are valid
         grid_surf = None
         shape_surf = None
         if grid_area_height > 0 and cell_w > 0:
@@ -2748,45 +2775,37 @@ class GameAreaRenderer:
             try:
                 shape_rect = pygame.Rect(0, shape_area_y, cell_w, shape_area_height)
                 shape_surf = surf.subsurface(shape_rect)
-                shape_surf.fill((35, 35, 35))  # Darker background for shapes
+                shape_surf.fill((35, 35, 35))
             except ValueError as e:
                 print(f"Warning: Shape subsurface error ({shape_rect}): {e}")
                 pygame.draw.rect(surf, VisConfig.RED, shape_rect, 1)
 
-        # --- Render Grid ---
         if grid_surf:
+            # --- Pass env to grid rendering for highlight check ---
             self._render_single_env_grid(grid_surf, env, env_config)
 
-        # --- Render Shapes ---
         if shape_surf:
             self._render_shape_previews(shape_surf, env)
 
-        # --- Render Scores (on top of everything in the cell) ---
         try:
             score_surf = self.fonts["env_score"].render(
                 f"GS: {env.game_score} R: {env.score:.1f}",
                 True,
                 VisConfig.WHITE,
-                (0, 0, 0, 180),  # Semi-transparent black background
+                (0, 0, 0, 180),
             )
-            # Position score at top-left of the main surface `surf`
             surf.blit(score_surf, (2, 2))
         except Exception as e:
             print(f"Error rendering score: {e}")
 
-        # --- Render Overlays (Game Over/Frozen) ---
         if env.is_over():
             self._render_overlay_text(surf, "GAME OVER", VisConfig.RED)
-        elif (
-            env.is_frozen() and not env.is_blinking() and not env.is_line_clearing()
-        ):  # Dont show frozen if flashing
-            # Only show "Frozen" if not game over
+        elif env.is_frozen() and not env.is_blinking() and not env.is_line_clearing():
             self._render_overlay_text(surf, "Frozen", VisConfig.BLUE)
 
     def _render_overlay_text(
         self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
     ):
-        """Helper to render centered overlay text with a background."""
         try:
             overlay_font = self.fonts["env_overlay"]
             text_surf = overlay_font.render(
@@ -2800,63 +2819,52 @@ class GameAreaRenderer:
         except Exception as e:
             print(f"Error rendering overlay text '{text}': {e}")
 
-    # --- USE SIMPLIFIED SCALING ---
+    # --- MODIFIED: _render_single_env_grid handles highlighting ---
     def _render_single_env_grid(
         self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
     ):
-        """Renders the playable grid, scaled and centered within the surface."""
         try:
             padding = self.vis_config.ENV_GRID_PADDING
-            drawable_w = max(
-                1, surf.get_width() - 2 * padding
-            )  # Ensure at least 1 pixel
-            drawable_h = max(
-                1, surf.get_height() - 2 * padding
-            )  # Ensure at least 1 pixel
+            drawable_w = max(1, surf.get_width() - 2 * padding)
+            drawable_h = max(1, surf.get_height() - 2 * padding)
 
-            # Calculate the required dimensions in "triangle units"
             grid_rows = env_config.ROWS
             grid_cols_effective_width = env_config.COLS * 0.75 + 0.25
 
             if grid_rows <= 0 or grid_cols_effective_width <= 0:
                 return
 
-            # Calculate scale factors based on available drawable space
             scale_w_based = drawable_w / grid_cols_effective_width
             scale_h_based = drawable_h / grid_rows
-
-            # Choose the MINIMUM scale factor to ensure it fits in both dimensions
             final_scale = min(scale_w_based, scale_h_based)
             if final_scale <= 0:
-                return  # Cannot render with zero or negative scale
+                return
 
-            # Calculate final pixel dimensions of the grid using the chosen scale
             final_grid_pixel_w = grid_cols_effective_width * final_scale
             final_grid_pixel_h = grid_rows * final_scale
-
-            # Calculate triangle cell dimensions based on the final scale
-            # Assuming base unit height = 1, base unit width = 1 before scaling
             tri_cell_h = max(1, final_scale)
-            tri_cell_w = max(
-                1, final_scale
-            )  # Simplification: Scale width same as height
+            tri_cell_w = max(1, final_scale)
 
-            # Calculate centering offsets within the padded drawable area
             grid_ox = padding + (drawable_w - final_grid_pixel_w) / 2
             grid_oy = padding + (drawable_h - final_grid_pixel_h) / 2
 
-            # Render Grid Triangles (only non-death)
+            # --- Get highlight state ---
+            is_highlighting = env.is_highlighting_cleared()
+            cleared_coords = (
+                set(env.get_cleared_triangle_coords()) if is_highlighting else set()
+            )
+            highlight_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
+            # --- End highlight state ---
+
             if hasattr(env, "grid") and hasattr(env.grid, "triangles"):
                 for r in range(env.grid.rows):
                     for c in range(env.grid.cols):
-                        # Check bounds carefully
                         if not (
                             0 <= r < len(env.grid.triangles)
                             and 0 <= c < len(env.grid.triangles[r])
                         ):
-                            continue  # Skip if out of bounds
+                            continue
                         t = env.grid.triangles[r][c]
-                        # --- Only render non-death cells ---
                         if not t.is_death:
                             if not hasattr(t, "get_points"):
                                 continue
@@ -2867,20 +2875,20 @@ class GameAreaRenderer:
                                     cw=int(tri_cell_w),
                                     ch=int(tri_cell_h),
                                 )
-                                color = VisConfig.LIGHTG  # Default empty color
-                                if t.is_occupied:
+                                # --- Determine color with highlight ---
+                                if is_highlighting and (r, c) in cleared_coords:
+                                    color = highlight_color
+                                elif t.is_occupied:
                                     color = t.color if t.color else VisConfig.RED
+                                else:
+                                    color = VisConfig.LIGHTG  # Default empty color
+                                # --- End color determination ---
+
                                 pygame.draw.polygon(surf, color, pts)
-                                # Optional: Draw border for empty cells
-                                pygame.draw.polygon(
-                                    surf, VisConfig.GRAY, pts, 1
-                                )  # Add border for clarity
+                                pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
                             except Exception as e_render:
-                                # Reduce log spam for minor render errors
-                                # print(f"Error rendering tri ({r},{c}): {e_render}")
-                                pass  # Silently skip triangle if points error
+                                pass
             else:
-                # Draw error indication if grid is missing
                 pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
                 err_txt = self.fonts["ui"].render(
                     "Invalid Grid Data", True, VisConfig.RED
@@ -2892,9 +2900,9 @@ class GameAreaRenderer:
             traceback.print_exc()
             pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
 
-    # --- MODIFIED: Renders shapes in their allocated area ---
+    # --- END MODIFIED ---
+
     def _render_shape_previews(self, surf: pygame.Surface, env: GameState):
-        """Renders small previews of available shapes horizontally in the given surface."""
         available_shapes = env.get_shapes()
         if not available_shapes:
             return
@@ -2905,19 +2913,16 @@ class GameAreaRenderer:
             return
 
         num_shapes = len(available_shapes)
-        padding = 4  # Padding around shapes
+        padding = 4
         total_padding_needed = (num_shapes + 1) * padding
         available_width_for_shapes = surf_w - total_padding_needed
 
         if available_width_for_shapes <= 0:
-            return  # Not enough space
+            return
 
-        # Calculate width per shape, limited by available height
         width_per_shape = available_width_for_shapes / num_shapes
         height_limit = surf_h - 2 * padding
-        preview_dim = max(
-            5, min(width_per_shape, height_limit)
-        )  # Square-ish preview size
+        preview_dim = max(5, min(width_per_shape, height_limit))
 
         start_x = (
             padding
@@ -2928,43 +2933,34 @@ class GameAreaRenderer:
         current_x = start_x
         for shape in available_shapes:
             preview_rect = pygame.Rect(current_x, start_y, preview_dim, preview_dim)
-            if (
-                preview_rect.right > surf_w - padding
-            ):  # Prevent overflow if calculation is slightly off
+            if preview_rect.right > surf_w - padding:
                 break
 
             try:
-                # Create a temporary surface for the shape preview
                 temp_shape_surf = pygame.Surface(
                     (preview_dim, preview_dim), pygame.SRCALPHA
                 )
-                temp_shape_surf.fill((0, 0, 0, 0))  # Transparent background
+                temp_shape_surf.fill((0, 0, 0, 0))
 
-                # Calculate cell size to fit the shape bbox within preview_dim
                 min_r, min_c, max_r, max_c = shape.bbox()
                 shape_h_cells = max(1, max_r - min_r + 1)
                 shape_w_cells_eff = max(1, (max_c - min_c + 1) * 0.75 + 0.25)
 
                 scale_h = preview_dim / shape_h_cells
                 scale_w = preview_dim / shape_w_cells_eff
-                cell_size = max(
-                    1, min(scale_h, scale_w)
-                )  # Base cell size on limiting dimension
+                cell_size = max(1, min(scale_h, scale_w))
 
-                # Render the shape centered on the temp surface
-                self._render_single_shape(temp_shape_surf, shape, cell_size)
+                self._render_single_shape(temp_shape_surf, shape, int(cell_size))
 
-                # Blit the temp surface onto the main shape preview surface
                 surf.blit(temp_shape_surf, preview_rect.topleft)
                 current_x += preview_dim + padding
 
             except Exception as e:
                 print(f"Error rendering shape preview: {e}")
-                pygame.draw.rect(surf, VisConfig.RED, preview_rect, 1)  # Draw error box
-                current_x += preview_dim + padding  # Still advance
+                pygame.draw.rect(surf, VisConfig.RED, preview_rect, 1)
+                current_x += preview_dim + padding
 
     def _render_single_shape(self, surf: pygame.Surface, shape: Shape, cell_size: int):
-        # ... (this method remains the same - renders a shape centered on the given surface)
         if not shape or not shape.triangles or cell_size <= 0:
             return
         min_r, min_c, max_r, max_c = shape.bbox()
@@ -2973,17 +2969,14 @@ class GameAreaRenderer:
         if shape_w_cells_eff <= 0 or shape_h_cells <= 0:
             return
 
-        # Calculate pixel dimensions required by the shape at this cell_size
         total_w_pixels = shape_w_cells_eff * cell_size
         total_h_pixels = shape_h_cells * cell_size
 
-        # Calculate offset to center the shape on the surface
-        # Offset relative to the shape's min_r, min_c
         offset_x = (surf.get_width() - total_w_pixels) / 2 - min_c * (cell_size * 0.75)
         offset_y = (surf.get_height() - total_h_pixels) / 2 - min_r * cell_size
 
         for dr, dc, up in shape.triangles:
-            tri = Triangle(row=dr, col=dc, is_up=up)  # Temp instance for points
+            tri = Triangle(row=dr, col=dc, is_up=up)
             try:
                 pts = tri.get_points(
                     ox=offset_x, oy=offset_y, cw=cell_size, ch=cell_size
@@ -2993,7 +2986,6 @@ class GameAreaRenderer:
                 print(f"Warning: Error rendering shape preview tri ({dr},{dc}): {e}")
 
     def _render_too_small_message(self, ga_rect: pygame.Rect, cell_w: int, cell_h: int):
-        # ... (this method remains the same)
         try:
             err_surf = self.fonts["ui"].render(
                 f"Envs Too Small ({cell_w}x{cell_h})", True, VisConfig.GRAY
@@ -3005,7 +2997,6 @@ class GameAreaRenderer:
     def _render_render_limit_text(
         self, ga_rect: pygame.Rect, num_rendered: int, num_total: int
     ):
-        # ... (this method remains the same)
         try:
             info_surf = self.fonts["ui"].render(
                 f"Rendering {num_rendered}/{num_total} Envs",
@@ -3039,7 +3030,16 @@ from config import (
 from config.general import TOTAL_TRAINING_STEPS
 from ui.plotter import Plotter
 
-# Tooltips specific to this panel (Keep definition here for locality)
+# Import the new component renderers
+from .left_panel_components import (
+    ButtonStatusRenderer,
+    NotificationRenderer,
+    InfoTextRenderer,
+    TBStatusRenderer,
+    PlotAreaRenderer,
+)
+
+# Tooltips specific to this panel
 TOOLTIP_TEXTS = {
     "Status": "Current state: Paused, Buffering, Training, Confirm Cleanup, Cleaning, or Error.",
     "Global Steps": "Total environment steps taken / Total planned steps.",
@@ -3050,6 +3050,7 @@ TOOLTIP_TEXTS = {
     "Learning Rate": "Current learning rate. See plot for history/schedule.",
     "Train Button": "Click to Start/Pause training (or press 'P').",
     "Cleanup Button": "Click to DELETE agent ckpt & buffer for CURRENT run ONLY, then re-init.",
+    "Play Demo Button": "Click to enter interactive play mode. Gameplay fills the replay buffer.",
     "Device": f"Computation device detected ({DEVICE.type.upper()}).",
     "Network": f"CNN+MLP Fusion. Dueling={DQNConfig.USE_DUELING}, Noisy={DQNConfig.USE_NOISY_NETS}, C51={DQNConfig.USE_DISTRIBUTIONAL}",
     "TensorBoard Status": "Indicates TB logging status and log directory.",
@@ -3057,60 +3058,46 @@ TOOLTIP_TEXTS = {
     "Best RL Score Info": "Best RL Score achieved: Current Value (Previous Value) - Steps Ago",
     "Best Game Score Info": "Best Game Score achieved: Current Value (Previous Value) - Steps Ago",
     "Best Loss Info": "Best (Lowest) Loss achieved: Current Value (Previous Value) - Steps Ago",
-    "Play Demo Button": "Click to enter interactive play mode. Gameplay fills the replay buffer.",
 }
 
 
 class LeftPanelRenderer:
+    """Orchestrates rendering of the left panel using sub-components."""
+
     def __init__(self, screen: pygame.Surface, vis_config: VisConfig, plotter: Plotter):
         self.screen = screen
         self.vis_config = vis_config
         self.plotter = plotter
         self.fonts = self._init_fonts()
-        self.stat_rects: Dict[str, pygame.Rect] = {}  # Rects for tooltip hit detection
+        self.stat_rects: Dict[str, pygame.Rect] = {}
+
+        # Instantiate sub-renderers
+        self.button_status_renderer = ButtonStatusRenderer(self.screen, self.fonts)
+        self.notification_renderer = NotificationRenderer(self.screen, self.fonts)
+        self.info_text_renderer = InfoTextRenderer(self.screen, self.fonts)
+        self.tb_status_renderer = TBStatusRenderer(self.screen, self.fonts)
+        self.plot_area_renderer = PlotAreaRenderer(
+            self.screen, self.fonts, self.plotter
+        )
 
     def _init_fonts(self):
         """Loads necessary fonts using system defaults."""
         fonts = {}
-        default_font_size = 24
-        status_font_size = 28
-        logdir_font_size = 16
-        plot_placeholder_size = 20
-        notification_size = 19
-        notification_label_size = 16
-
-        # Use SysFont for all, with a final fallback to pygame default font
         font_configs = {
-            "ui": default_font_size,
-            "status": status_font_size,
-            "logdir": logdir_font_size,
-            "plot_placeholder": plot_placeholder_size,
-            "notification": notification_size,
-            "notification_label": notification_label_size,
+            "ui": 24,
+            "status": 28,
+            "logdir": 16,
+            "plot_placeholder": 20,
+            "notification": 19,
+            "notification_label": 16,
         }
-
         for key, size in font_configs.items():
             try:
                 fonts[key] = pygame.font.SysFont(None, size)
-            except Exception as e_sysfont:
-                print(
-                    f"Warning: SysFont error for '{key}': {e_sysfont}. Using default."
-                )
-                try:
-                    fonts[key] = pygame.font.Font(None, size)
-                except Exception as e_default:
-                    print(
-                        f"CRITICAL WARNING: Default font failed for '{key}': {e_default}. UI may be broken."
-                    )
-                    # As a last resort, create a dummy font object? Or let it crash?
-                    # For now, let's assign None and handle potential errors later.
-                    fonts[key] = None
-
-        # Check for None fonts (critical failure)
-        for key, font_obj in fonts.items():
-            if font_obj is None:
-                print(f"ERROR: Font '{key}' failed to load entirely.")
-
+            except Exception:
+                fonts[key] = pygame.font.Font(None, size)  # Fallback
+            if fonts[key] is None:
+                print(f"ERROR: Font '{key}' failed to load.")
         return fonts
 
     def render(
@@ -3128,7 +3115,6 @@ class LeftPanelRenderer:
         lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
         lp_rect = pygame.Rect(0, 0, lp_width, current_height)
 
-        # Background based on status
         status_color_map = {
             "Paused": (30, 30, 30),
             "Buffering": (30, 40, 30),
@@ -3141,404 +3127,77 @@ class LeftPanelRenderer:
         }
         bg_color = status_color_map.get(status, (30, 30, 30))
         pygame.draw.rect(self.screen, bg_color, lp_rect)
+        self.stat_rects.clear()
 
-        self.stat_rects.clear()  # Reset rects for tooltips each frame
+        current_y = 10
+        notification_area_rect = None
 
-        # --- Render sections sequentially ---
-        current_y = 10  # Starting Y position
-
-        # 1. Buttons and Status (Layout depends on app_state)
-        notification_area_rect, current_y = self._render_buttons_and_status(
+        # 1. Buttons and Status
+        next_y, rects_bs, notification_area_rect = self.button_status_renderer.render(
             current_y, lp_width, app_state, is_training, status
         )
+        self.stat_rects.update(rects_bs)
+        current_y = next_y
 
         # 2. Notification Area (if applicable)
         if notification_area_rect:
-            self._render_notification_area(notification_area_rect, stats_summary)
-            # Adjust current_y to be below the notifications if they were rendered
-            current_y = max(current_y, notification_area_rect.bottom + 10)
+            rects_notif = self.notification_renderer.render(
+                notification_area_rect, stats_summary
+            )
+            self.stat_rects.update(rects_notif)
+            # Adjust current_y only if notifications were below buttons (which they aren't)
+            # current_y = max(current_y, notification_area_rect.bottom + 10) # Not needed here
 
         # 3. Info Text Block
-        current_y = self._render_info_text(
+        next_y, rects_info = self.info_text_renderer.render(
             current_y, stats_summary, buffer_capacity, lp_width
         )
+        self.stat_rects.update(rects_info)
+        current_y = next_y
 
         # 4. TensorBoard Status
-        current_y = self._render_tb_status(
+        next_y, rects_tb = self.tb_status_renderer.render(
             current_y + 10, tensorboard_log_dir, lp_width
         )
+        self.stat_rects.update(rects_tb)
+        current_y = next_y
 
         # 5. Plot Area
-        self._render_plot_area(
+        self.plot_area_renderer.render(
             current_y + 15, lp_width, current_height, plot_data, status
         )
 
-    def _render_buttons_and_status(
+    def get_stat_rects(self) -> Dict[str, pygame.Rect]:
+        """Returns the dictionary of rects for tooltip handling."""
+        return self.stat_rects.copy()
+
+    def get_tooltip_texts(self) -> Dict[str, str]:
+        """Returns the dictionary of tooltip texts."""
+        return TOOLTIP_TEXTS
+
+
+File: ui/panels/left_panel_components/plot_area_renderer.py
+# File: ui/panels/left_panel_components/plot_area_renderer.py
+import pygame
+from typing import Dict, Deque, Optional
+from config import VisConfig
+from ui.plotter import Plotter  # Import Plotter
+
+
+class PlotAreaRenderer:
+    """Renders the plot area using a Plotter instance."""
+
+    def __init__(
         self,
-        y_start: int,
-        panel_width: int,
-        app_state: str,
-        is_training: bool,
-        status: str,
-    ) -> Tuple[Optional[pygame.Rect], int]:
-        """Renders the top buttons (if in MainMenu) and the status line.
-        Returns the Rect for the notification area (or None) and the next Y coordinate.
-        """
-        notification_rect = None
-        next_y = y_start
+        screen: pygame.Surface,
+        fonts: Dict[str, pygame.font.Font],
+        plotter: Plotter,  # Pass plotter instance
+    ):
+        self.screen = screen
+        self.fonts = fonts
+        self.plotter = plotter
 
-        if app_state == "MainMenu":
-            # Define button rects
-            train_btn_rect = pygame.Rect(10, y_start, 100, 40)
-            cleanup_btn_rect = pygame.Rect(train_btn_rect.right + 10, y_start, 160, 40)
-            demo_btn_rect = pygame.Rect(cleanup_btn_rect.right + 10, y_start, 120, 40)
-
-            # Draw buttons
-            self._draw_button(
-                train_btn_rect,
-                "Pause" if is_training and status == "Training" else "Train",
-                (70, 70, 70),
-            )
-            self._draw_button(cleanup_btn_rect, "Cleanup This Run", (100, 40, 40))
-            self._draw_button(demo_btn_rect, "Play Demo", (40, 100, 40))
-
-            # Register button rects for tooltips
-            self.stat_rects["Train Button"] = train_btn_rect
-            self.stat_rects["Cleanup Button"] = cleanup_btn_rect
-            self.stat_rects["Play Demo Button"] = demo_btn_rect
-
-            # Calculate notification area position (to the right of buttons)
-            notification_x = demo_btn_rect.right + 15
-            notification_w = panel_width - notification_x - 10
-            if notification_w > 50 and self.fonts.get("notification"):
-                line_h = self.fonts["notification"].get_linesize()
-                notification_h = line_h * 3 + 12  # Height for 3 lines of notifications
-                notification_rect = pygame.Rect(
-                    notification_x, y_start, notification_w, notification_h
-                )
-
-            next_y = train_btn_rect.bottom + 10  # Next element starts below buttons
-
-        # Render Status Text (Always)
-        status_text = f"Status: {status}"
-        if app_state == "Playing":
-            status_text = "Status: Playing Demo"
-        elif app_state != "MainMenu":
-            status_text = f"Status: {app_state}"  # e.g., Initializing
-
-        status_font = self.fonts.get("status")
-        if status_font:
-            status_surf = status_font.render(status_text, True, VisConfig.YELLOW)
-            # Position status text below buttons if they exist, otherwise at the top
-            status_rect_top = next_y if app_state == "MainMenu" else y_start
-            status_rect = status_surf.get_rect(topleft=(10, status_rect_top))
-            self.screen.blit(status_surf, status_rect)
-            if app_state == "MainMenu":  # Only add tooltip for status in main menu
-                self.stat_rects["Status"] = status_rect
-            next_y = status_rect.bottom + 5  # Update next_y based on status text bottom
-        else:
-            next_y += 20  # Estimate space if font failed
-
-        # Determine the starting Y for the *next* block
-        final_next_y = next_y
-
-        return notification_rect, final_next_y
-
-    def _draw_button(self, rect: pygame.Rect, text: str, color: Tuple[int, int, int]):
-        """Helper to draw a single button."""
-        pygame.draw.rect(self.screen, color, rect, border_radius=5)
-        ui_font = self.fonts.get("ui")
-        if ui_font:
-            lbl_surf = ui_font.render(text, True, VisConfig.WHITE)
-            self.screen.blit(lbl_surf, lbl_surf.get_rect(center=rect.center))
-        else:
-            # Draw placeholder if font failed
-            pygame.draw.line(
-                self.screen, VisConfig.RED, rect.topleft, rect.bottomright, 2
-            )
-            pygame.draw.line(
-                self.screen, VisConfig.RED, rect.topright, rect.bottomleft, 2
-            )
-
-    def _format_steps_ago(self, current_step: int, best_step: int) -> str:
-        """Formats the difference in steps into a readable string (k steps, M steps)."""
-        if best_step <= 0 or current_step <= best_step:
-            return "Now"
-        diff = current_step - best_step
-        if diff < 1000:
-            return f"{diff} steps ago"
-        elif diff < 1_000_000:
-            return f"{diff / 1000:.1f}k steps ago"
-        else:
-            return f"{diff / 1_000_000:.1f}M steps ago"
-
-    def _render_notification_area(self, area_rect: pygame.Rect, stats: Dict[str, Any]):
-        """Renders the latest best score/loss messages with details."""
-        pygame.draw.rect(self.screen, (45, 45, 45), area_rect, border_radius=3)
-        pygame.draw.rect(self.screen, VisConfig.LIGHTG, area_rect, 1, border_radius=3)
-        self.stat_rects["Notification Area"] = area_rect  # Tooltip for the whole area
-
-        padding = 5
-        label_font = self.fonts.get("notification_label")
-        value_font = self.fonts.get("notification")
-
-        # Check if fonts are loaded
-        if not label_font or not value_font:
-            # Optionally draw an error message inside the area
-            err_font = self.fonts.get("ui")  # Try using ui font for error
-            if err_font:
-                err_surf = err_font.render("Font Error", True, VisConfig.RED)
-                self.screen.blit(err_surf, err_surf.get_rect(center=area_rect.center))
-            return  # Cannot render notifications without fonts
-
-        line_height = value_font.get_linesize()
-        label_color = VisConfig.LIGHTG
-        value_color = VisConfig.WHITE
-        prev_color = VisConfig.GRAY
-        time_color = (180, 180, 100)  # Yellowish for time
-
-        current_step = stats.get("global_step", 0)
-
-        # --- Helper function to render a single notification line ---
-        def render_line(
-            y_pos, label, current_val, prev_val, best_step, val_format, tooltip_key
-        ):
-            # Label
-            label_surf = label_font.render(label, True, label_color)
-            label_rect = label_surf.get_rect(topleft=(area_rect.left + padding, y_pos))
-            self.screen.blit(label_surf, label_rect)
-            current_x = label_rect.right + 4
-
-            # Current Value (handle inf/-inf)
-            current_val_str = "N/A"
-            if isinstance(current_val, (int, float)) and abs(current_val) != float(
-                "inf"
-            ):
-                current_val_str = val_format.format(current_val)
-            val_surf = value_font.render(current_val_str, True, value_color)
-            val_rect = val_surf.get_rect(topleft=(current_x, y_pos))
-            self.screen.blit(val_surf, val_rect)
-            current_x = val_rect.right + 4
-
-            # Previous Value (handle inf/-inf)
-            prev_val_str = "(N/A)"
-            if isinstance(prev_val, (int, float)) and abs(prev_val) != float("inf"):
-                prev_val_str = f"({val_format.format(prev_val)})"
-            prev_surf = label_font.render(prev_val_str, True, prev_color)
-            prev_rect = prev_surf.get_rect(
-                topleft=(current_x, y_pos + 1)
-            )  # Slightly offset
-            self.screen.blit(prev_surf, prev_rect)
-            current_x = prev_rect.right + 6
-
-            # Steps Ago
-            steps_ago_str = self._format_steps_ago(current_step, best_step)
-            time_surf = label_font.render(steps_ago_str, True, time_color)
-            time_rect = time_surf.get_rect(
-                topleft=(current_x, y_pos + 1)
-            )  # Slightly offset
-
-            # Clip rendering to the notification area width
-            available_width = area_rect.right - time_rect.left - padding
-            clip_rect = pygame.Rect(0, 0, max(0, available_width), time_rect.height)
-            if time_rect.width > available_width > 0:
-                self.screen.blit(time_surf, time_rect, area=clip_rect)
-            elif available_width > 0:  # Only blit if space available
-                self.screen.blit(time_surf, time_rect)
-
-            # Create combined rect for tooltip hover detection (clipped to area)
-            combined_rect = label_rect.union(val_rect).union(prev_rect).union(time_rect)
-            self.stat_rects[tooltip_key] = combined_rect.clip(area_rect)
-
-        # --- End render_line helper ---
-
-        y = area_rect.top + padding
-        render_line(
-            y,
-            "RL Score:",
-            stats.get("best_score", -float("inf")),
-            stats.get("previous_best_score", -float("inf")),
-            stats.get("best_score_step", 0),
-            "{:.2f}",
-            "Best RL Score Info",
-        )
-        y += line_height
-        render_line(
-            y,
-            "Game Score:",
-            stats.get("best_game_score", -float("inf")),
-            stats.get("previous_best_game_score", -float("inf")),
-            stats.get("best_game_score_step", 0),
-            "{:.0f}",
-            "Best Game Score Info",
-        )
-        y += line_height
-        render_line(
-            y,
-            "Loss:",
-            stats.get("best_loss", float("inf")),
-            stats.get("previous_best_loss", float("inf")),
-            stats.get("best_loss_step", 0),
-            "{:.4f}",
-            "Best Loss Info",
-        )
-
-    def _render_info_text(
-        self, y_start: int, stats: Dict[str, Any], capacity: int, panel_width: int
-    ) -> int:
-        """Renders the main block of statistics text."""
-        ui_font = self.fonts.get("ui")
-        if not ui_font:
-            return y_start + 100  # Estimate space if font failed
-
-        line_height = ui_font.get_linesize()
-        buffer_size = stats.get("buffer_size", 0)
-        buffer_perc = (buffer_size / max(1, capacity) * 100) if capacity > 0 else 0.0
-        global_step = stats.get("global_step", 0)
-
-        # Define lines to render
-        info_lines = [
-            (
-                "Global Steps",
-                f"{global_step/1e6:.2f}M / {TOTAL_TRAINING_STEPS/1e6:.1f}M",
-            ),
-            ("Total Episodes", f"{stats.get('total_episodes', 0)}"),
-            ("Steps/Sec (Current)", f"{stats.get('steps_per_second', 0.0):.1f}"),
-            ("Buffer Fill", f"{buffer_perc:.1f}% ({buffer_size/1e6:.2f}M)"),
-            (
-                "PER Beta",
-                f"{stats.get('beta', 0.0):.3f}" if BufferConfig.USE_PER else "N/A",
-            ),
-            ("Learning Rate", f"{stats.get('current_lr', 0.0):.1e}"),
-            ("Device", f"{DEVICE.type.upper()}"),
-            (
-                "Network",
-                f"Duel={DQNConfig.USE_DUELING}, Noisy={DQNConfig.USE_NOISY_NETS}, C51={DQNConfig.USE_DISTRIBUTIONAL}",
-            ),
-        ]
-
-        last_y = y_start
-        x_pos_key = 10
-        x_pos_val_offset = 5  # Space between key and value
-
-        for idx, (key, value_str) in enumerate(info_lines):
-            current_y = y_start + idx * line_height
-            try:
-                # Render Key
-                key_surf = ui_font.render(f"{key}:", True, VisConfig.LIGHTG)
-                key_rect = key_surf.get_rect(topleft=(x_pos_key, current_y))
-                self.screen.blit(key_surf, key_rect)
-
-                # Render Value
-                value_surf = ui_font.render(f"{value_str}", True, VisConfig.WHITE)
-                value_rect = value_surf.get_rect(
-                    topleft=(key_rect.right + x_pos_val_offset, current_y)
-                )
-
-                # Clip value rendering if it exceeds panel width
-                clip_width = max(
-                    0, panel_width - value_rect.left - 10
-                )  # 10px right margin
-                if value_rect.width > clip_width:
-                    self.screen.blit(
-                        value_surf,
-                        value_rect,
-                        area=pygame.Rect(0, 0, clip_width, value_rect.height),
-                    )
-                else:
-                    self.screen.blit(value_surf, value_rect)
-
-                # Register combined rect for tooltip
-                combined_rect = key_rect.union(value_rect)
-                combined_rect.width = min(
-                    combined_rect.width, panel_width - x_pos_key - 10
-                )  # Clip tooltip rect too
-                self.stat_rects[key] = combined_rect
-                last_y = combined_rect.bottom
-
-            except Exception as e:
-                print(f"Error rendering stat line '{key}': {e}")
-                last_y = current_y + line_height  # Advance Y even on error
-
-        return last_y  # Return Y position below the last rendered item
-
-    def _render_tb_status(
-        self, y_start: int, log_dir: Optional[str], panel_width: int
-    ) -> int:
-        """Renders the TensorBoard status line and log directory."""
-        ui_font = self.fonts.get("ui")
-        logdir_font = self.fonts.get("logdir")
-        if not ui_font or not logdir_font:
-            return y_start + 30  # Estimate space if fonts failed
-
-        tb_active = (
-            TensorBoardConfig.LOG_HISTOGRAMS
-            or TensorBoardConfig.LOG_IMAGES
-            or TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES
-        )
-        tb_color = VisConfig.GOOGLE_COLORS[0] if tb_active else VisConfig.GRAY
-        tb_text = f"TensorBoard: {'Logging Active' if tb_active else 'Logging Minimal'}"
-
-        tb_surf = ui_font.render(tb_text, True, tb_color)
-        tb_rect = tb_surf.get_rect(topleft=(10, y_start))
-        self.screen.blit(tb_surf, tb_rect)
-        self.stat_rects["TensorBoard Status"] = tb_rect  # Initial rect for tooltip
-
-        last_y = tb_rect.bottom
-
-        if log_dir:
-            try:
-                # Attempt to shorten log directory path for display
-                panel_char_width = max(10, panel_width // logdir_font.size("A")[0])
-                try:
-                    rel_log_dir = os.path.relpath(log_dir)
-                except ValueError:  # Handle different drives on Windows
-                    rel_log_dir = log_dir
-
-                if len(rel_log_dir) > panel_char_width:
-                    parts = log_dir.replace("\\", "/").split("/")
-                    if len(parts) >= 2:
-                        rel_log_dir = os.path.join("...", *parts[-2:])
-                        if len(rel_log_dir) > panel_char_width:  # If still too long
-                            rel_log_dir = (
-                                "..."
-                                + os.path.basename(log_dir)[-(panel_char_width - 3) :]
-                            )
-                    else:  # Just the run ID folder
-                        rel_log_dir = (
-                            "..." + os.path.basename(log_dir)[-(panel_char_width - 3) :]
-                        )
-
-            except Exception:  # Fallback on any path manipulation error
-                rel_log_dir = os.path.basename(log_dir)
-
-            dir_surf = logdir_font.render(
-                f"Log Dir: {rel_log_dir}", True, VisConfig.LIGHTG
-            )
-            dir_rect = dir_surf.get_rect(topleft=(10, tb_rect.bottom + 2))
-
-            # Clip rendering if needed
-            clip_width = max(0, panel_width - dir_rect.left - 10)
-            if dir_rect.width > clip_width:
-                self.screen.blit(
-                    dir_surf,
-                    dir_rect,
-                    area=pygame.Rect(0, 0, clip_width, dir_rect.height),
-                )
-            else:
-                self.screen.blit(dir_surf, dir_rect)
-
-            # Update tooltip rect to include the log dir line
-            combined_tb_rect = tb_rect.union(dir_rect)
-            combined_tb_rect.width = min(
-                combined_tb_rect.width, panel_width - 10 - combined_tb_rect.left
-            )
-            self.stat_rects["TensorBoard Status"] = combined_tb_rect
-            last_y = dir_rect.bottom
-
-        return last_y
-
-    def _render_plot_area(
+    def render(
         self,
         y_start: int,
         panel_width: int,
@@ -3546,15 +3205,13 @@ class LeftPanelRenderer:
         plot_data: Dict[str, Deque],
         status: str,
     ):
-        """Renders the Matplotlib plot area using the Plotter."""
-        plot_area_height = screen_height - y_start - 10  # Bottom margin
-        plot_area_width = panel_width - 20  # Left/right margins
+        """Renders the plot area."""
+        plot_area_height = screen_height - y_start - 10
+        plot_area_width = panel_width - 20
 
         if plot_area_width <= 50 or plot_area_height <= 50:
-            # Area too small to render plot, maybe show a placeholder
             return
 
-        # Get the plot surface (cached or newly generated)
         plot_surface = self.plotter.get_cached_or_updated_plot(
             plot_data, plot_area_width, plot_area_height
         )
@@ -3563,7 +3220,7 @@ class LeftPanelRenderer:
         if plot_surface:
             self.screen.blit(plot_surface, plot_area_rect.topleft)
         else:
-            # Render placeholder if plot couldn't be generated
+            # Render placeholder
             pygame.draw.rect(self.screen, (40, 40, 40), plot_area_rect, 1)
             placeholder_text = "Waiting for data..."
             if status == "Buffering":
@@ -3581,8 +3238,6 @@ class LeftPanelRenderer:
                 placeholder_rect = placeholder_surf.get_rect(
                     center=plot_area_rect.center
                 )
-
-                # Clip placeholder text rendering to fit within the plot area
                 blit_pos = (
                     max(plot_area_rect.left, placeholder_rect.left),
                     max(plot_area_rect.top, placeholder_rect.top),
@@ -3591,11 +3246,9 @@ class LeftPanelRenderer:
                 blit_area = clip_area_rect.move(
                     -placeholder_rect.left, -placeholder_rect.top
                 )
-
                 if blit_area.width > 0 and blit_area.height > 0:
                     self.screen.blit(placeholder_surf, blit_pos, area=blit_area)
-            else:
-                # Draw simple cross if font failed
+            else:  # Fallback cross
                 pygame.draw.line(
                     self.screen,
                     VisConfig.GRAY,
@@ -3609,13 +3262,464 @@ class LeftPanelRenderer:
                     plot_area_rect.bottomleft,
                 )
 
-    def get_stat_rects(self) -> Dict[str, pygame.Rect]:
-        """Returns the dictionary of rects for tooltip handling."""
-        return self.stat_rects.copy()
 
-    def get_tooltip_texts(self) -> Dict[str, str]:
-        """Returns the dictionary of tooltip texts."""
-        return TOOLTIP_TEXTS
+File: ui/panels/left_panel_components/notification_renderer.py
+# File: ui/panels/left_panel_components/notification_renderer.py
+import pygame
+import time
+from typing import Dict, Any, Tuple
+from config import VisConfig, StatsConfig
+
+
+class NotificationRenderer:
+    """Renders the notification area with best scores/loss."""
+
+    def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
+        self.screen = screen
+        self.fonts = fonts
+
+    def _format_steps_ago(self, current_step: int, best_step: int) -> str:
+        if best_step <= 0 or current_step <= best_step:
+            return "Now"
+        diff = current_step - best_step
+        if diff < 1000:
+            return f"{diff} steps ago"
+        elif diff < 1_000_000:
+            return f"{diff / 1000:.1f}k steps ago"
+        else:
+            return f"{diff / 1_000_000:.1f}M steps ago"
+
+    def _render_line(
+        self,
+        area_rect: pygame.Rect,
+        y_pos: int,
+        label: str,
+        current_val: Any,
+        prev_val: Any,
+        best_step: int,
+        val_format: str,
+        current_step: int,
+    ) -> pygame.Rect:
+        label_font = self.fonts.get("notification_label")
+        value_font = self.fonts.get("notification")
+        if not label_font or not value_font:
+            return pygame.Rect(0, y_pos, 0, 0)
+
+        padding = 5
+        label_color, value_color = VisConfig.LIGHTG, VisConfig.WHITE
+        prev_color, time_color = VisConfig.GRAY, (180, 180, 100)
+
+        label_surf = label_font.render(label, True, label_color)
+        label_rect = label_surf.get_rect(topleft=(area_rect.left + padding, y_pos))
+        self.screen.blit(label_surf, label_rect)
+        current_x = label_rect.right + 4
+
+        current_val_str = "N/A"
+        # --- MODIFIED: Check for infinity explicitly ---
+        if isinstance(current_val, (int, float)) and abs(current_val) != float("inf"):
+            current_val_str = val_format.format(current_val)
+        val_surf = value_font.render(current_val_str, True, value_color)
+        val_rect = val_surf.get_rect(topleft=(current_x, y_pos))
+        self.screen.blit(val_surf, val_rect)
+        current_x = val_rect.right + 4
+
+        prev_val_str = "(N/A)"
+        if isinstance(prev_val, (int, float)) and abs(prev_val) != float("inf"):
+            prev_val_str = f"({val_format.format(prev_val)})"
+        # --- END MODIFIED ---
+        prev_surf = label_font.render(prev_val_str, True, prev_color)
+        prev_rect = prev_surf.get_rect(topleft=(current_x, y_pos + 1))
+        self.screen.blit(prev_surf, prev_rect)
+        current_x = prev_rect.right + 6
+
+        steps_ago_str = self._format_steps_ago(current_step, best_step)
+        time_surf = label_font.render(steps_ago_str, True, time_color)
+        time_rect = time_surf.get_rect(topleft=(current_x, y_pos + 1))
+
+        available_width = area_rect.right - time_rect.left - padding
+        clip_rect = pygame.Rect(0, 0, max(0, available_width), time_rect.height)
+        if time_rect.width > available_width > 0:
+            self.screen.blit(time_surf, time_rect, area=clip_rect)
+        elif available_width > 0:
+            self.screen.blit(time_surf, time_rect)
+
+        # Ensure the union rect doesn't extend beyond the area_rect horizontally
+        union_rect = label_rect.union(val_rect).union(prev_rect).union(time_rect)
+        union_rect.width = min(union_rect.width, area_rect.width - 2 * padding)
+        return union_rect
+
+    def render(
+        self, area_rect: pygame.Rect, stats_summary: Dict[str, Any]
+    ) -> Dict[str, pygame.Rect]:
+        stat_rects: Dict[str, pygame.Rect] = {}
+        pygame.draw.rect(self.screen, (45, 45, 45), area_rect, border_radius=3)
+        pygame.draw.rect(self.screen, VisConfig.LIGHTG, area_rect, 1, border_radius=3)
+        stat_rects["Notification Area"] = area_rect
+
+        value_font = self.fonts.get("notification")
+        if not value_font:
+            return stat_rects
+
+        padding = 5
+        line_height = value_font.get_linesize()
+        current_step = stats_summary.get("global_step", 0)
+        y = area_rect.top + padding
+
+        # --- Pass correct keys from summary ---
+        rect_rl = self._render_line(
+            area_rect,
+            y,
+            "RL Score:",
+            stats_summary.get("best_score", -float("inf")),
+            stats_summary.get("previous_best_score", -float("inf")),
+            stats_summary.get("best_score_step", 0),
+            "{:.2f}",
+            current_step,
+        )
+        stat_rects["Best RL Score Info"] = rect_rl.clip(area_rect)
+        y += line_height
+
+        rect_game = self._render_line(
+            area_rect,
+            y,
+            "Game Score:",
+            stats_summary.get("best_game_score", -float("inf")),
+            stats_summary.get("previous_best_game_score", -float("inf")),
+            stats_summary.get("best_game_score_step", 0),
+            "{:.0f}",
+            current_step,
+        )
+        stat_rects["Best Game Score Info"] = rect_game.clip(area_rect)
+        y += line_height
+
+        rect_loss = self._render_line(
+            area_rect,
+            y,
+            "Loss:",
+            stats_summary.get("best_loss", float("inf")),
+            stats_summary.get("previous_best_loss", float("inf")),
+            stats_summary.get("best_loss_step", 0),
+            "{:.4f}",
+            current_step,
+        )
+        stat_rects["Best Loss Info"] = rect_loss.clip(area_rect)
+        # --- End passing correct keys ---
+
+        return stat_rects
+
+
+File: ui/panels/left_panel_components/__init__.py
+# File: ui/panels/left_panel_components/__init__.py
+from .button_status_renderer import ButtonStatusRenderer
+from .notification_renderer import NotificationRenderer
+from .info_text_renderer import InfoTextRenderer
+from .tb_status_renderer import TBStatusRenderer
+from .plot_area_renderer import PlotAreaRenderer
+
+__all__ = [
+    "ButtonStatusRenderer",
+    "NotificationRenderer",
+    "InfoTextRenderer",
+    "TBStatusRenderer",
+    "PlotAreaRenderer",
+]
+
+
+File: ui/panels/left_panel_components/tb_status_renderer.py
+# File: ui/panels/left_panel_components/tb_status_renderer.py
+import pygame
+import os
+from typing import Dict, Optional, Tuple
+from config import VisConfig, TensorBoardConfig
+
+
+class TBStatusRenderer:
+    """Renders the TensorBoard status line."""
+
+    def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
+        self.screen = screen
+        self.fonts = fonts
+
+    def _shorten_path(self, path: str, max_chars: int) -> str:
+        """Attempts to shorten a path string for display."""
+        if len(path) <= max_chars:
+            return path
+        try:
+            rel_path = os.path.relpath(path)
+        except ValueError:  # Handle different drives on Windows
+            rel_path = path
+        if len(rel_path) <= max_chars:
+            return rel_path
+
+        parts = path.replace("\\", "/").split("/")
+        if len(parts) >= 2:
+            short_path = os.path.join("...", *parts[-2:])
+            if len(short_path) <= max_chars:
+                return short_path
+        # Fallback: Ellipsis + end of basename
+        basename = os.path.basename(path)
+        return (
+            "..." + basename[-(max_chars - 3) :]
+            if len(basename) > max_chars - 3
+            else basename
+        )
+
+    def render(
+        self, y_start: int, log_dir: Optional[str], panel_width: int
+    ) -> Tuple[int, Dict[str, pygame.Rect]]:
+        """Renders the TB status. Returns next_y and stat_rects."""
+        stat_rects: Dict[str, pygame.Rect] = {}
+        ui_font = self.fonts.get("ui")
+        logdir_font = self.fonts.get("logdir")
+        if not ui_font or not logdir_font:
+            return y_start + 30, stat_rects
+
+        tb_active = (
+            TensorBoardConfig.LOG_HISTOGRAMS
+            or TensorBoardConfig.LOG_IMAGES
+            or TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES
+        )
+        tb_color = VisConfig.GOOGLE_COLORS[0] if tb_active else VisConfig.GRAY
+        tb_text = f"TensorBoard: {'Logging Active' if tb_active else 'Logging Minimal'}"
+
+        tb_surf = ui_font.render(tb_text, True, tb_color)
+        tb_rect = tb_surf.get_rect(topleft=(10, y_start))
+        self.screen.blit(tb_surf, tb_rect)
+        stat_rects["TensorBoard Status"] = tb_rect
+        last_y = tb_rect.bottom
+
+        if log_dir:
+            try:
+                panel_char_width = max(
+                    10, panel_width // max(1, logdir_font.size("A")[0])
+                )
+                short_log_dir = self._shorten_path(log_dir, panel_char_width)
+            except Exception:
+                short_log_dir = os.path.basename(log_dir)
+
+            dir_surf = logdir_font.render(
+                f"Log Dir: {short_log_dir}", True, VisConfig.LIGHTG
+            )
+            dir_rect = dir_surf.get_rect(topleft=(10, tb_rect.bottom + 2))
+
+            clip_width = max(0, panel_width - dir_rect.left - 10)
+            if dir_rect.width > clip_width:
+                self.screen.blit(
+                    dir_surf,
+                    dir_rect,
+                    area=pygame.Rect(0, 0, clip_width, dir_rect.height),
+                )
+            else:
+                self.screen.blit(dir_surf, dir_rect)
+
+            combined_tb_rect = tb_rect.union(dir_rect)
+            combined_tb_rect.width = min(
+                combined_tb_rect.width, panel_width - 10 - combined_tb_rect.left
+            )
+            stat_rects["TensorBoard Status"] = combined_tb_rect
+            last_y = dir_rect.bottom
+
+        return last_y, stat_rects
+
+
+File: ui/panels/left_panel_components/button_status_renderer.py
+# File: ui/panels/left_panel_components/button_status_renderer.py
+import pygame
+from typing import Dict, Tuple, Optional
+from config import VisConfig
+
+
+class ButtonStatusRenderer:
+    """Renders the top buttons and status line in the left panel."""
+
+    def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
+        self.screen = screen
+        self.fonts = fonts
+
+    def _draw_button(self, rect: pygame.Rect, text: str, color: Tuple[int, int, int]):
+        """Helper to draw a single button."""
+        pygame.draw.rect(self.screen, color, rect, border_radius=5)
+        ui_font = self.fonts.get("ui")
+        if ui_font:
+            lbl_surf = ui_font.render(text, True, VisConfig.WHITE)
+            self.screen.blit(lbl_surf, lbl_surf.get_rect(center=rect.center))
+        else:
+            pygame.draw.line(
+                self.screen, VisConfig.RED, rect.topleft, rect.bottomright, 2
+            )
+            pygame.draw.line(
+                self.screen, VisConfig.RED, rect.topright, rect.bottomleft, 2
+            )
+
+    def render(
+        self,
+        y_start: int,
+        panel_width: int,
+        app_state: str,
+        is_training: bool,
+        status: str,
+    ) -> Tuple[int, Dict[str, pygame.Rect], Optional[pygame.Rect]]:
+        """Renders buttons and status. Returns next_y, stat_rects, notification_rect."""
+        stat_rects: Dict[str, pygame.Rect] = {}
+        notification_rect = None
+        next_y = y_start
+
+        if app_state == "MainMenu":
+            train_btn_rect = pygame.Rect(10, y_start, 100, 40)
+            cleanup_btn_rect = pygame.Rect(train_btn_rect.right + 10, y_start, 160, 40)
+            demo_btn_rect = pygame.Rect(cleanup_btn_rect.right + 10, y_start, 120, 40)
+
+            self._draw_button(
+                train_btn_rect,
+                "Pause" if is_training and status == "Training" else "Train",
+                (70, 70, 70),
+            )
+            self._draw_button(cleanup_btn_rect, "Cleanup This Run", (100, 40, 40))
+            self._draw_button(demo_btn_rect, "Play Demo", (40, 100, 40))
+
+            stat_rects["Train Button"] = train_btn_rect
+            stat_rects["Cleanup Button"] = cleanup_btn_rect
+            stat_rects["Play Demo Button"] = demo_btn_rect
+
+            notification_x = demo_btn_rect.right + 15
+            notification_w = panel_width - notification_x - 10
+            notif_font = self.fonts.get("notification")
+            if notification_w > 50 and notif_font:
+                line_h = notif_font.get_linesize()
+                notification_h = line_h * 3 + 12
+                notification_rect = pygame.Rect(
+                    notification_x, y_start, notification_w, notification_h
+                )
+
+            next_y = train_btn_rect.bottom + 10
+        # --- Status Text ---
+        status_text = f"Status: {status}"
+        if app_state == "Playing":
+            status_text = "Status: Playing Demo"
+        elif app_state != "MainMenu":
+            status_text = f"Status: {app_state}"
+
+        status_font = self.fonts.get("status")
+        if status_font:
+            status_surf = status_font.render(status_text, True, VisConfig.YELLOW)
+            status_rect_top = next_y if app_state == "MainMenu" else y_start
+            status_rect = status_surf.get_rect(topleft=(10, status_rect_top))
+            self.screen.blit(status_surf, status_rect)
+            if app_state == "MainMenu":
+                stat_rects["Status"] = status_rect
+            next_y = status_rect.bottom + 5
+        else:
+            next_y += 20
+
+        return next_y, stat_rects, notification_rect
+
+
+File: ui/panels/left_panel_components/info_text_renderer.py
+# File: ui/panels/left_panel_components/info_text_renderer.py
+import pygame
+from typing import Dict, Any, Tuple
+from config import (
+    VisConfig,
+    BufferConfig,
+    StatsConfig,
+    DQNConfig,
+    DEVICE,
+    TOTAL_TRAINING_STEPS,
+)
+
+
+class InfoTextRenderer:
+    """Renders the main block of statistics text."""
+
+    def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
+        self.screen = screen
+        self.fonts = fonts
+
+    def render(
+        self,
+        y_start: int,
+        stats_summary: Dict[str, Any],
+        buffer_capacity: int,
+        panel_width: int,
+    ) -> Tuple[int, Dict[str, pygame.Rect]]:
+        """Renders the info text block. Returns next_y and stat_rects."""
+        stat_rects: Dict[str, pygame.Rect] = {}
+        ui_font = self.fonts.get("ui")
+        if not ui_font:
+            return y_start + 100, stat_rects
+
+        line_height = ui_font.get_linesize()
+        buffer_size = stats_summary.get("buffer_size", 0)
+        buffer_perc = (
+            (buffer_size / max(1, buffer_capacity) * 100)
+            if buffer_capacity > 0
+            else 0.0
+        )
+        global_step = stats_summary.get("global_step", 0)
+
+        info_lines = [
+            (
+                "Global Steps",
+                f"{global_step/1e6:.2f}M / {TOTAL_TRAINING_STEPS/1e6:.1f}M",
+            ),
+            ("Total Episodes", f"{stats_summary.get('total_episodes', 0)}"),
+            (
+                "Steps/Sec (Current)",
+                f"{stats_summary.get('steps_per_second', 0.0):.1f}",
+            ),
+            ("Buffer Fill", f"{buffer_perc:.1f}% ({buffer_size/1e6:.2f}M)"),
+            (
+                "PER Beta",
+                (
+                    f"{stats_summary.get('beta', 0.0):.3f}"
+                    if BufferConfig.USE_PER
+                    else "N/A"
+                ),
+            ),
+            ("Learning Rate", f"{stats_summary.get('current_lr', 0.0):.1e}"),
+            ("Device", f"{DEVICE.type.upper()}"),
+            (
+                "Network",
+                f"Duel={DQNConfig.USE_DUELING}, Noisy={DQNConfig.USE_NOISY_NETS}, C51={DQNConfig.USE_DISTRIBUTIONAL}",
+            ),
+        ]
+
+        last_y = y_start
+        x_pos_key, x_pos_val_offset = 10, 5
+
+        for idx, (key, value_str) in enumerate(info_lines):
+            current_y = y_start + idx * line_height
+            try:
+                key_surf = ui_font.render(f"{key}:", True, VisConfig.LIGHTG)
+                key_rect = key_surf.get_rect(topleft=(x_pos_key, current_y))
+                self.screen.blit(key_surf, key_rect)
+
+                value_surf = ui_font.render(f"{value_str}", True, VisConfig.WHITE)
+                value_rect = value_surf.get_rect(
+                    topleft=(key_rect.right + x_pos_val_offset, current_y)
+                )
+
+                clip_width = max(0, panel_width - value_rect.left - 10)
+                if value_rect.width > clip_width:
+                    self.screen.blit(
+                        value_surf,
+                        value_rect,
+                        area=pygame.Rect(0, 0, clip_width, value_rect.height),
+                    )
+                else:
+                    self.screen.blit(value_surf, value_rect)
+
+                combined_rect = key_rect.union(value_rect)
+                combined_rect.width = min(
+                    combined_rect.width, panel_width - x_pos_key - 10
+                )
+                stat_rects[key] = combined_rect
+                last_y = combined_rect.bottom
+            except Exception as e:
+                print(f"Error rendering stat line '{key}': {e}")
+                last_y = current_y + line_height
+
+        return last_y, stat_rects
 
 
 File: config/__init__.py
@@ -3711,6 +3815,8 @@ class VisConfig:
     GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
     NUM_ENVS_TO_RENDER = 48
     LINE_CLEAR_FLASH_COLOR = (180, 180, 220)
+    # --- NEW: Color for highlighting cleared triangles ---
+    LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)  # Yellow with alpha
 
 
 # --- Environment ---
@@ -3813,9 +3919,7 @@ class ModelConfig:
 class StatsConfig:
     STATS_AVG_WINDOW = 100
     CONSOLE_LOG_FREQ = 5_000
-    # --- NEW: Plot Data Window ---
-    PLOT_DATA_WINDOW = 10_000  # Max points to store for plotting
-    # --- END NEW ---
+    PLOT_DATA_WINDOW = 10_000
 
 
 # --- TensorBoard Logging ---
@@ -4399,7 +4503,7 @@ class Trainer:
         self,
         envs: List[GameState],
         agent: DQNAgent,
-        buffer: ReplayBufferBase,  # Initial buffer, might be replaced by CheckpointManager
+        buffer: ReplayBufferBase,
         stats_recorder: StatsRecorderBase,
         env_config: EnvConfig,
         dqn_config: DQNConfig,
@@ -4428,7 +4532,7 @@ class Trainer:
 
         self.checkpoint_manager = CheckpointManager(
             agent=self.agent,
-            buffer=buffer,  # Pass initial buffer
+            buffer=buffer,
             model_save_path=model_save_path,
             buffer_save_path=buffer_save_path,
             load_checkpoint_path=load_checkpoint_path,
@@ -4437,9 +4541,7 @@ class Trainer:
             dqn_config=self.dqn_config,
             device=self.device,
         )
-        self.buffer = (
-            self.checkpoint_manager.get_buffer()
-        )  # Get potentially loaded buffer
+        self.buffer = self.checkpoint_manager.get_buffer()
         self.global_step, initial_episode_count = (
             self.checkpoint_manager.get_initial_state()
         )
@@ -4453,7 +4555,6 @@ class Trainer:
             reward_config=self.reward_config,
             tb_config=self.tb_config,
         )
-        # Sync episode count if collector was reset but checkpoint loaded
         self.experience_collector.episode_count = initial_episode_count
 
         self.last_image_log_step = -self.tb_config.IMAGE_LOG_FREQ
@@ -4486,6 +4587,9 @@ class Trainer:
 
     def step(self):
         """Performs one full step: collect experience, train, update target net."""
+        # --- MODIFIED: Add timing for SPS calculation ---
+        step_start_time = time.perf_counter()
+
         steps_collected = self.experience_collector.collect(self.global_step)
         self.global_step += steps_collected
 
@@ -4495,6 +4599,19 @@ class Trainer:
         ):
             if len(self.buffer) >= self.train_config.BATCH_SIZE:
                 self._train_batch()
+
+        step_end_time = time.perf_counter()
+        step_duration = step_end_time - step_start_time
+
+        # Record step time for SPS calculation
+        self.stats_recorder.record_step(
+            {
+                "step_time": step_duration,
+                "num_steps_processed": steps_collected,
+                "global_step": self.global_step,  # Pass current step
+            }
+        )
+        # --- END MODIFIED ---
 
         target_freq = self.dqn_config.TARGET_UPDATE_FREQ
         if target_freq > 0 and self.global_step > 0:
@@ -4507,7 +4624,6 @@ class Trainer:
         self._maybe_log_image()
 
     def _train_batch(self):
-        """Samples a batch, computes loss, updates agent, and records stats."""
         beta = self._update_beta()
         indices, is_weights_np, batch_tuple = None, None, None
         try:
@@ -4559,14 +4675,13 @@ class Trainer:
             "grad_norm": grad_norm if grad_norm is not None else 0.0,
             "avg_max_q": self.agent.get_last_avg_max_q(),
             "lr": self._get_current_lr(),
-            "global_step": self.global_step,
+            "global_step": self.global_step,  # Pass current step
         }
         if self.tb_config.LOG_HISTOGRAMS and td_errors is not None:
             train_log_data["batch_td_errors"] = td_errors
         self.stats_recorder.record_step(train_log_data)
 
     def _update_beta(self) -> float:
-        """Updates PER beta and records it."""
         if not self.buffer_config.USE_PER:
             beta = 1.0
         else:
@@ -4579,11 +4694,11 @@ class Trainer:
             beta = start + fraction * (end - start)
             if hasattr(self.buffer, "set_beta"):
                 self.buffer.set_beta(beta)
+        # Record beta along with the current step
         self.stats_recorder.record_step({"beta": beta, "global_step": self.global_step})
         return beta
 
     def _maybe_log_image(self):
-        """Logs an image of a random environment state periodically."""
         if not self.tb_config.LOG_IMAGES:
             return
         img_freq = self.tb_config.IMAGE_LOG_FREQ
@@ -4608,7 +4723,6 @@ class Trainer:
                 print(f"Error logging environment image: {e}")
 
     def maybe_save_checkpoint(self, force_save=False):
-        """Saves a checkpoint periodically or if forced."""
         save_freq = self.train_config.CHECKPOINT_SAVE_FREQ
         if save_freq <= 0 and not force_save:
             return
@@ -4626,7 +4740,6 @@ class Trainer:
             )
 
     def train_loop(self):
-        """Main training loop that runs until total steps are reached."""
         print("[Trainer] Starting training loop...")
         try:
             while self.global_step < TOTAL_TRAINING_STEPS:
@@ -4641,7 +4754,6 @@ class Trainer:
             self.cleanup(save_final=True)
 
     def cleanup(self, save_final: bool = True):
-        """Cleans up resources, optionally saving a final checkpoint."""
         print("[Trainer] Cleaning up resources...")
         if save_final:
             print("[Trainer] Saving final checkpoint...")
@@ -7040,7 +7152,7 @@ File: environment/game_state.py
 # File: environment/game_state.py
 import time
 import numpy as np
-from typing import List, Optional, Tuple, Dict, Union  # Added Dict, Union
+from typing import List, Optional, Tuple, Dict, Union
 from collections import deque
 from typing import Deque
 
@@ -7048,37 +7160,35 @@ from .grid import Grid
 from .shape import Shape
 from config import EnvConfig, RewardConfig
 
-# --- MODIFIED: Define StateType for clarity ---
-StateType = Dict[str, np.ndarray]  # e.g., {"grid": ndarray, "shapes": ndarray}
-# --- END MODIFIED ---
+StateType = Dict[str, np.ndarray]
 
 
 class GameState:
     def __init__(self):
-        self.env_config = EnvConfig()  # Store config instance
-        self.grid = Grid(self.env_config)  # Pass config to Grid
+        self.env_config = EnvConfig()
+        self.grid = Grid(self.env_config)
         self.shapes: List[Optional[Shape]] = [
             Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)
         ]
-        self.score = 0.0  # Cumulative RL reward
-        self.game_score = 0  # Game-specific score
+        self.score = 0.0
+        self.game_score = 0
         self.lines_cleared_this_episode = 0
         self.blink_time = 0.0
         self.last_time = time.time()
         self.freeze_time = 0.0
-        # --- NEW: Timer for line clear flash ---
         self.line_clear_flash_time = 0.0
+        # --- NEW: State for highlighting cleared triangles ---
+        self.line_clear_highlight_time: float = 0.0
+        self.cleared_triangles_coords: List[Tuple[int, int]] = []
         # --- END NEW ---
         self.game_over = False
         self._last_action_valid = True
         self.rewards = RewardConfig
-        # --- NEW: Attributes for interactive play ---
         self.demo_selected_shape_idx: int = 0
         self.demo_target_row: int = self.env_config.ROWS // 2
         self.demo_target_col: int = self.env_config.COLS // 2
-        # --- END NEW ---
 
-    def reset(self) -> StateType:  # Return new StateType
+    def reset(self) -> StateType:
         self.grid = Grid(self.env_config)
         self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
         self.score = 0.0
@@ -7086,17 +7196,17 @@ class GameState:
         self.lines_cleared_this_episode = 0
         self.blink_time = 0.0
         self.freeze_time = 0.0
-        # --- NEW: Reset flash timer ---
         self.line_clear_flash_time = 0.0
+        # --- NEW: Reset highlight state ---
+        self.line_clear_highlight_time = 0.0
+        self.cleared_triangles_coords = []
         # --- END NEW ---
         self.game_over = False
         self._last_action_valid = True
         self.last_time = time.time()
-        # --- NEW: Reset demo state ---
         self.demo_selected_shape_idx = 0
         self.demo_target_row = self.env_config.ROWS // 2
         self.demo_target_col = self.env_config.COLS // 2
-        # --- END NEW ---
         return self.get_state()
 
     def valid_actions(self) -> List[int]:
@@ -7107,9 +7217,6 @@ class GameState:
         for i, sh in enumerate(self.shapes):
             if not sh:
                 continue
-            # --- OPTIMIZATION: Check only potentially valid root cells ---
-            # Instead of checking all R*C cells, we could optimize,
-            # but for moderate grids, checking all is simpler and likely fast enough.
             for r in range(self.grid.rows):
                 for c in range(self.grid.cols):
                     if self.grid.can_place(sh, r, c):
@@ -7125,10 +7232,20 @@ class GameState:
     def is_frozen(self) -> bool:
         return self.freeze_time > 0
 
-    # --- NEW: Method to check line clear flash status ---
     def is_line_clearing(self) -> bool:
-        """Returns true if the line clear flash animation should be active."""
         return self.line_clear_flash_time > 0
+
+    # --- NEW: Method to check highlight status ---
+    def is_highlighting_cleared(self) -> bool:
+        """Returns true if cleared triangles should be highlighted."""
+        return self.line_clear_highlight_time > 0
+
+    # --- END NEW ---
+
+    # --- NEW: Method to get coords for highlighting ---
+    def get_cleared_triangle_coords(self) -> List[Tuple[int, int]]:
+        """Returns the coordinates of triangles currently being highlighted."""
+        return self.cleared_triangles_coords
 
     # --- END NEW ---
 
@@ -7146,41 +7263,33 @@ class GameState:
         self.last_time = now
         self.freeze_time = max(0, self.freeze_time - dt)
         self.blink_time = max(0, self.blink_time - dt)
-        # --- NEW: Update flash timer ---
         self.line_clear_flash_time = max(0, self.line_clear_flash_time - dt)
+        # --- NEW: Update highlight timer and clear coords if expired ---
+        self.line_clear_highlight_time = max(0, self.line_clear_highlight_time - dt)
+        if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
+            self.cleared_triangles_coords = []
         # --- END NEW ---
 
     def _handle_invalid_placement(self) -> float:
         self._last_action_valid = False
         reward = self.rewards.PENALTY_INVALID_MOVE
-        # Check if game is over due to invalid move AND no valid moves left
-        # Note: This check might be redundant if step() already checks valid_actions()
-        # before calling this. Let's assume step() handles the game over check.
-        # if not self.valid_actions():
-        #     self.game_over = True
-        #     self.freeze_time = 1.0
-        #     reward += self.rewards.PENALTY_GAME_OVER
         return reward
 
-    # --- MODIFIED: _handle_valid_placement updates demo_selected_shape_idx ---
     def _handle_valid_placement(
         self, shp: Shape, s_idx: int, rr: int, cc: int
     ) -> float:
         self._last_action_valid = True
-        reward = 0.0  # Start with zero reward for placement
+        reward = 0.0
 
-        # Place the shape
         self.grid.place(shp, rr, cc)
-        self.shapes[s_idx] = None  # Remove shape from available slots
-        self.game_score += len(shp.triangles)  # Update game score
+        self.shapes[s_idx] = None
+        self.game_score += len(shp.triangles)
 
-        # --- Auto-select next available shape for demo mode ---
         num_slots = self.env_config.NUM_SHAPE_SLOTS
+        found_next = False
         if num_slots > 0:
-            next_idx = (s_idx + 1) % num_slots  # Start checking from the next slot
-            found_next = False
-            for _ in range(num_slots):  # Check all slots at most once
-                # Check if the slot index is valid and the shape exists
+            next_idx = (s_idx + 1) % num_slots
+            for _ in range(num_slots):
                 if (
                     0 <= next_idx < len(self.shapes)
                     and self.shapes[next_idx] is not None
@@ -7188,20 +7297,15 @@ class GameState:
                     self.demo_selected_shape_idx = next_idx
                     found_next = True
                     break
-                next_idx = (next_idx + 1) % num_slots  # Move to the next slot
-
-            # If after checking all slots, none are available (should only happen briefly before refill)
+                next_idx = (next_idx + 1) % num_slots
             if not found_next:
-                self.demo_selected_shape_idx = (
-                    0  # Default to the first slot (or next available after refill)
-                )
-        # --- End auto-select logic ---
+                self.demo_selected_shape_idx = 0
 
-        # Clear lines and get rewards/score
-        lines_cleared, triangles_cleared = self.grid.clear_filled_rows()
+        # --- MODIFIED: Capture cleared coords ---
+        lines_cleared, triangles_cleared, cleared_coords = self.grid.clear_filled_rows()
+        # --- END MODIFIED ---
         self.lines_cleared_this_episode += lines_cleared
 
-        # Apply line clear rewards (more significant now)
         if lines_cleared == 1:
             reward += self.rewards.REWARD_CLEAR_1
         elif lines_cleared == 2:
@@ -7209,44 +7313,35 @@ class GameState:
         elif lines_cleared >= 3:
             reward += self.rewards.REWARD_CLEAR_3PLUS
 
-        # Bonus game score for cleared triangles
         if triangles_cleared > 0:
             self.game_score += triangles_cleared * 2
             self.blink_time = 0.5
             self.freeze_time = 0.5
-            # --- NEW: Trigger flash effect ---
-            self.line_clear_flash_time = 0.3  # Duration of flash in seconds
+            self.line_clear_flash_time = 0.3
+            # --- NEW: Trigger highlight effect ---
+            self.line_clear_highlight_time = 0.5  # Longer duration for highlight
+            self.cleared_triangles_coords = cleared_coords
             # --- END NEW ---
 
-        # Penalty for creating holes (can be tuned)
         num_holes = self.grid.count_holes()
         reward += num_holes * self.rewards.PENALTY_HOLE_PER_HOLE
 
-        # Refill shapes if all slots are empty
         if all(x is None for x in self.shapes):
             self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
-            # --- If auto-select failed earlier, re-select now that shapes are refilled ---
             if not found_next:
-                # Try to find the first available shape again, default to 0 if all fail somehow
                 first_available = next(
                     (i for i, s in enumerate(self.shapes) if s is not None), 0
                 )
                 self.demo_selected_shape_idx = first_available
-            # --- End re-select after refill ---
 
-        # Check if game is over after placement (no more valid moves)
-        # This check is crucial here
         if not self.valid_actions():
             self.game_over = True
             self.freeze_time = 1.0
-            reward += self.rewards.PENALTY_GAME_OVER  # Apply game over penalty
+            reward += self.rewards.PENALTY_GAME_OVER
 
         return reward
 
-    # --- END MODIFIED ---
-
     def step(self, a: int) -> Tuple[float, bool]:
-        """Performs one game step based on the chosen action."""
         self._update_timers()
 
         if self.game_over:
@@ -7254,55 +7349,32 @@ class GameState:
         if self.freeze_time > 0:
             return (0.0, False)
 
-        # Check if the chosen action 'a' is actually valid *now*
-        # This prevents issues if the agent selects an action that became invalid
-        # between the time valid_actions() was called and step() is executed.
-        # We rely on the agent masking correctly. If an invalid action is passed,
-        # we penalize it.
-
         s_idx, rr, cc = self.decode_act(a)
         shp = self.shapes[s_idx] if 0 <= s_idx < len(self.shapes) else None
 
-        # Check placement validity
         is_valid_placement = shp is not None and self.grid.can_place(shp, rr, cc)
 
         if is_valid_placement:
             current_rl_reward = self._handle_valid_placement(shp, s_idx, rr, cc)
         else:
             current_rl_reward = self._handle_invalid_placement()
-            # If the *only* reason the game ends is because the agent chose an invalid
-            # move when valid moves *did* exist, we might not set game_over here,
-            # but the penalty should discourage it. If no valid moves exist at all,
-            # game_over should have been set earlier or will be set in _handle_valid_placement
-            # after the next valid move (if any). Let's ensure game over is checked robustly.
-            if not self.valid_actions():  # Double check if NO valid actions remain
-                if not self.game_over:  # Avoid applying penalty twice
+            if not self.valid_actions():
+                if not self.game_over:
                     self.game_over = True
                     self.freeze_time = 1.0
                     current_rl_reward += self.rewards.PENALTY_GAME_OVER
 
-        # No REWARD_ALIVE_STEP anymore
         self.score += current_rl_reward
         return (current_rl_reward, self.game_over)
 
-    # --- MODIFIED: get_state returns a dictionary ---
     def get_state(self) -> StateType:
-        """
-        Generates the state representation as a dictionary containing
-        'grid' (numpy array [C, H, W]) and 'shapes' (numpy array [N_SLOTS, FEAT_PER_SHAPE]).
-        """
-        # 1. Grid Features
-        grid_state = self.grid.get_feature_matrix()  # Shape: [C, H, W] C=2 now
-
-        # 2. Shape Features
+        grid_state = self.grid.get_feature_matrix()
         shape_features_per = self.env_config.SHAPE_FEATURES_PER_SHAPE
         num_shapes_expected = self.env_config.NUM_SHAPE_SLOTS
-        shape_features_total = num_shapes_expected * shape_features_per
         shape_rep = np.zeros(
             (num_shapes_expected, shape_features_per), dtype=np.float32
         )
 
-        # Normalization constants (adjust if needed)
         max_tris_norm = 6.0
         max_h_norm = float(self.grid.rows)
         max_w_norm = float(self.grid.cols)
@@ -7318,24 +7390,17 @@ class GameState:
                 height = mxr - mnr + 1
                 width = mxc - mnc + 1
 
-                # Normalize features (clip to [0, 1])
                 shape_rep[i, 0] = np.clip(float(n) / max_tris_norm, 0.0, 1.0)
                 shape_rep[i, 1] = np.clip(float(ups) / max_tris_norm, 0.0, 1.0)
                 shape_rep[i, 2] = np.clip(float(dns) / max_tris_norm, 0.0, 1.0)
                 shape_rep[i, 3] = np.clip(float(height) / max_h_norm, 0.0, 1.0)
                 shape_rep[i, 4] = np.clip(float(width) / max_w_norm, 0.0, 1.0)
-            # else: Features remain 0 if shape slot is empty
 
-        # --- Return dictionary ---
         state_dict = {
             "grid": grid_state.astype(np.float32),
-            "shapes": shape_rep.astype(
-                np.float32
-            ),  # Shape: [NUM_SLOTS, FEAT_PER_SHAPE]
+            "shapes": shape_rep.astype(np.float32),
         }
         return state_dict
-
-    # --- END MODIFIED ---
 
     def is_blinking(self) -> bool:
         return self.blink_time > 0
@@ -7343,9 +7408,7 @@ class GameState:
     def get_shapes(self) -> List[Shape]:
         return [s for s in self.shapes if s is not None]
 
-    # --- NEW: Methods for Interactive Control ---
     def cycle_shape(self, direction: int):
-        """Cycles the selected shape index (direction +1 or -1)."""
         if self.game_over or self.freeze_time > 0:
             return
         num_slots = self.env_config.NUM_SHAPE_SLOTS
@@ -7353,53 +7416,47 @@ class GameState:
             return
 
         current_idx = self.demo_selected_shape_idx
-        for _ in range(num_slots):  # Try all slots
+        for _ in range(num_slots):
             current_idx = (current_idx + direction + num_slots) % num_slots
             if (
                 0 <= current_idx < len(self.shapes)
                 and self.shapes[current_idx] is not None
             ):
                 self.demo_selected_shape_idx = current_idx
-                return  # Found a non-empty slot
-        # If loop finishes, it means all slots are empty (or only one shape total)
-        # Keep the current index in this case.
+                return
+        # Keep current index if all slots are empty
 
     def move_target(self, dr: int, dc: int):
-        """Moves the target placement coordinate."""
         if self.game_over or self.freeze_time > 0:
             return
         self.demo_target_row = np.clip(self.demo_target_row + dr, 0, self.grid.rows - 1)
         self.demo_target_col = np.clip(self.demo_target_col + dc, 0, self.grid.cols - 1)
 
     def get_action_for_current_selection(self) -> Optional[int]:
-        """Converts the current demo selection (shape, row, col) into an action index."""
         if self.game_over or self.freeze_time > 0:
             return None
         s_idx = self.demo_selected_shape_idx
         shp = self.shapes[s_idx] if 0 <= s_idx < len(self.shapes) else None
         if shp is None:
-            return None  # No shape in selected slot
+            return None
 
         rr, cc = self.demo_target_row, self.demo_target_col
 
-        # Check if the placement at the target is valid *now*
         if self.grid.can_place(shp, rr, cc):
             locations_per_shape = self.grid.rows * self.grid.cols
             action_index = s_idx * locations_per_shape + (rr * self.grid.cols + cc)
             return action_index
         else:
-            return None  # Invalid placement at target
+            return None
 
     def get_current_selection_info(self) -> Tuple[Optional[Shape], int, int]:
-        """Returns the currently selected shape, target row, and target col."""
         s_idx = self.demo_selected_shape_idx
         shp = self.shapes[s_idx] if 0 <= s_idx < len(self.shapes) else None
         return shp, self.demo_target_row, self.demo_target_col
 
-    # --- END NEW ---
-
 
 File: environment/grid.py
+# File: environment/grid.py
 import numpy as np
 from typing import List, Tuple, Optional
 from .triangle import Triangle
@@ -7414,13 +7471,10 @@ class Grid:
         self.rows = env_config.ROWS
         self.cols = env_config.COLS
         self.triangles: List[List[Triangle]] = []
-        self._create()  # Call the modified create method
+        self._create()
 
-    # --- _create applies adjustment for extra padding ---
     def _create(self) -> None:
-        """Initializes the grid with Triangle objects based on playable columns per row."""
-        # Define the BASE number of desired playable columns for centering
-        cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]  # For ROWS=8, COLS=15
+        cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]
 
         if len(cols_per_row) != self.rows:
             raise ValueError(
@@ -7434,10 +7488,8 @@ class Grid:
         self.triangles = []
         for r in range(self.rows):
             rowt = []
-            # Get the target playable width for this row before adjustment
             base_playable_cols = cols_per_row[r]
 
-            # Calculate initial centering based on base_playable_cols
             if base_playable_cols <= 0:
                 initial_death_cols_left = self.cols
             elif base_playable_cols >= self.cols:
@@ -7446,17 +7498,10 @@ class Grid:
                 initial_death_cols_left = (self.cols - base_playable_cols) // 2
             initial_first_death_col_right = initial_death_cols_left + base_playable_cols
 
-            # --- ADJUSTMENT: Add 1 extra dead cell padding on each side ---
-            # Increase left padding by 1, decrease right boundary by 1
-            # This effectively reduces the playable width by 2 compared to base_playable_cols
             adjusted_death_cols_left = initial_death_cols_left + 1
             adjusted_first_death_col_right = initial_first_death_col_right - 1
-            # --- END ADJUSTMENT ---
 
             for c in range(self.cols):
-                # Use the ADJUSTED boundaries to determine death cells
-                # A cell is dead if it's left of the adjusted start or at/right of the adjusted end.
-                # Ensure right boundary doesn't cross left boundary if base_playable_cols is small
                 is_death_cell = (
                     (c < adjusted_death_cols_left)
                     or (
@@ -7464,66 +7509,56 @@ class Grid:
                         and adjusted_first_death_col_right > adjusted_death_cols_left
                     )
                     or (base_playable_cols <= 2)
-                )  # Mark all dead if base playable was 2 or less after adjustment
+                )
 
                 is_up_cell = (r + c) % 2 == 0
                 tri = Triangle(r, c, is_up=is_up_cell, is_death=is_death_cell)
                 rowt.append(tri)
             self.triangles.append(rowt)
 
-    # --- END MODIFIED ---
-
     def valid(self, r: int, c: int) -> bool:
-        """Check if (r, c) is within grid boundaries."""
         return 0 <= r < self.rows and 0 <= c < self.cols
 
     def can_place(self, shp: Shape, rr: int, cc: int) -> bool:
-        """Checks if a shape can be placed at the target root position (rr, cc)."""
         for dr, dc, up in shp.triangles:
             nr, nc = rr + dr, cc + dc
             if not self.valid(nr, nc):
                 return False
-            # Check bounds before accessing triangles list
             if not (
                 0 <= nr < len(self.triangles) and 0 <= nc < len(self.triangles[nr])
             ):
-                return False  # Should not happen if self.valid passed, but safety check
+                return False
             tri = self.triangles[nr][nc]
-            # Cannot place on death cells or occupied cells or if orientation mismatches
             if tri.is_death or tri.is_occupied or (tri.is_up != up):
                 return False
         return True
 
     def place(self, shp: Shape, rr: int, cc: int) -> None:
-        """Places a shape onto the grid at the target root position."""
         for dr, dc, _ in shp.triangles:
             nr, nc = rr + dr, cc + dc
             if self.valid(nr, nc):
-                # Check bounds before accessing triangles list
                 if not (
                     0 <= nr < len(self.triangles) and 0 <= nc < len(self.triangles[nr])
                 ):
-                    continue  # Skip if out of bounds
+                    continue
                 tri = self.triangles[nr][nc]
-                # Double-check placement logic redundancy (can_place should prevent this)
                 if not tri.is_death and not tri.is_occupied:
                     tri.is_occupied = True
                     tri.color = shp.color
 
-    # --- MODIFIED: clear_filled_rows REMOVES gravity ---
-    def clear_filled_rows(self) -> Tuple[int, int]:
+    # --- MODIFIED: clear_filled_rows returns coords ---
+    def clear_filled_rows(self) -> Tuple[int, int, List[Tuple[int, int]]]:
         """
         Clears fully occupied rows (ignoring death cells) by marking triangles as
         unoccupied. Does NOT apply gravity.
-        Returns: (number of lines cleared, number of triangles in cleared lines).
+        Returns: (lines cleared, triangles cleared, list of (r, c) coords cleared).
         """
         lines_cleared = 0
         triangles_cleared = 0
         rows_to_clear_indices = []
+        cleared_triangles_coords: List[Tuple[int, int]] = []  # Store coords here
 
-        # 1. Identify rows to clear
         for r in range(self.rows):
-            # Check bounds before accessing triangles list
             if not (0 <= r < len(self.triangles)):
                 continue
             rowt = self.triangles[r]
@@ -7534,47 +7569,37 @@ class Grid:
                     num_placeable_triangles_in_row += 1
                     if not t.is_occupied:
                         is_row_full = False
-                        break  # No need to check further in this row
+                        break
 
-            # Only mark for clearing if the row has placeable triangles and all are full
             if is_row_full and num_placeable_triangles_in_row > 0:
                 rows_to_clear_indices.append(r)
                 lines_cleared += 1
 
-        # 2. Clear the triangles in marked rows (set unoccupied)
         for r_idx in rows_to_clear_indices:
-            # Check bounds before accessing triangles list
             if not (0 <= r_idx < len(self.triangles)):
                 continue
             for t in self.triangles[r_idx]:
-                if (
-                    not t.is_death and t.is_occupied
-                ):  # Only reset occupied, non-death cells
+                if not t.is_death and t.is_occupied:
                     triangles_cleared += 1
                     t.is_occupied = False
-                    t.color = None  # Reset color
+                    t.color = None
+                    cleared_triangles_coords.append((r_idx, t.col))  # Add coords
 
-        # --- REMOVED Gravity Logic ---
-        # The grid structure remains unchanged.
-
-        return lines_cleared, triangles_cleared
+        return lines_cleared, triangles_cleared, cleared_triangles_coords
 
     # --- END MODIFIED ---
 
     def count_holes(self) -> int:
-        """Counts empty, non-death cells with an occupied cell somewhere above them."""
         holes = 0
         for c in range(self.cols):
             occupied_above = False
             for r in range(self.rows):
-                # Check bounds before accessing triangles list
                 if not (
                     0 <= r < len(self.triangles) and 0 <= c < len(self.triangles[r])
                 ):
-                    continue  # Skip if out of bounds
+                    continue
                 tri = self.triangles[r][c]
                 if tri.is_death:
-                    # If a death cell is encountered, reset occupied_above for that column segment
                     occupied_above = False
                     continue
 
@@ -7585,23 +7610,17 @@ class Grid:
         return holes
 
     def get_feature_matrix(self) -> np.ndarray:
-        """
-        Returns grid state as a [Channel, Height, Width] numpy array (float32).
-        Channels: 0=Occupied, 1=Is_Up
-        """
         grid_state = np.zeros((2, self.rows, self.cols), dtype=np.float32)
         for r in range(self.rows):
             for c in range(self.cols):
-                # Check bounds before accessing triangles list
                 if not (
                     0 <= r < len(self.triangles) and 0 <= c < len(self.triangles[r])
                 ):
-                    continue  # Skip if out of bounds
+                    continue
                 t = self.triangles[r][c]
-                if not t.is_death:  # Only consider non-death cells for features
+                if not t.is_death:
                     grid_state[0, r, c] = 1.0 if t.is_occupied else 0.0
                     grid_state[1, r, c] = 1.0 if t.is_up else 0.0
-                # else: Death cells remain 0.0 in both channels
         return grid_state
 
 
@@ -7720,12 +7739,11 @@ class StatsAggregator:
         if avg_window <= 0:
             avg_window = 100
         if plot_window <= 0:
-            plot_window = 10000  # Ensure a minimum plot window
+            plot_window = 10000
 
         self.avg_window = avg_window
         self.plot_window = plot_window
 
-        # Data Deques (using plot_window for history needed for plots)
         self.losses: Deque[float] = deque(maxlen=plot_window)
         self.grad_norms: Deque[float] = deque(maxlen=plot_window)
         self.avg_max_qs: Deque[float] = deque(maxlen=plot_window)
@@ -7733,7 +7751,9 @@ class StatsAggregator:
         self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
         self.game_scores: Deque[int] = deque(maxlen=plot_window)
         self.episode_lines_cleared: Deque[int] = deque(maxlen=plot_window)
-        self.sps_values: Deque[float] = deque(maxlen=plot_window)
+        self.sps_values: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Stores calculated SPS
         self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
         self.beta_values: Deque[float] = deque(maxlen=plot_window)
         self.best_rl_score_history: Deque[float] = deque(maxlen=plot_window)
@@ -7741,14 +7761,13 @@ class StatsAggregator:
         self.lr_values: Deque[float] = deque(maxlen=plot_window)
         self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
 
-        # Current State / Best Values
         self.total_episodes = 0
         self.total_lines_cleared = 0
         self.current_epsilon: float = 0.0
         self.current_beta: float = 0.0
         self.current_buffer_size: int = 0
         self.current_global_step: int = 0
-        self.current_sps: float = 0.0
+        self.current_sps: float = 0.0  # Current SPS value
         self.current_lr: float = 0.0
 
         self.best_score: float = -float("inf")
@@ -7776,7 +7795,6 @@ class StatsAggregator:
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Records episode data and updates best values. Returns update info."""
         current_step = (
             global_step if global_step is not None else self.current_global_step
         )
@@ -7813,7 +7831,6 @@ class StatsAggregator:
         return update_info
 
     def record_step(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Records step data and updates best loss. Returns update info."""
         g_step = step_data.get("global_step", self.current_global_step)
         if g_step > self.current_global_step:
             self.current_global_step = g_step
@@ -7845,21 +7862,22 @@ class StatsAggregator:
         if "epsilon" in step_data and step_data["epsilon"] is not None:
             self.current_epsilon = step_data["epsilon"]
             self.epsilon_values.append(self.current_epsilon)
-        if "step_time" in step_data and step_data["step_time"] > 1e-6:
+
+        # --- MODIFIED: Calculate and store SPS ---
+        if "step_time" in step_data and step_data["step_time"] > 1e-9:
             num_steps = step_data.get("num_steps_processed", 1)
             sps = num_steps / step_data["step_time"]
             self.sps_values.append(sps)
-            self.current_sps = sps
+            self.current_sps = sps  # Update current SPS
+        # --- END MODIFIED ---
 
         return update_info
 
     def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
-        """Calculates and returns a dictionary of summary statistics."""
         if current_global_step is None:
             current_global_step = self.current_global_step
 
         def safe_mean(q: Deque, default=0.0) -> float:
-            # Calculate mean over the *averaging* window, not the plot window
             window_data = list(q)[-self.avg_window :]
             return float(np.mean(window_data)) if window_data else default
 
@@ -7870,12 +7888,14 @@ class StatsAggregator:
             "avg_max_q_window": safe_mean(self.avg_max_qs),
             "avg_game_score_window": safe_mean(self.game_scores),
             "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
-            "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
+            "avg_sps_window": safe_mean(
+                self.sps_values, default=self.current_sps
+            ),  # Use current_sps as default
             "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
             "total_episodes": self.total_episodes,
             "beta": self.current_beta,
             "buffer_size": self.current_buffer_size,
-            "steps_per_second": self.current_sps,
+            "steps_per_second": self.current_sps,  # Report current SPS
             "global_step": current_global_step,
             "current_lr": self.current_lr,
             "best_score": self.best_score,
@@ -7893,7 +7913,6 @@ class StatsAggregator:
         return summary
 
     def get_plot_data(self) -> Dict[str, Deque]:
-        """Returns copies of deques (up to plot_window size) for UI plotting."""
         return {
             "episode_scores": self.episode_scores.copy(),
             "episode_lengths": self.episode_lengths.copy(),
@@ -7901,7 +7920,7 @@ class StatsAggregator:
             "avg_max_qs": self.avg_max_qs.copy(),
             "game_scores": self.game_scores.copy(),
             "episode_lines_cleared": self.episode_lines_cleared.copy(),
-            "sps_values": self.sps_values.copy(),
+            "sps_values": self.sps_values.copy(),  # Return the SPS deque
             "buffer_sizes": self.buffer_sizes.copy(),
             "beta_values": self.beta_values.copy(),
             "best_rl_score_history": self.best_rl_score_history.copy(),

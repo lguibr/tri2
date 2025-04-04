@@ -25,6 +25,8 @@ class VisConfig:
     GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
     NUM_ENVS_TO_RENDER = 48
     LINE_CLEAR_FLASH_COLOR = (180, 180, 220)
+    # --- NEW: Color for highlighting cleared triangles ---
+    LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)  # Yellow with alpha
 
 
 # --- Environment ---
@@ -125,11 +127,9 @@ class ModelConfig:
 
 # --- Statistics and Logging ---
 class StatsConfig:
-    STATS_AVG_WINDOW = 100
+    STATS_AVG_WINDOW = 1000
     CONSOLE_LOG_FREQ = 5_000
-    # --- NEW: Plot Data Window ---
-    PLOT_DATA_WINDOW = 10_000  # Max points to store for plotting
-    # --- END NEW ---
+    PLOT_DATA_WINDOW = 100_000
 
 
 # --- TensorBoard Logging ---

@@ -35,7 +35,7 @@ class Trainer:
         self,
         envs: List[GameState],
         agent: DQNAgent,
-        buffer: ReplayBufferBase,  # Initial buffer, might be replaced by CheckpointManager
+        buffer: ReplayBufferBase,
         stats_recorder: StatsRecorderBase,
         env_config: EnvConfig,
         dqn_config: DQNConfig,
@@ -64,7 +64,7 @@ class Trainer:
 
         self.checkpoint_manager = CheckpointManager(
             agent=self.agent,
-            buffer=buffer,  # Pass initial buffer
+            buffer=buffer,
             model_save_path=model_save_path,
             buffer_save_path=buffer_save_path,
             load_checkpoint_path=load_checkpoint_path,
@@ -73,9 +73,7 @@ class Trainer:
             dqn_config=self.dqn_config,
             device=self.device,
         )
-        self.buffer = (
-            self.checkpoint_manager.get_buffer()
-        )  # Get potentially loaded buffer
+        self.buffer = self.checkpoint_manager.get_buffer()
         self.global_step, initial_episode_count = (
             self.checkpoint_manager.get_initial_state()
         )
@@ -89,7 +87,6 @@ class Trainer:
             reward_config=self.reward_config,
             tb_config=self.tb_config,
         )
-        # Sync episode count if collector was reset but checkpoint loaded
         self.experience_collector.episode_count = initial_episode_count
 
         self.last_image_log_step = -self.tb_config.IMAGE_LOG_FREQ
@@ -122,6 +119,9 @@ class Trainer:
 
     def step(self):
         """Performs one full step: collect experience, train, update target net."""
+        # --- MODIFIED: Add timing for SPS calculation ---
+        step_start_time = time.perf_counter()
+
         steps_collected = self.experience_collector.collect(self.global_step)
         self.global_step += steps_collected
 
@@ -131,6 +131,19 @@ class Trainer:
         ):
             if len(self.buffer) >= self.train_config.BATCH_SIZE:
                 self._train_batch()
+
+        step_end_time = time.perf_counter()
+        step_duration = step_end_time - step_start_time
+
+        # Record step time for SPS calculation
+        self.stats_recorder.record_step(
+            {
+                "step_time": step_duration,
+                "num_steps_processed": steps_collected,
+                "global_step": self.global_step,  # Pass current step
+            }
+        )
+        # --- END MODIFIED ---
 
         target_freq = self.dqn_config.TARGET_UPDATE_FREQ
         if target_freq > 0 and self.global_step > 0:
@@ -143,7 +156,6 @@ class Trainer:
         self._maybe_log_image()
 
     def _train_batch(self):
-        """Samples a batch, computes loss, updates agent, and records stats."""
         beta = self._update_beta()
         indices, is_weights_np, batch_tuple = None, None, None
         try:
@@ -195,14 +207,13 @@ class Trainer:
             "grad_norm": grad_norm if grad_norm is not None else 0.0,
             "avg_max_q": self.agent.get_last_avg_max_q(),
             "lr": self._get_current_lr(),
-            "global_step": self.global_step,
+            "global_step": self.global_step,  # Pass current step
         }
         if self.tb_config.LOG_HISTOGRAMS and td_errors is not None:
             train_log_data["batch_td_errors"] = td_errors
         self.stats_recorder.record_step(train_log_data)
 
     def _update_beta(self) -> float:
-        """Updates PER beta and records it."""
         if not self.buffer_config.USE_PER:
             beta = 1.0
         else:
@@ -215,11 +226,11 @@ class Trainer:
             beta = start + fraction * (end - start)
             if hasattr(self.buffer, "set_beta"):
                 self.buffer.set_beta(beta)
+        # Record beta along with the current step
         self.stats_recorder.record_step({"beta": beta, "global_step": self.global_step})
         return beta
 
     def _maybe_log_image(self):
-        """Logs an image of a random environment state periodically."""
         if not self.tb_config.LOG_IMAGES:
             return
         img_freq = self.tb_config.IMAGE_LOG_FREQ
@@ -244,7 +255,6 @@ class Trainer:
                 print(f"Error logging environment image: {e}")
 
     def maybe_save_checkpoint(self, force_save=False):
-        """Saves a checkpoint periodically or if forced."""
         save_freq = self.train_config.CHECKPOINT_SAVE_FREQ
         if save_freq <= 0 and not force_save:
             return
@@ -262,7 +272,6 @@ class Trainer:
             )
 
     def train_loop(self):
-        """Main training loop that runs until total steps are reached."""
         print("[Trainer] Starting training loop...")
         try:
             while self.global_step < TOTAL_TRAINING_STEPS:
@@ -277,7 +286,6 @@ class Trainer:
             self.cleanup(save_final=True)
 
     def cleanup(self, save_final: bool = True):
-        """Cleans up resources, optionally saving a final checkpoint."""
         print("[Trainer] Cleaning up resources...")
         if save_final:
             print("[Trainer] Saving final checkpoint...")
