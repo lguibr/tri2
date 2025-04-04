@@ -1,4 +1,3 @@
-# File: init/rl_components.py
 import sys
 import traceback
 import numpy as np

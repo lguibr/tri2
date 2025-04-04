@@ -1,4 +1,3 @@
-# File: config/core.py
 # --- Core Configuration Classes ---
 import torch
 from typing import Deque, Dict, Any, List, Type, Tuple, Optional
@@ -12,7 +11,8 @@ class VisConfig:
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0
     LEFT_PANEL_WIDTH = SCREEN_WIDTH // 2
-    ENV_SPACING = 6
+    ENV_SPACING = 1
+    ENV_GRID_PADDING = 1  # Padding inside each environment cell
     FPS = 0
     WHITE = (255, 255, 255)
     BLACK = (0, 0, 0)
@@ -23,13 +23,18 @@ class VisConfig:
     YELLOW = (255, 255, 100)
     GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
     NUM_ENVS_TO_RENDER = 48
+    # --- NEW: Added flash color ---
+    LINE_CLEAR_FLASH_COLOR = (180, 180, 220)  # Light purplish-white flash
+    # --- END NEW ---
 
 
 # --- Environment ---
 class EnvConfig:
-    NUM_ENVS = 1  # Number of parallel environments for training
-    ROWS = 6
-    COLS = 10
+    NUM_ENVS = 256
+    # --- MODIFIED DIMENSIONS ---
+    ROWS = 8
+    COLS = 15
+    # --- END MODIFIED ---
 
     # Features per grid cell: Occupied (1/0), Is_Up (1/0)
     GRID_FEATURES_PER_CELL = 2

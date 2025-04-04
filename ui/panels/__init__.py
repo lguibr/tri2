@@ -1,4 +1,3 @@
-# File: ui/panels/__init__.py
 from .left_panel import LeftPanelRenderer
 from .game_area import GameAreaRenderer
 

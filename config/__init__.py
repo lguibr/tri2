@@ -1,4 +1,3 @@
-# File: config/__init__.py
 # Expose core config classes and general constants/paths
 from .core import (
     VisConfig,

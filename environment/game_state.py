@@ -27,6 +27,9 @@ class GameState:
         self.blink_time = 0.0
         self.last_time = time.time()
         self.freeze_time = 0.0
+        # --- NEW: Timer for line clear flash ---
+        self.line_clear_flash_time = 0.0
+        # --- END NEW ---
         self.game_over = False
         self._last_action_valid = True
         self.rewards = RewardConfig
@@ -44,6 +47,9 @@ class GameState:
         self.lines_cleared_this_episode = 0
         self.blink_time = 0.0
         self.freeze_time = 0.0
+        # --- NEW: Reset flash timer ---
+        self.line_clear_flash_time = 0.0
+        # --- END NEW ---
         self.game_over = False
         self._last_action_valid = True
         self.last_time = time.time()
@@ -80,6 +86,13 @@ class GameState:
     def is_frozen(self) -> bool:
         return self.freeze_time > 0
 
+    # --- NEW: Method to check line clear flash status ---
+    def is_line_clearing(self) -> bool:
+        """Returns true if the line clear flash animation should be active."""
+        return self.line_clear_flash_time > 0
+
+    # --- END NEW ---
+
     def decode_act(self, a: int) -> Tuple[int, int, int]:
         locations_per_shape = self.grid.rows * self.grid.cols
         s_idx = a // locations_per_shape
@@ -94,6 +107,9 @@ class GameState:
         self.last_time = now
         self.freeze_time = max(0, self.freeze_time - dt)
         self.blink_time = max(0, self.blink_time - dt)
+        # --- NEW: Update flash timer ---
+        self.line_clear_flash_time = max(0, self.line_clear_flash_time - dt)
+        # --- END NEW ---
 
     def _handle_invalid_placement(self) -> float:
         self._last_action_valid = False
@@ -107,6 +123,7 @@ class GameState:
         #     reward += self.rewards.PENALTY_GAME_OVER
         return reward
 
+    # --- MODIFIED: _handle_valid_placement updates demo_selected_shape_idx ---
     def _handle_valid_placement(
         self, shp: Shape, s_idx: int, rr: int, cc: int
     ) -> float:
@@ -117,6 +134,29 @@ class GameState:
         self.grid.place(shp, rr, cc)
         self.shapes[s_idx] = None  # Remove shape from available slots
         self.game_score += len(shp.triangles)  # Update game score
+
+        # --- Auto-select next available shape for demo mode ---
+        num_slots = self.env_config.NUM_SHAPE_SLOTS
+        if num_slots > 0:
+            next_idx = (s_idx + 1) % num_slots  # Start checking from the next slot
+            found_next = False
+            for _ in range(num_slots):  # Check all slots at most once
+                # Check if the slot index is valid and the shape exists
+                if (
+                    0 <= next_idx < len(self.shapes)
+                    and self.shapes[next_idx] is not None
+                ):
+                    self.demo_selected_shape_idx = next_idx
+                    found_next = True
+                    break
+                next_idx = (next_idx + 1) % num_slots  # Move to the next slot
+
+            # If after checking all slots, none are available (should only happen briefly before refill)
+            if not found_next:
+                self.demo_selected_shape_idx = (
+                    0  # Default to the first slot (or next available after refill)
+                )
+        # --- End auto-select logic ---
 
         # Clear lines and get rewards/score
         lines_cleared, triangles_cleared = self.grid.clear_filled_rows()
@@ -135,6 +175,9 @@ class GameState:
             self.game_score += triangles_cleared * 2
             self.blink_time = 0.5
             self.freeze_time = 0.5
+            # --- NEW: Trigger flash effect ---
+            self.line_clear_flash_time = 0.3  # Duration of flash in seconds
+            # --- END NEW ---
 
         # Penalty for creating holes (can be tuned)
         num_holes = self.grid.count_holes()
@@ -143,6 +186,14 @@ class GameState:
         # Refill shapes if all slots are empty
         if all(x is None for x in self.shapes):
             self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
+            # --- If auto-select failed earlier, re-select now that shapes are refilled ---
+            if not found_next:
+                # Try to find the first available shape again, default to 0 if all fail somehow
+                first_available = next(
+                    (i for i, s in enumerate(self.shapes) if s is not None), 0
+                )
+                self.demo_selected_shape_idx = first_available
+            # --- End re-select after refill ---
 
         # Check if game is over after placement (no more valid moves)
         # This check is crucial here
@@ -152,6 +203,8 @@ class GameState:
             reward += self.rewards.PENALTY_GAME_OVER  # Apply game over penalty
 
         return reward
+
+    # --- END MODIFIED ---
 
     def step(self, a: int) -> Tuple[float, bool]:
         """Performs one game step based on the chosen action."""
@@ -263,9 +316,14 @@ class GameState:
         current_idx = self.demo_selected_shape_idx
         for _ in range(num_slots):  # Try all slots
             current_idx = (current_idx + direction + num_slots) % num_slots
-            if self.shapes[current_idx] is not None:
+            if (
+                0 <= current_idx < len(self.shapes)
+                and self.shapes[current_idx] is not None
+            ):
                 self.demo_selected_shape_idx = current_idx
                 return  # Found a non-empty slot
+        # If loop finishes, it means all slots are empty (or only one shape total)
+        # Keep the current index in this case.
 
     def move_target(self, dr: int, dc: int):
         """Moves the target placement coordinate."""
