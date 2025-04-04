@@ -26,13 +26,11 @@ class GameState:
         self.last_time = time.time()
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
-        # --- NEW: State for highlighting cleared triangles ---
         self.line_clear_highlight_time: float = 0.0
         self.cleared_triangles_coords: List[Tuple[int, int]] = []
-        # --- END NEW ---
         self.game_over = False
         self._last_action_valid = True
-        self.rewards = RewardConfig
+        self.rewards = RewardConfig()  # Instantiate RewardConfig
         self.demo_selected_shape_idx: int = 0
         self.demo_target_row: int = self.env_config.ROWS // 2
         self.demo_target_col: int = self.env_config.COLS // 2
@@ -46,10 +44,8 @@ class GameState:
         self.blink_time = 0.0
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
-        # --- NEW: Reset highlight state ---
         self.line_clear_highlight_time = 0.0
         self.cleared_triangles_coords = []
-        # --- END NEW ---
         self.game_over = False
         self._last_action_valid = True
         self.last_time = time.time()
@@ -84,19 +80,11 @@ class GameState:
     def is_line_clearing(self) -> bool:
         return self.line_clear_flash_time > 0
 
-    # --- NEW: Method to check highlight status ---
     def is_highlighting_cleared(self) -> bool:
-        """Returns true if cleared triangles should be highlighted."""
         return self.line_clear_highlight_time > 0
 
-    # --- END NEW ---
-
-    # --- NEW: Method to get coords for highlighting ---
     def get_cleared_triangle_coords(self) -> List[Tuple[int, int]]:
-        """Returns the coordinates of triangles currently being highlighted."""
         return self.cleared_triangles_coords
-
-    # --- END NEW ---
 
     def decode_act(self, a: int) -> Tuple[int, int, int]:
         locations_per_shape = self.grid.rows * self.grid.cols
@@ -113,11 +101,9 @@ class GameState:
         self.freeze_time = max(0, self.freeze_time - dt)
         self.blink_time = max(0, self.blink_time - dt)
         self.line_clear_flash_time = max(0, self.line_clear_flash_time - dt)
-        # --- NEW: Update highlight timer and clear coords if expired ---
         self.line_clear_highlight_time = max(0, self.line_clear_highlight_time - dt)
         if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
             self.cleared_triangles_coords = []
-        # --- END NEW ---
 
     def _handle_invalid_placement(self) -> float:
         self._last_action_valid = False
@@ -128,7 +114,9 @@ class GameState:
         self, shp: Shape, s_idx: int, rr: int, cc: int
     ) -> float:
         self._last_action_valid = True
-        reward = 0.0
+        # --- MODIFIED: Start with survival reward ---
+        reward = self.rewards.REWARD_ALIVE_STEP
+        # --- END MODIFIED ---
 
         self.grid.place(shp, rr, cc)
         self.shapes[s_idx] = None
@@ -150,9 +138,7 @@ class GameState:
             if not found_next:
                 self.demo_selected_shape_idx = 0
 
-        # --- MODIFIED: Capture cleared coords ---
         lines_cleared, triangles_cleared, cleared_coords = self.grid.clear_filled_rows()
-        # --- END MODIFIED ---
         self.lines_cleared_this_episode += lines_cleared
 
         if lines_cleared == 1:
@@ -167,10 +153,8 @@ class GameState:
             self.blink_time = 0.5
             self.freeze_time = 0.5
             self.line_clear_flash_time = 0.3
-            # --- NEW: Trigger highlight effect ---
-            self.line_clear_highlight_time = 0.5  # Longer duration for highlight
+            self.line_clear_highlight_time = 0.5
             self.cleared_triangles_coords = cleared_coords
-            # --- END NEW ---
 
         num_holes = self.grid.count_holes()
         reward += num_holes * self.rewards.PENALTY_HOLE_PER_HOLE

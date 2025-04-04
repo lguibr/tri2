@@ -3269,6 +3269,7 @@ import pygame
 import time
 from typing import Dict, Any, Tuple
 from config import VisConfig, StatsConfig
+import numpy as np
 
 
 class NotificationRenderer:
@@ -3279,6 +3280,7 @@ class NotificationRenderer:
         self.fonts = fonts
 
     def _format_steps_ago(self, current_step: int, best_step: int) -> str:
+        """Formats the difference in steps into a readable string."""
         if best_step <= 0 or current_step <= best_step:
             return "Now"
         diff = current_step - best_step
@@ -3300,6 +3302,7 @@ class NotificationRenderer:
         val_format: str,
         current_step: int,
     ) -> pygame.Rect:
+        """Renders a single line within the notification area."""
         label_font = self.fonts.get("notification_label")
         value_font = self.fonts.get("notification")
         if not label_font or not value_font:
@@ -3315,18 +3318,43 @@ class NotificationRenderer:
         current_x = label_rect.right + 4
 
         current_val_str = "N/A"
-        # --- MODIFIED: Check for infinity explicitly ---
-        if isinstance(current_val, (int, float)) and abs(current_val) != float("inf"):
-            current_val_str = val_format.format(current_val)
+        # --- Convert to float *before* checking ---
+        val_as_float: Optional[float] = None
+        if isinstance(
+            current_val, (int, float, np.number)
+        ):  # Check against np.number too
+            try:
+                val_as_float = float(current_val)
+            except (ValueError, TypeError):
+                val_as_float = None  # Conversion failed
+
+        # --- Use the converted float for checks and formatting ---
+        if val_as_float is not None and np.isfinite(val_as_float):
+            try:
+                current_val_str = val_format.format(val_as_float)
+            except (ValueError, TypeError) as fmt_err:
+                current_val_str = "ErrFmt"
+
         val_surf = value_font.render(current_val_str, True, value_color)
         val_rect = val_surf.get_rect(topleft=(current_x, y_pos))
         self.screen.blit(val_surf, val_rect)
         current_x = val_rect.right + 4
 
         prev_val_str = "(N/A)"
-        if isinstance(prev_val, (int, float)) and abs(prev_val) != float("inf"):
-            prev_val_str = f"({val_format.format(prev_val)})"
-        # --- END MODIFIED ---
+        # --- Convert prev_val to float before checking ---
+        prev_val_as_float: Optional[float] = None
+        if isinstance(prev_val, (int, float, np.number)):
+            try:
+                prev_val_as_float = float(prev_val)
+            except (ValueError, TypeError):
+                prev_val_as_float = None
+
+        if prev_val_as_float is not None and np.isfinite(prev_val_as_float):
+            try:
+                prev_val_str = f"({val_format.format(prev_val_as_float)})"
+            except (ValueError, TypeError):
+                prev_val_str = "(ErrFmt)"
+
         prev_surf = label_font.render(prev_val_str, True, prev_color)
         prev_rect = prev_surf.get_rect(topleft=(current_x, y_pos + 1))
         self.screen.blit(prev_surf, prev_rect)
@@ -3343,7 +3371,6 @@ class NotificationRenderer:
         elif available_width > 0:
             self.screen.blit(time_surf, time_rect)
 
-        # Ensure the union rect doesn't extend beyond the area_rect horizontally
         union_rect = label_rect.union(val_rect).union(prev_rect).union(time_rect)
         union_rect.width = min(union_rect.width, area_rect.width - 2 * padding)
         return union_rect
@@ -3351,6 +3378,7 @@ class NotificationRenderer:
     def render(
         self, area_rect: pygame.Rect, stats_summary: Dict[str, Any]
     ) -> Dict[str, pygame.Rect]:
+        """Renders the notification content."""
         stat_rects: Dict[str, pygame.Rect] = {}
         pygame.draw.rect(self.screen, (45, 45, 45), area_rect, border_radius=3)
         pygame.draw.rect(self.screen, VisConfig.LIGHTG, area_rect, 1, border_radius=3)
@@ -3365,7 +3393,7 @@ class NotificationRenderer:
         current_step = stats_summary.get("global_step", 0)
         y = area_rect.top + padding
 
-        # --- Pass correct keys from summary ---
+        # --- Pass values from summary, _render_line handles conversion/check ---
         rect_rl = self._render_line(
             area_rect,
             y,
@@ -3403,7 +3431,6 @@ class NotificationRenderer:
             current_step,
         )
         stat_rects["Best Loss Info"] = rect_loss.clip(area_rect)
-        # --- End passing correct keys ---
 
         return stat_rects
 
@@ -3815,8 +3842,7 @@ class VisConfig:
     GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
     NUM_ENVS_TO_RENDER = 48
     LINE_CLEAR_FLASH_COLOR = (180, 180, 220)
-    # --- NEW: Color for highlighting cleared triangles ---
-    LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)  # Yellow with alpha
+    LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)
 
 
 # --- Environment ---
@@ -3824,7 +3850,7 @@ class EnvConfig:
     NUM_ENVS = 256
     ROWS = 8
     COLS = 15
-    GRID_FEATURES_PER_CELL = 2
+    GRID_FEATURES_PER_CELL = 2  # Occupied, Is_Up
     SHAPE_FEATURES_PER_SHAPE = 5
     NUM_SHAPE_SLOTS = 3
 
@@ -3843,14 +3869,15 @@ class EnvConfig:
 
 # --- Reward Shaping (RL Reward) ---
 class RewardConfig:
-    REWARD_PLACE_PER_TRI = 0.0
+    REWARD_PLACE_PER_TRI = 0.0  # Base reward for placing a piece (can be 0)
     REWARD_CLEAR_1 = 1.0
     REWARD_CLEAR_2 = 3.0
     REWARD_CLEAR_3PLUS = 6.0
     PENALTY_INVALID_MOVE = -0.1
     PENALTY_HOLE_PER_HOLE = -0.05
     PENALTY_GAME_OVER = -1.0
-    REWARD_ALIVE_STEP = 0.0
+    # --- MODIFIED: Add small survival reward ---
+    REWARD_ALIVE_STEP = 0.001  # Small positive reward for making a valid move
 
 
 # --- DQN Algorithm ---
@@ -3917,9 +3944,9 @@ class ModelConfig:
 
 # --- Statistics and Logging ---
 class StatsConfig:
-    STATS_AVG_WINDOW = 100
+    STATS_AVG_WINDOW = 1000
     CONSOLE_LOG_FREQ = 5_000
-    PLOT_DATA_WINDOW = 10_000
+    PLOT_DATA_WINDOW = 100_000
 
 
 # --- TensorBoard Logging ---
@@ -7177,13 +7204,11 @@ class GameState:
         self.last_time = time.time()
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
-        # --- NEW: State for highlighting cleared triangles ---
         self.line_clear_highlight_time: float = 0.0
         self.cleared_triangles_coords: List[Tuple[int, int]] = []
-        # --- END NEW ---
         self.game_over = False
         self._last_action_valid = True
-        self.rewards = RewardConfig
+        self.rewards = RewardConfig()  # Instantiate RewardConfig
         self.demo_selected_shape_idx: int = 0
         self.demo_target_row: int = self.env_config.ROWS // 2
         self.demo_target_col: int = self.env_config.COLS // 2
@@ -7197,10 +7222,8 @@ class GameState:
         self.blink_time = 0.0
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
-        # --- NEW: Reset highlight state ---
         self.line_clear_highlight_time = 0.0
         self.cleared_triangles_coords = []
-        # --- END NEW ---
         self.game_over = False
         self._last_action_valid = True
         self.last_time = time.time()
@@ -7235,19 +7258,11 @@ class GameState:
     def is_line_clearing(self) -> bool:
         return self.line_clear_flash_time > 0
 
-    # --- NEW: Method to check highlight status ---
     def is_highlighting_cleared(self) -> bool:
-        """Returns true if cleared triangles should be highlighted."""
         return self.line_clear_highlight_time > 0
 
-    # --- END NEW ---
-
-    # --- NEW: Method to get coords for highlighting ---
     def get_cleared_triangle_coords(self) -> List[Tuple[int, int]]:
-        """Returns the coordinates of triangles currently being highlighted."""
         return self.cleared_triangles_coords
-
-    # --- END NEW ---
 
     def decode_act(self, a: int) -> Tuple[int, int, int]:
         locations_per_shape = self.grid.rows * self.grid.cols
@@ -7264,11 +7279,9 @@ class GameState:
         self.freeze_time = max(0, self.freeze_time - dt)
         self.blink_time = max(0, self.blink_time - dt)
         self.line_clear_flash_time = max(0, self.line_clear_flash_time - dt)
-        # --- NEW: Update highlight timer and clear coords if expired ---
         self.line_clear_highlight_time = max(0, self.line_clear_highlight_time - dt)
         if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
             self.cleared_triangles_coords = []
-        # --- END NEW ---
 
     def _handle_invalid_placement(self) -> float:
         self._last_action_valid = False
@@ -7279,7 +7292,9 @@ class GameState:
         self, shp: Shape, s_idx: int, rr: int, cc: int
     ) -> float:
         self._last_action_valid = True
-        reward = 0.0
+        # --- MODIFIED: Start with survival reward ---
+        reward = self.rewards.REWARD_ALIVE_STEP
+        # --- END MODIFIED ---
 
         self.grid.place(shp, rr, cc)
         self.shapes[s_idx] = None
@@ -7301,9 +7316,7 @@ class GameState:
             if not found_next:
                 self.demo_selected_shape_idx = 0
 
-        # --- MODIFIED: Capture cleared coords ---
         lines_cleared, triangles_cleared, cleared_coords = self.grid.clear_filled_rows()
-        # --- END MODIFIED ---
         self.lines_cleared_this_episode += lines_cleared
 
         if lines_cleared == 1:
@@ -7318,10 +7331,8 @@ class GameState:
             self.blink_time = 0.5
             self.freeze_time = 0.5
             self.line_clear_flash_time = 0.3
-            # --- NEW: Trigger highlight effect ---
-            self.line_clear_highlight_time = 0.5  # Longer duration for highlight
+            self.line_clear_highlight_time = 0.5
             self.cleared_triangles_coords = cleared_coords
-            # --- END NEW ---
 
         num_holes = self.grid.count_holes()
         reward += num_holes * self.rewards.PENALTY_HOLE_PER_HOLE

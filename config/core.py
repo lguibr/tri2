@@ -25,8 +25,7 @@ class VisConfig:
     GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
     NUM_ENVS_TO_RENDER = 48
     LINE_CLEAR_FLASH_COLOR = (180, 180, 220)
-    # --- NEW: Color for highlighting cleared triangles ---
-    LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)  # Yellow with alpha
+    LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)
 
 
 # --- Environment ---
@@ -34,7 +33,7 @@ class EnvConfig:
     NUM_ENVS = 256
     ROWS = 8
     COLS = 15
-    GRID_FEATURES_PER_CELL = 2
+    GRID_FEATURES_PER_CELL = 2  # Occupied, Is_Up
     SHAPE_FEATURES_PER_SHAPE = 5
     NUM_SHAPE_SLOTS = 3
 
@@ -53,14 +52,15 @@ class EnvConfig:
 
 # --- Reward Shaping (RL Reward) ---
 class RewardConfig:
-    REWARD_PLACE_PER_TRI = 0.0
+    REWARD_PLACE_PER_TRI = 0.0  # Base reward for placing a piece (can be 0)
     REWARD_CLEAR_1 = 1.0
     REWARD_CLEAR_2 = 3.0
     REWARD_CLEAR_3PLUS = 6.0
     PENALTY_INVALID_MOVE = -0.1
     PENALTY_HOLE_PER_HOLE = -0.05
     PENALTY_GAME_OVER = -1.0
-    REWARD_ALIVE_STEP = 0.0
+    # --- MODIFIED: Add small survival reward ---
+    REWARD_ALIVE_STEP = 0.001  # Small positive reward for making a valid move
 
 
 # --- DQN Algorithm ---
