@@ -87,9 +87,7 @@ class DQNConfig:
         True  # Use Noisy Linear layers for exploration (instead of epsilon-greedy)
     )
     # --- Distributional (C51) DQN Settings ---
-    USE_DISTRIBUTIONAL = (
-        False  # Set to True to use C51 (experimental, requires more tuning)
-    )
+    USE_DISTRIBUTIONAL = True
     V_MIN = -10.0  # Minimum value for distributional support
     V_MAX = 10.0  # Maximum value for distributional support
     NUM_ATOMS = 51  # Number of atoms in the distribution

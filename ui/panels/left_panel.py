@@ -46,7 +46,7 @@ class LeftPanelRenderer:
         self.stat_rects: Dict[str, pygame.Rect] = {}  # Rects for tooltip hit detection
 
     def _init_fonts(self):
-        """Loads necessary fonts, attempting to load DejaVuSans for notifications."""
+        """Loads necessary fonts using system defaults."""
         fonts = {}
         default_font_size = 24
         status_font_size = 28
@@ -55,56 +55,38 @@ class LeftPanelRenderer:
         notification_size = 19
         notification_label_size = 16
 
-        # Try loading DejaVuSans for better unicode/symbol support if needed later
-        # For now, SysFont is generally sufficient. Keep fallback logic.
-        notification_font_path = os.path.join("fonts", "DejaVuSans.ttf")
-        try:
-            # Attempt loading specific font first
-            fonts["notification"] = pygame.font.Font(
-                notification_font_path, notification_size
-            )
-            # print(f"Loaded notification font: {notification_font_path}") # Optional Log
-        except (pygame.error, FileNotFoundError) as e:
-            # print(f"Warning: Could not load '{notification_font_path}': {e}. Falling back...") # Optional Log
+        # Use SysFont for all, with a final fallback to pygame default font
+        font_configs = {
+            "ui": default_font_size,
+            "status": status_font_size,
+            "logdir": logdir_font_size,
+            "plot_placeholder": plot_placeholder_size,
+            "notification": notification_size,
+            "notification_label": notification_label_size,
+        }
+
+        for key, size in font_configs.items():
             try:
-                fonts["notification"] = pygame.font.SysFont(None, notification_size)
-            except Exception:
-                # print("Warning: SysFont fallback failed. Using default font.") # Optional Log
-                fonts["notification"] = pygame.font.Font(None, notification_size)
-
-        try:
-            fonts["ui"] = pygame.font.SysFont(None, default_font_size)
-            fonts["status"] = pygame.font.SysFont(None, status_font_size)
-            fonts["logdir"] = pygame.font.SysFont(None, logdir_font_size)
-            fonts["plot_placeholder"] = pygame.font.SysFont(None, plot_placeholder_size)
-            fonts["notification_label"] = pygame.font.SysFont(
-                None, notification_label_size
-            )
-        except Exception as e:
-            print(f"Warning: SysFont error loading other fonts: {e}. Using default.")
-            fonts["ui"] = pygame.font.Font(None, default_font_size)
-            fonts["status"] = pygame.font.Font(None, status_font_size)
-            fonts["logdir"] = pygame.font.Font(None, logdir_font_size)
-            fonts["plot_placeholder"] = pygame.font.Font(None, plot_placeholder_size)
-            # Fallback for notification_label if SysFont failed
-            fonts["notification_label"] = fonts.get(
-                "notification", pygame.font.Font(None, notification_label_size)
-            )
-
-        # Final check for missing fonts
-        for key, size in [
-            ("ui", default_font_size),
-            ("status", status_font_size),
-            ("logdir", logdir_font_size),
-            ("plot_placeholder", plot_placeholder_size),
-            ("notification", notification_size),
-            ("notification_label", notification_label_size),
-        ]:
-            if key not in fonts:
+                fonts[key] = pygame.font.SysFont(None, size)
+            except Exception as e_sysfont:
                 print(
-                    f"Warning: Font '{key}' completely failed to load. Using pygame default."
+                    f"Warning: SysFont error for '{key}': {e_sysfont}. Using default."
                 )
-                fonts[key] = pygame.font.Font(None, size)
+                try:
+                    fonts[key] = pygame.font.Font(None, size)
+                except Exception as e_default:
+                    print(
+                        f"CRITICAL WARNING: Default font failed for '{key}': {e_default}. UI may be broken."
+                    )
+                    # As a last resort, create a dummy font object? Or let it crash?
+                    # For now, let's assign None and handle potential errors later.
+                    fonts[key] = None
+
+        # Check for None fonts (critical failure)
+        for key, font_obj in fonts.items():
+            if font_obj is None:
+                print(f"ERROR: Font '{key}' failed to load entirely.")
+
         return fonts
 
     def render(
@@ -204,7 +186,7 @@ class LeftPanelRenderer:
             # Calculate notification area position (to the right of buttons)
             notification_x = demo_btn_rect.right + 15
             notification_w = panel_width - notification_x - 10
-            if notification_w > 50:
+            if notification_w > 50 and self.fonts.get("notification"):
                 line_h = self.fonts["notification"].get_linesize()
                 notification_h = line_h * 3 + 12  # Height for 3 lines of notifications
                 notification_rect = pygame.Rect(
@@ -220,24 +202,39 @@ class LeftPanelRenderer:
         elif app_state != "MainMenu":
             status_text = f"Status: {app_state}"  # e.g., Initializing
 
-        status_surf = self.fonts["status"].render(status_text, True, VisConfig.YELLOW)
-        # Position status text below buttons if they exist, otherwise at the top
-        status_rect_top = next_y if app_state == "MainMenu" else y_start
-        status_rect = status_surf.get_rect(topleft=(10, status_rect_top))
-        self.screen.blit(status_surf, status_rect)
-        if app_state == "MainMenu":  # Only add tooltip for status in main menu
-            self.stat_rects["Status"] = status_rect
+        status_font = self.fonts.get("status")
+        if status_font:
+            status_surf = status_font.render(status_text, True, VisConfig.YELLOW)
+            # Position status text below buttons if they exist, otherwise at the top
+            status_rect_top = next_y if app_state == "MainMenu" else y_start
+            status_rect = status_surf.get_rect(topleft=(10, status_rect_top))
+            self.screen.blit(status_surf, status_rect)
+            if app_state == "MainMenu":  # Only add tooltip for status in main menu
+                self.stat_rects["Status"] = status_rect
+            next_y = status_rect.bottom + 5  # Update next_y based on status text bottom
+        else:
+            next_y += 20  # Estimate space if font failed
 
-        # Determine the starting Y for the *next* block (below status and potentially buttons)
-        final_next_y = status_rect.bottom + 5
+        # Determine the starting Y for the *next* block
+        final_next_y = next_y
 
         return notification_rect, final_next_y
 
     def _draw_button(self, rect: pygame.Rect, text: str, color: Tuple[int, int, int]):
         """Helper to draw a single button."""
         pygame.draw.rect(self.screen, color, rect, border_radius=5)
-        lbl_surf = self.fonts["ui"].render(text, True, VisConfig.WHITE)
-        self.screen.blit(lbl_surf, lbl_surf.get_rect(center=rect.center))
+        ui_font = self.fonts.get("ui")
+        if ui_font:
+            lbl_surf = ui_font.render(text, True, VisConfig.WHITE)
+            self.screen.blit(lbl_surf, lbl_surf.get_rect(center=rect.center))
+        else:
+            # Draw placeholder if font failed
+            pygame.draw.line(
+                self.screen, VisConfig.RED, rect.topleft, rect.bottomright, 2
+            )
+            pygame.draw.line(
+                self.screen, VisConfig.RED, rect.topright, rect.bottomleft, 2
+            )
 
     def _format_steps_ago(self, current_step: int, best_step: int) -> str:
         """Formats the difference in steps into a readable string (k steps, M steps)."""
@@ -258,9 +255,19 @@ class LeftPanelRenderer:
         self.stat_rects["Notification Area"] = area_rect  # Tooltip for the whole area
 
         padding = 5
-        line_height = self.fonts["notification"].get_linesize()
-        label_font = self.fonts["notification_label"]
-        value_font = self.fonts["notification"]
+        label_font = self.fonts.get("notification_label")
+        value_font = self.fonts.get("notification")
+
+        # Check if fonts are loaded
+        if not label_font or not value_font:
+            # Optionally draw an error message inside the area
+            err_font = self.fonts.get("ui")  # Try using ui font for error
+            if err_font:
+                err_surf = err_font.render("Font Error", True, VisConfig.RED)
+                self.screen.blit(err_surf, err_surf.get_rect(center=area_rect.center))
+            return  # Cannot render notifications without fonts
+
+        line_height = value_font.get_linesize()
         label_color = VisConfig.LIGHTG
         value_color = VisConfig.WHITE
         prev_color = VisConfig.GRAY
@@ -272,9 +279,6 @@ class LeftPanelRenderer:
         def render_line(
             y_pos, label, current_val, prev_val, best_step, val_format, tooltip_key
         ):
-            if not label_font or not value_font:
-                return
-
             # Label
             label_surf = label_font.render(label, True, label_color)
             label_rect = label_surf.get_rect(topleft=(area_rect.left + padding, y_pos))
@@ -359,7 +363,11 @@ class LeftPanelRenderer:
         self, y_start: int, stats: Dict[str, Any], capacity: int, panel_width: int
     ) -> int:
         """Renders the main block of statistics text."""
-        line_height = self.fonts["ui"].get_linesize()
+        ui_font = self.fonts.get("ui")
+        if not ui_font:
+            return y_start + 100  # Estimate space if font failed
+
+        line_height = ui_font.get_linesize()
         buffer_size = stats.get("buffer_size", 0)
         buffer_perc = (buffer_size / max(1, capacity) * 100) if capacity > 0 else 0.0
         global_step = stats.get("global_step", 0)
@@ -393,14 +401,12 @@ class LeftPanelRenderer:
             current_y = y_start + idx * line_height
             try:
                 # Render Key
-                key_surf = self.fonts["ui"].render(f"{key}:", True, VisConfig.LIGHTG)
+                key_surf = ui_font.render(f"{key}:", True, VisConfig.LIGHTG)
                 key_rect = key_surf.get_rect(topleft=(x_pos_key, current_y))
                 self.screen.blit(key_surf, key_rect)
 
                 # Render Value
-                value_surf = self.fonts["ui"].render(
-                    f"{value_str}", True, VisConfig.WHITE
-                )
+                value_surf = ui_font.render(f"{value_str}", True, VisConfig.WHITE)
                 value_rect = value_surf.get_rect(
                     topleft=(key_rect.right + x_pos_val_offset, current_y)
                 )
@@ -436,6 +442,11 @@ class LeftPanelRenderer:
         self, y_start: int, log_dir: Optional[str], panel_width: int
     ) -> int:
         """Renders the TensorBoard status line and log directory."""
+        ui_font = self.fonts.get("ui")
+        logdir_font = self.fonts.get("logdir")
+        if not ui_font or not logdir_font:
+            return y_start + 30  # Estimate space if fonts failed
+
         tb_active = (
             TensorBoardConfig.LOG_HISTOGRAMS
             or TensorBoardConfig.LOG_IMAGES
@@ -444,7 +455,7 @@ class LeftPanelRenderer:
         tb_color = VisConfig.GOOGLE_COLORS[0] if tb_active else VisConfig.GRAY
         tb_text = f"TensorBoard: {'Logging Active' if tb_active else 'Logging Minimal'}"
 
-        tb_surf = self.fonts["ui"].render(tb_text, True, tb_color)
+        tb_surf = ui_font.render(tb_text, True, tb_color)
         tb_rect = tb_surf.get_rect(topleft=(10, y_start))
         self.screen.blit(tb_surf, tb_rect)
         self.stat_rects["TensorBoard Status"] = tb_rect  # Initial rect for tooltip
@@ -454,9 +465,7 @@ class LeftPanelRenderer:
         if log_dir:
             try:
                 # Attempt to shorten log directory path for display
-                panel_char_width = max(
-                    10, panel_width // self.fonts["logdir"].size("A")[0]
-                )
+                panel_char_width = max(10, panel_width // logdir_font.size("A")[0])
                 try:
                     rel_log_dir = os.path.relpath(log_dir)
                 except ValueError:  # Handle different drives on Windows
@@ -479,7 +488,7 @@ class LeftPanelRenderer:
             except Exception:  # Fallback on any path manipulation error
                 rel_log_dir = os.path.basename(log_dir)
 
-            dir_surf = self.fonts["logdir"].render(
+            dir_surf = logdir_font.render(
                 f"Log Dir: {rel_log_dir}", True, VisConfig.LIGHTG
             )
             dir_rect = dir_surf.get_rect(topleft=(10, tb_rect.bottom + 2))
@@ -540,23 +549,41 @@ class LeftPanelRenderer:
             elif not plot_data or not any(plot_data.values()):
                 placeholder_text = "No plot data yet..."
 
-            placeholder_surf = self.fonts["plot_placeholder"].render(
-                placeholder_text, True, VisConfig.GRAY
-            )
-            placeholder_rect = placeholder_surf.get_rect(center=plot_area_rect.center)
+            placeholder_font = self.fonts.get("plot_placeholder")
+            if placeholder_font:
+                placeholder_surf = placeholder_font.render(
+                    placeholder_text, True, VisConfig.GRAY
+                )
+                placeholder_rect = placeholder_surf.get_rect(
+                    center=plot_area_rect.center
+                )
 
-            # Clip placeholder text rendering to fit within the plot area
-            blit_pos = (
-                max(plot_area_rect.left, placeholder_rect.left),
-                max(plot_area_rect.top, placeholder_rect.top),
-            )
-            clip_area_rect = plot_area_rect.clip(placeholder_rect)
-            blit_area = clip_area_rect.move(
-                -placeholder_rect.left, -placeholder_rect.top
-            )
+                # Clip placeholder text rendering to fit within the plot area
+                blit_pos = (
+                    max(plot_area_rect.left, placeholder_rect.left),
+                    max(plot_area_rect.top, placeholder_rect.top),
+                )
+                clip_area_rect = plot_area_rect.clip(placeholder_rect)
+                blit_area = clip_area_rect.move(
+                    -placeholder_rect.left, -placeholder_rect.top
+                )
 
-            if blit_area.width > 0 and blit_area.height > 0:
-                self.screen.blit(placeholder_surf, blit_pos, area=blit_area)
+                if blit_area.width > 0 and blit_area.height > 0:
+                    self.screen.blit(placeholder_surf, blit_pos, area=blit_area)
+            else:
+                # Draw simple cross if font failed
+                pygame.draw.line(
+                    self.screen,
+                    VisConfig.GRAY,
+                    plot_area_rect.topleft,
+                    plot_area_rect.bottomright,
+                )
+                pygame.draw.line(
+                    self.screen,
+                    VisConfig.GRAY,
+                    plot_area_rect.topright,
+                    plot_area_rect.bottomleft,
+                )
 
     def get_stat_rects(self) -> Dict[str, pygame.Rect]:
         """Returns the dictionary of rects for tooltip handling."""
