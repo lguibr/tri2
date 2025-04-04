@@ -1,5 +1,5 @@
 # File: agent/replay_buffer/nstep_buffer.py
-# (No structural changes, cleanup comments)
+# File: agent/replay_buffer/nstep_buffer.py
 from collections import deque
 import numpy as np
 from typing import Deque, Tuple, Optional, Any, Dict, List
@@ -9,19 +9,16 @@ from utils.helpers import save_object, load_object
 
 
 class NStepBufferWrapper(ReplayBufferBase):
-    """
-    Wraps another buffer to implement N-step returns.
-    Calculates N-step transitions and pushes them to the wrapped buffer.
-    """
+    """Wraps another buffer to implement N-step returns."""
 
     def __init__(self, wrapped_buffer: ReplayBufferBase, n_step: int, gamma: float):
-        super().__init__(wrapped_buffer.capacity)  # Capacity managed by wrapped buffer
+        super().__init__(wrapped_buffer.capacity)
         if n_step <= 0:
             raise ValueError("N-step must be positive")
         self.wrapped_buffer = wrapped_buffer
         self.n_step = n_step
         self.gamma = gamma
-        # Temporary deque for raw (s, a, r, ns, d) tuples
+        # Deque stores (s, a, r, ns, d) tuples
         self.n_step_deque: Deque[
             Tuple[StateType, ActionType, float, StateType, bool]
         ] = deque(maxlen=n_step)
@@ -36,44 +33,27 @@ class NStepBufferWrapper(ReplayBufferBase):
         n_step_reward = 0.0
         discount_accum = 1.0
         effective_n = len(current_deque_list)
-
         state_0, action_0 = current_deque_list[0][0], current_deque_list[0][1]
 
         for i in range(effective_n):
             s, a, r, ns, d = current_deque_list[i]
             n_step_reward += discount_accum * r
-
-            if d:  # Episode terminated within these N steps
-                n_step_next_state = ns  # Terminal state
-                n_step_done = True
-                n_step_discount = self.gamma ** (
-                    i + 1
-                )  # Discount for Q(s_terminal) is effectively 0 later, but store factor
+            if d:  # Episode terminated within N steps
                 return Transition(
-                    state=state_0,
-                    action=action_0,
-                    reward=n_step_reward,
-                    next_state=n_step_next_state,
-                    done=n_step_done,
-                    n_step_discount=n_step_discount,
+                    state_0, action_0, n_step_reward, ns, True, self.gamma ** (i + 1)
                 )
-
             discount_accum *= self.gamma
 
         # Loop completed without terminal state
         n_step_next_state = current_deque_list[-1][3]  # next_state from Nth transition
         n_step_done = current_deque_list[-1][4]  # done flag from Nth transition
-        n_step_discount = (
-            self.gamma**effective_n
-        )  # Discount factor for Q(s_N) is gamma^N
-
         return Transition(
-            state=state_0,
-            action=action_0,
-            reward=n_step_reward,
-            next_state=n_step_next_state,
-            done=n_step_done,
-            n_step_discount=n_step_discount,
+            state_0,
+            action_0,
+            n_step_reward,
+            n_step_next_state,
+            n_step_done,
+            self.gamma**effective_n,
         )
 
     def push(
@@ -85,49 +65,32 @@ class NStepBufferWrapper(ReplayBufferBase):
         done: bool,
     ):
         """Adds raw transition, processes N-step if possible, pushes to wrapped buffer."""
-        current_transition = (state, action, reward, next_state, done)
-        self.n_step_deque.append(current_transition)
+        self.n_step_deque.append((state, action, reward, next_state, done))
 
         if len(self.n_step_deque) < self.n_step:
             if done:
                 self._flush_on_done()  # Process partial if episode ends early
-            return  # Wait for more steps
+            return
 
         # Deque has N items, calculate N-step transition from the oldest start
         n_step_transition = self._calculate_n_step_transition(list(self.n_step_deque))
-
         if n_step_transition:
             self.wrapped_buffer.push(
-                state=n_step_transition.state,
-                action=n_step_transition.action,
-                reward=n_step_transition.reward,
-                next_state=n_step_transition.next_state,
-                done=n_step_transition.done,
-                n_step_discount=n_step_transition.n_step_discount,  # Pass calculated discount
-            )
+                **n_step_transition._asdict()
+            )  # Push unpacked dict
 
-        if done:  # If the *newly added* transition was terminal, flush remaining starts
-            self._flush_on_done()
+        if done:
+            self._flush_on_done()  # Flush remaining starts if new transition was terminal
 
     def _flush_on_done(self):
         """Processes remaining partial transitions when an episode ends."""
-        # The deque contains transitions leading up to 'done'.
-        # We need to process transitions starting *after* the initial state
-        # of the first transition processed in the last `push` call.
         temp_deque = list(self.n_step_deque)
         while len(temp_deque) > 1:  # Stop when only the 'done' transition remains
             temp_deque.pop(0)  # Remove the already processed starting state
             n_step_transition = self._calculate_n_step_transition(temp_deque)
             if n_step_transition:
-                self.wrapped_buffer.push(
-                    state=n_step_transition.state,
-                    action=n_step_transition.action,
-                    reward=n_step_transition.reward,
-                    next_state=n_step_transition.next_state,
-                    done=n_step_transition.done,
-                    n_step_discount=n_step_transition.n_step_discount,
-                )
-        self.n_step_deque.clear()  # Clear after flushing
+                self.wrapped_buffer.push(**n_step_transition._asdict())
+        self.n_step_deque.clear()
 
     def sample(self, batch_size: int) -> Any:
         return self.wrapped_buffer.sample(batch_size)
@@ -139,65 +102,42 @@ class NStepBufferWrapper(ReplayBufferBase):
         if hasattr(self.wrapped_buffer, "set_beta"):
             self.wrapped_buffer.set_beta(beta)
 
+    def __len__(self) -> int:
+        return len(self.wrapped_buffer)
+
     def flush_pending(self):
         """Processes and pushes any remaining transitions before exit/save."""
-        print(
-            f"[NStepWrapper] Flushing {len(self.n_step_deque)} pending transitions on cleanup."
-        )
+        print(f"[NStepWrapper] Flushing {len(self.n_step_deque)} pending transitions.")
         temp_deque = list(self.n_step_deque)
         while len(temp_deque) > 0:
             n_step_transition = self._calculate_n_step_transition(temp_deque)
             if n_step_transition:
-                self.wrapped_buffer.push(
-                    state=n_step_transition.state,
-                    action=n_step_transition.action,
-                    reward=n_step_transition.reward,
-                    next_state=n_step_transition.next_state,
-                    done=n_step_transition.done,
-                    n_step_discount=n_step_transition.n_step_discount,
-                )
+                self.wrapped_buffer.push(**n_step_transition._asdict())
             temp_deque.pop(0)
         self.n_step_deque.clear()
-
         if hasattr(self.wrapped_buffer, "flush_pending"):
             self.wrapped_buffer.flush_pending()
 
-    def __len__(self) -> int:
-        # Length is the number of processed N-step transitions in wrapped buffer
-        return len(self.wrapped_buffer)
-
     def get_state(self) -> Dict[str, Any]:
-        """Return state for saving."""
         return {
-            "n_step_deque": list(self.n_step_deque),  # Pending raw transitions
+            "n_step_deque": list(self.n_step_deque),
             "wrapped_buffer_state": self.wrapped_buffer.get_state(),
         }
 
     def load_state_from_data(self, state: Dict[str, Any]):
-        """Load state from dictionary."""
-        saved_deque_list = state.get("n_step_deque", [])
-        self.n_step_deque = deque(saved_deque_list, maxlen=self.n_step)
+        self.n_step_deque = deque(state.get("n_step_deque", []), maxlen=self.n_step)
         print(f"[NStepWrapper] Loaded {len(self.n_step_deque)} pending transitions.")
-
         wrapped_state = state.get("wrapped_buffer_state")
-        if wrapped_state is not None:
+        if wrapped_state:
             self.wrapped_buffer.load_state_from_data(wrapped_state)
         else:
-            print(
-                "[NStepWrapper] Warning: No wrapped buffer state found in saved data."
-            )
+            print("[NStepWrapper] Warning: No wrapped buffer state found.")
 
     def save_state(self, filepath: str):
-        state = self.get_state()
-        save_object(state, filepath)
+        save_object(self.get_state(), filepath)
 
     def load_state(self, filepath: str):
         try:
-            state = load_object(filepath)
-            self.load_state_from_data(state)
-        except FileNotFoundError:
-            print(
-                f"[NStepWrapper] Load failed: File not found at {filepath}. Starting empty."
-            )
+            self.load_state_from_data(load_object(filepath))
         except Exception as e:
             print(f"[NStepWrapper] Load failed: {e}. Starting empty.")

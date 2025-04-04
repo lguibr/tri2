@@ -3,4 +3,5 @@ numpy>=1.20.0
 torch>=1.10.0
 tensorboard
 cloudpickle
-torchvision 
+torchvision
+matplotlib

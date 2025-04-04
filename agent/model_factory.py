@@ -27,4 +27,5 @@ def create_network(
         env_config=EnvConfig,  # AgentNetwork needs EnvConfig
         dueling=dqn_config.USE_DUELING,
         use_noisy=dqn_config.USE_NOISY_NETS,
+        dqn_config=dqn_config,
     )
