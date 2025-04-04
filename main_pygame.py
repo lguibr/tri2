@@ -1,3 +1,4 @@
+# File: main_pygame.py
 import sys
 import pygame
 import numpy as np
@@ -5,54 +6,18 @@ import os
 import time
 import traceback
 import torch
-from typing import List, Tuple, Optional, Dict, Any, Deque, TextIO
+from typing import List, Tuple, Optional, Dict, Any, Deque
 
+# --- Project Imports ---
+# Setup & Logging
+from logger import TeeLogger
+from app_setup import (
+    initialize_pygame,
+    initialize_directories,
+    load_and_validate_configs,
+)
 
-# --- Logger Class (Unchanged) ---
-class TeeLogger:
-    def __init__(self, filepath: str, original_stream: TextIO):
-        self.terminal = original_stream
-        try:
-            log_dir = os.path.dirname(filepath)
-            if log_dir:  # Ensure directory exists only if filepath includes one
-                os.makedirs(log_dir, exist_ok=True)
-            self.log_file = open(filepath, "w", encoding="utf-8", buffering=1)
-            print(f"[TeeLogger] Logging console output to: {filepath}")
-        except Exception as e:
-            self.terminal.write(
-                f"FATAL ERROR: Could not open log file {filepath}: {e}\n"
-            )
-            self.log_file = None
-
-    def write(self, message: str):
-        self.terminal.write(message)
-        if self.log_file:
-            try:
-                self.log_file.write(message)
-            except Exception:
-                pass  # Ignore errors writing to log file
-
-    def flush(self):
-        self.terminal.flush()
-        if self.log_file:
-            try:
-                self.log_file.flush()
-            except Exception:
-                pass  # Ignore errors flushing log file
-
-    def close(self):
-        if self.log_file:
-            try:
-                self.log_file.close()
-                self.log_file = None
-            except Exception as e:
-                self.terminal.write(f"Warning: Error closing log file: {e}\n")
-
-
-# --- End Logger Class ---
-
-
-# Import configurations
+# Configs (Import necessary instances/constants)
 from config import (
     VisConfig,
     EnvConfig,
@@ -71,12 +36,9 @@ from config import (
     BASE_CHECKPOINT_DIR,
     BASE_LOG_DIR,
     RUN_LOG_DIR,
-    RUN_CHECKPOINT_DIR,
-    get_config_dict,
-    print_config_info_and_validate,
 )
 
-# Import core components & helpers
+# Core Components & Helpers
 from environment.game_state import GameState, StateType
 from agent.dqn_agent import DQNAgent
 from agent.replay_buffer.base_buffer import ReplayBufferBase
@@ -95,13 +57,14 @@ from init.rl_components import (
 
 
 class MainApp:
-    def __init__(self):
-        print("Initializing Pygame Application...")
-        set_random_seeds(RANDOM_SEED)
-        pygame.init()
-        pygame.font.init()
+    """Main application class orchestrating the Pygame UI and RL training."""
 
-        # --- Instantiate config classes ---
+    def __init__(self):
+        print("Initializing Application...")
+        set_random_seeds(RANDOM_SEED)
+
+        # --- Configuration Loading ---
+        # Instantiate config classes needed by the app directly
         self.vis_config = VisConfig()
         self.env_config = EnvConfig()
         self.dqn_config = DQNConfig()
@@ -111,39 +74,27 @@ class MainApp:
         self.stats_config = StatsConfig()
         self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
-        self.reward_config = RewardConfig()
-        # --- END MODIFIED ---
+        self.reward_config = RewardConfig()  # Although not directly used, good practice
 
+        # Load combined config dict and validate
+        self.config_dict = load_and_validate_configs()
         self.num_envs = self.env_config.NUM_ENVS
-        self.config_dict = get_config_dict()
 
-        # --- Ensure directories exist using imported paths ---
-        os.makedirs(RUN_CHECKPOINT_DIR, exist_ok=True)
-        os.makedirs(RUN_LOG_DIR, exist_ok=True)
-        print_config_info_and_validate()
-        # --- END MODIFIED ---
+        # --- Setup Pygame and Directories ---
+        initialize_directories()
+        self.screen, self.clock = initialize_pygame(self.vis_config)
 
-        # Pygame setup
-        self.screen = pygame.display.set_mode(
-            (self.vis_config.SCREEN_WIDTH, self.vis_config.SCREEN_HEIGHT),
-            pygame.RESIZABLE,
-        )
-        pygame.display.set_caption("TriCrack DQN - TensorBoard & Demo")
-        self.clock = pygame.time.Clock()
-
-        # --- App state ---
+        # --- App State ---
         self.app_state = "Initializing"
         self.is_training = False
-        self.cleanup_confirmation_active = (
-            False  # *** This flag controls the overlay ***
-        )
+        self.cleanup_confirmation_active = False
         self.last_cleanup_message_time = 0.0
         self.cleanup_message = ""
-        self.status = "Initializing"
+        self.status = "Initializing Components"
 
-        # --- Init components sequentially ---
-        self.renderer = None
-        self.input_handler = None
+        # --- Initialize Components ---
+        self.renderer: Optional[UIRenderer] = None
+        self.input_handler: Optional[InputHandler] = None
         self.envs: List[GameState] = []
         self.agent: Optional[DQNAgent] = None
         self.buffer: Optional[ReplayBufferBase] = None
@@ -151,11 +102,20 @@ class MainApp:
         self.trainer: Optional[Trainer] = None
         self.demo_env: Optional[GameState] = None
 
-        # --- Start Initialization ---
-        # Render initializing screen immediately
+        self._initialize_core_components()
+
+        # Transition to Main Menu after successful initialization
+        self.app_state = "MainMenu"
+        self.status = "Paused"
+        print("Initialization Complete. Ready.")
+        print(f"--- tensorboard --logdir {os.path.abspath(BASE_LOG_DIR)} ---")
+
+    def _initialize_core_components(self):
+        """Initializes Renderer, RL components, Demo Env, and Input Handler."""
         try:
-            temp_renderer = UIRenderer(self.screen, self.vis_config)
-            temp_renderer.render_all(
+            # Init Renderer FIRST for immediate feedback
+            self.renderer = UIRenderer(self.screen, self.vis_config)
+            self.renderer.render_all(  # Render initializing screen
                 app_state=self.app_state,
                 is_training=False,
                 status=self.status,
@@ -164,49 +124,53 @@ class MainApp:
                 envs=[],
                 num_envs=0,
                 env_config=self.env_config,
-                cleanup_confirmation_active=False,  # Initially false
+                cleanup_confirmation_active=False,
                 cleanup_message="",
                 last_cleanup_message_time=0,
                 tensorboard_log_dir=None,
                 plot_data={},
                 demo_env=None,
             )
-            pygame.time.delay(100)
-        except Exception as init_render_e:
-            print(f"Error during initial render: {init_render_e}")  # LOG
+            pygame.time.delay(100)  # Brief pause to show initializing screen
 
-        # Init Renderer FIRST
-        self.renderer = UIRenderer(self.screen, self.vis_config)
+            # Init RL components
+            self._initialize_rl_components()
 
-        # Init RL components using helpers
-        self._initialize_rl_components()
+            # Init Demo Env
+            self._initialize_demo_env()
 
-        # Init Demo Env
-        self._initialize_demo_env()
-
-        # Init Input Handler
-        self.input_handler = InputHandler(
-            self.screen,
-            self.renderer,
-            self._toggle_training,
-            self._request_cleanup,
-            self._cancel_cleanup,
-            self._confirm_cleanup,
-            self._exit_app,
-            self._start_demo_mode,
-            self._exit_demo_mode,
-            self._handle_demo_input,
-        )
-
-        # Transition to Main Menu
-        self.app_state = "MainMenu"
-        self.status = "Paused"
-        print("Initialization Complete. Ready.")  # LOG
-        print(f"--- tensorboard --logdir {os.path.abspath(BASE_LOG_DIR)} ---")  # LOG
+            # Init Input Handler (pass self methods as callbacks)
+            self.input_handler = InputHandler(
+                self.screen,
+                self.renderer,
+                self._toggle_training,
+                self._request_cleanup,
+                self._cancel_cleanup,
+                self._confirm_cleanup,
+                self._exit_app,
+                self._start_demo_mode,
+                self._exit_demo_mode,
+                self._handle_demo_input,
+            )
+        except Exception as init_err:
+            print(f"FATAL ERROR during component initialization: {init_err}")
+            traceback.print_exc()
+            # Attempt to show error on screen if renderer exists
+            if self.renderer:
+                try:
+                    self.app_state = "Error"
+                    self.status = "Initialization Failed"
+                    self.renderer._render_error_screen(self.status)
+                    pygame.display.flip()
+                    time.sleep(5)  # Show error for a bit
+                except Exception:
+                    pass  # Ignore errors during error rendering
+            pygame.quit()
+            sys.exit(1)
 
     def _initialize_rl_components(self):
-        """Orchestrates the initialization of RL components using helpers."""
-        print("Initializing RL components...")  # LOG
+        """Initializes RL components using helper functions."""
+        print("Initializing RL components...")
         start_time = time.time()
         try:
             self.envs = initialize_envs(self.num_envs, self.env_config)
@@ -237,138 +201,95 @@ class MainApp:
                 self.buffer_config,
                 self.model_config,
             )
-            print(
-                f"RL components initialized in {time.time() - start_time:.2f}s"
-            )  # LOG
+            print(f"RL components initialized in {time.time() - start_time:.2f}s")
         except Exception as e:
-            print(f"FATAL ERROR during RL component initialization: {e}")  # LOG
-            traceback.print_exc()
-            pygame.quit()
-            sys.exit(1)
+            # Let the caller handle the fatal error exit
+            print(f"Error during RL component initialization: {e}")
+            raise e  # Re-raise to be caught by _initialize_core_components
 
     def _initialize_demo_env(self):
         """Initializes the separate environment for demo mode."""
-        print("Initializing Demo Environment...")  # LOG
+        print("Initializing Demo Environment...")
         try:
             self.demo_env = GameState()
             self.demo_env.reset()
-            print("Demo environment initialized.")  # LOG
+            print("Demo environment initialized.")
         except Exception as e:
-            print(f"ERROR initializing demo environment: {e}")  # LOG
+            print(f"ERROR initializing demo environment: {e}")
             traceback.print_exc()
-            self.demo_env = None
-            print(
-                "Warning: Demo mode may be unavailable due to initialization error."
-            )  # LOG
+            self.demo_env = None  # Continue without demo mode
+            print("Warning: Demo mode may be unavailable.")
 
-    # --- Input Handler Callbacks ---
+    # --- Input Handler Callbacks (Remain in MainApp) ---
     def _toggle_training(self):
         if self.app_state != "MainMenu":
-            print(
-                f"[MainApp::_toggle_training] Ignored, state is {self.app_state}"
-            )  # LOG
             return
         self.is_training = not self.is_training
-        print(
-            f"[MainApp::_toggle_training] Training {'STARTED' if self.is_training else 'PAUSED'}"
-        )  # LOG
+        print(f"Training {'STARTED' if self.is_training else 'PAUSED'}")
         if not self.is_training:
             self._try_save_checkpoint()
 
     def _request_cleanup(self):
-        print("[MainApp::_request_cleanup] Entered.")  # LOG
         if self.app_state != "MainMenu":
-            print(
-                f"[MainApp::_request_cleanup] Not in MainMenu (State: {self.app_state}), returning."
-            )  # LOG
             return
         was_training = self.is_training
-        self.is_training = False  # Pause training
+        self.is_training = False
         if was_training:
-            self._try_save_checkpoint()  # Save if was training
-
-        # *** KEY CHANGE: Set the flag to activate the overlay ***
+            self._try_save_checkpoint()
         self.cleanup_confirmation_active = True
-        print(
-            f"[MainApp::_request_cleanup] Set cleanup_confirmation_active = {self.cleanup_confirmation_active}. Training paused. Confirm action."
-        )  # LOG
+        print("Cleanup requested. Confirm action.")
 
     def _cancel_cleanup(self):
-        print("[MainApp::_cancel_cleanup] Entered.")  # LOG
-        # *** KEY CHANGE: Set flag FIRST to stop overlay rendering immediately ***
         self.cleanup_confirmation_active = False
         self.cleanup_message = "Cleanup cancelled."
         self.last_cleanup_message_time = time.time()
-        print("[MainApp::_cancel_cleanup] Cleanup cancelled by user.")  # LOG
+        print("Cleanup cancelled by user.")
 
     def _confirm_cleanup(self):
-        print(
-            "[MainApp::_confirm_cleanup] Cleanup confirmed by user. Starting process..."
-        )  # LOG
-        # Perform cleanup. _cleanup_data handles setting status/state appropriately.
+        print("Cleanup confirmed by user. Starting process...")
         try:
-            self._cleanup_data()  # This handles state transitions internally now
+            self._cleanup_data()
         except Exception as e:
-            print(
-                f"FATAL ERROR during _confirm_cleanup -> _cleanup_data call: {e}"
-            )  # LOG
+            print(f"FATAL ERROR during cleanup: {e}")
             traceback.print_exc()
             self.status = "Error: Cleanup Failed Critically"
             self.app_state = "Error"
-            # Ensure confirmation flag is false even on critical error here
-            self.cleanup_confirmation_active = False
         finally:
-            # *** KEY CHANGE: Ensure the confirmation flag is ALWAYS false after attempting cleanup ***
-            self.cleanup_confirmation_active = False
+            self.cleanup_confirmation_active = False  # Ensure flag is reset
             print(
-                f"[MainApp::_confirm_cleanup] Cleanup process finished. Final app state: {self.app_state}, Status: {self.status}"
-            )  # LOG
+                f"Cleanup process finished. State: {self.app_state}, Status: {self.status}"
+            )
 
     def _exit_app(self) -> bool:
-        print("[MainApp::_exit_app] Exit requested.")  # LOG
-        return False  # Signal exit
+        print("Exit requested.")
+        return False  # Signal exit to main loop
 
-    # --- Demo Mode Callbacks ---
     def _start_demo_mode(self):
-        print("[MainApp::_start_demo_mode] Entered.")  # LOG
         if self.demo_env is None:
-            print(
-                "[MainApp::_start_demo_mode] Cannot start demo mode: Demo environment failed to initialize."
-            )  # LOG
+            print("Cannot start demo mode: Demo environment failed to initialize.")
             return
         if self.app_state == "MainMenu":
-            print("[MainApp::_start_demo_mode] Entering Demo Mode...")  # LOG
+            print("Entering Demo Mode...")
             self.is_training = False
             self._try_save_checkpoint()
             self.app_state = "Playing"
             self.status = "Playing Demo"
             self.demo_env.reset()
-        else:
-            print(
-                f"[MainApp::_start_demo_mode] Ignored, state is {self.app_state}"
-            )  # LOG
 
     def _exit_demo_mode(self):
-        print("[MainApp::_exit_demo_mode] Entered.")  # LOG
         if self.app_state == "Playing":
-            print("[MainApp::_exit_demo_mode] Exiting Demo Mode...")  # LOG
+            print("Exiting Demo Mode...")
             self.app_state = "MainMenu"
             self.status = "Paused"
-        else:
-            print(
-                f"[MainApp::_exit_demo_mode] Ignored, state is {self.app_state}"
-            )  # LOG
 
     def _handle_demo_input(self, event: pygame.event.Event):
         """Handles keyboard input during demo mode."""
         if self.app_state != "Playing" or self.demo_env is None:
             return
-
         if self.demo_env.is_frozen() or self.demo_env.is_over():
             return
 
         if event.type == pygame.KEYDOWN:
-            # print(f"[MainApp::_handle_demo_input] Key down: {event.key}") # LOG (Optional, can be spammy)
             action_taken = False
             if event.key == pygame.K_LEFT:
                 self.demo_env.move_target(0, -1)
@@ -391,16 +312,16 @@ class MainApp:
             elif event.key == pygame.K_SPACE:
                 action_index = self.demo_env.get_action_for_current_selection()
                 if action_index is not None:
-                    state_before_step = self.demo_env.get_state()
+                    state_before = self.demo_env.get_state()
                     reward, done = self.demo_env.step(action_index)
-                    next_state_after_step = self.demo_env.get_state()
-                    if self.buffer is not None:
+                    next_state_after = self.demo_env.get_state()
+                    if self.buffer:
                         try:
                             self.buffer.push(
-                                state_before_step,
+                                state_before,
                                 action_index,
                                 reward,
-                                next_state_after_step,
+                                next_state_after,
                                 done,
                             )
                             if (
@@ -410,81 +331,67 @@ class MainApp:
                             ):
                                 print(
                                     f"[Demo] Added experience. Buffer: {len(self.buffer)}/{self.buffer.capacity}"
-                                )  # LOG
+                                )
                         except Exception as buf_e:
-                            print(
-                                f"Error pushing demo experience to buffer: {buf_e}"
-                            )  # LOG
-                            traceback.print_exc()
-                    else:
-                        print("Warning: Replay buffer not available.")  # LOG
+                            print(f"Error pushing demo experience to buffer: {buf_e}")
                     action_taken = True
                 else:
-                    # print("[Demo] Invalid placement.") # LOG (Optional)
-                    action_taken = True
+                    action_taken = (
+                        True  # Still counts as an action (attempted placement)
+                    )
 
             if self.demo_env.is_over():
-                print("[Demo] Game Over! Press ESC to exit.")  # LOG
+                print("[Demo] Game Over! Press ESC to exit.")
 
-    # --- Other Methods (Cleanup, Save) ---
+    # --- Core Logic Methods (Remain in MainApp) ---
     def _cleanup_data(self):
         """Deletes current run's checkpoint/buffer and re-initializes."""
-        print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")  # LOG
-        # *** KEY CHANGE: Set initial state for cleanup ***
-        self.app_state = "Initializing"  # Show initializing screen during cleanup
+        print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
+        self.app_state = "Initializing"
         self.is_training = False
         self.status = "Cleaning"
-        # Confirmation flag handled by caller (_confirm_cleanup)
-
         messages = []
 
-        # *** KEY CHANGE: Render initializing screen immediately ***
+        # Render initializing screen during cleanup
         if self.renderer:
-            try:  # Add try-except for rendering during cleanup
+            try:
                 self.renderer.render_all(
-                    app_state=self.app_state,  # Use "Initializing" state
+                    app_state=self.app_state,
                     is_training=False,
-                    status=self.status,  # Use "Cleaning" status
+                    status=self.status,
                     stats_summary={},
                     buffer_capacity=0,
                     envs=[],
                     num_envs=0,
                     env_config=self.env_config,
-                    cleanup_confirmation_active=False,  # Explicitly false during cleanup itself
+                    cleanup_confirmation_active=False,
                     cleanup_message="",
                     last_cleanup_message_time=0,
                     tensorboard_log_dir=None,
                     plot_data={},
-                    demo_env=self.demo_env,  # Pass demo env if available
+                    demo_env=self.demo_env,
                 )
-                pygame.display.flip()  # Ensure it draws
-                pygame.time.delay(100)  # Small delay to show the screen
+                pygame.display.flip()
+                pygame.time.delay(100)
             except Exception as render_err:
-                print(
-                    f"Warning: Error rendering during cleanup start: {render_err}"
-                )  # LOG
-        else:
-            print("Warning: Renderer not available during cleanup start.")  # LOG
+                print(f"Warning: Error rendering during cleanup start: {render_err}")
 
         # Close trainer/stats FIRST
-        if hasattr(self, "trainer") and self.trainer:
-            print("[Cleanup] Running trainer cleanup...")  # LOG
+        if self.trainer:
+            print("[Cleanup] Running trainer cleanup...")
             try:
-                self.trainer.cleanup(save_final=False)  # Don't save during cleanup
+                self.trainer.cleanup(save_final=False)
             except Exception as e:
-                print(f"Error during trainer cleanup: {e}")  # LOG
-                traceback.print_exc()
-
-        if hasattr(self, "stats_recorder") and self.stats_recorder:
-            print("[Cleanup] Closing stats recorder...")  # LOG
+                print(f"Error during trainer cleanup: {e}")
+        if self.stats_recorder:
+            print("[Cleanup] Closing stats recorder...")
             try:
                 self.stats_recorder.close()
-            except Exception as log_e:
-                print(f"Error closing stats recorder during cleanup: {log_e}")  # LOG
-                traceback.print_exc()
+            except Exception as e:
+                print(f"Error closing stats recorder: {e}")
 
         # Delete files
-        print("[Cleanup] Deleting files...")  # LOG
+        print("[Cleanup] Deleting files...")
         for path, desc in [
             (MODEL_SAVE_PATH, "Agent ckpt"),
             (BUFFER_SAVE_PATH, "Buffer state"),
@@ -493,123 +400,88 @@ class MainApp:
                 if os.path.isfile(path):
                     os.remove(path)
                     msg = f"{desc} deleted: {os.path.basename(path)}"
-                    print(f"  - {msg}")  # LOG
-                    messages.append(msg)
                 else:
                     msg = f"{desc} not found (current run)."
-                    print(f"  - {msg}")  # LOG
+                print(f"  - {msg}")
+                messages.append(msg)
             except OSError as e:
                 msg = f"Error deleting {desc}: {e}"
-                print(f"  - {msg}")  # LOG
+                print(f"  - {msg}")
                 messages.append(msg)
 
-        time.sleep(0.1)  # Short delay after file deletion
+        time.sleep(0.1)
 
-        print("[Cleanup] Re-initializing RL components...")  # LOG
+        # Re-initialize RL components
+        print("[Cleanup] Re-initializing RL components...")
         try:
-            # *** KEY CHANGE: Re-init RL components (can fail) ***
             self._initialize_rl_components()
-
-            # Reset Demo env after successful re-init
             if self.demo_env:
                 self.demo_env.reset()
-
-            print("[Cleanup] RL components re-initialized successfully.")  # LOG
+            print("[Cleanup] RL components re-initialized successfully.")
             messages.append("RL components re-initialized.")
-            # *** KEY CHANGE: Set state on SUCCESS ***
             self.status = "Paused"
             self.app_state = "MainMenu"
-
         except Exception as e:
-            print(
-                f"FATAL ERROR during RL component re-initialization after cleanup: {e}"
-            )  # LOG
+            print(f"FATAL ERROR during RL re-initialization after cleanup: {e}")
             traceback.print_exc()
-            # *** KEY CHANGE: Set state on FAILURE ***
             self.status = "Error: Re-init Failed"
             self.app_state = "Error"
             messages.append("ERROR RE-INITIALIZING RL COMPONENTS!")
-
-            # Attempt to render error screen
             if self.renderer:
                 try:
                     self.renderer._render_error_screen(self.status)
                 except Exception as render_err_final:
-                    print(
-                        f"Warning: Failed to render error screen after cleanup failure: {render_err_final}"
-                    )  # LOG
+                    print(f"Warning: Failed to render error screen: {render_err_final}")
 
-        # Set message regardless of success/failure
         self.cleanup_message = "\n".join(messages)
         self.last_cleanup_message_time = time.time()
-
         print(
             f"--- CLEANUP DATA COMPLETE (Final State: {self.app_state}, Status: {self.status}) ---"
-        )  # LOG
+        )
 
     def _try_save_checkpoint(self):
         """Saves checkpoint if not training and trainer exists."""
-        if (
-            self.app_state == "MainMenu"
-            and not self.is_training
-            and hasattr(self, "trainer")
-            and self.trainer
-        ):
-            print("[MainApp] Saving checkpoint on pause...")  # LOG
+        if self.app_state == "MainMenu" and not self.is_training and self.trainer:
+            print("Saving checkpoint on pause...")
             try:
                 self.trainer.maybe_save_checkpoint(force_save=True)
             except Exception as e:
-                print(f"Error saving checkpoint on pause: {e}")  # LOG
-                traceback.print_exc()
+                print(f"Error saving checkpoint on pause: {e}")
 
     def _update(self):
-        """Updates the application state and performs training steps (potentially)."""
-        # print(f"[DEBUG Update] State: {self.app_state}, Training: {self.is_training}, Status: {self.status}, Buf: {len(self.buffer) if self.buffer else 'N/A'}, Step: {self.trainer.global_step if self.trainer else 'N/A'}") # DEBUG LOG
-        should_step_trainer = False  # Flag to control trainer stepping
+        """Updates the application state and performs training steps."""
+        should_step_trainer = False
 
-        # --- Update logic specific to MainMenu state ---
         if self.app_state == "MainMenu":
-            # *** KEY CHANGE: Check confirmation flag FIRST ***
             if self.cleanup_confirmation_active:
                 self.status = "Confirm Cleanup"
-                # Do NOT step trainer or change status further
             elif not self.is_training and self.status != "Error":
                 self.status = "Paused"
-            elif not hasattr(self, "trainer") or self.trainer is None:
+            elif not self.trainer:
                 if self.status != "Error":
                     self.status = "Error: Trainer Missing"
-                    print("Error: Trainer object not found during update.")  # LOG
-            # --- Determine status based on training flag and buffer ---
             elif self.is_training:
                 current_fill = len(self.buffer) if self.buffer else 0
                 current_step = self.trainer.global_step if self.trainer else 0
                 needed = self.train_config.LEARN_START_STEP
-                is_buffer_ready_for_learning = (
-                    current_fill >= needed and current_step >= needed
+                is_buffer_ready = current_fill >= needed and current_step >= needed
+
+                self.status = (
+                    f"Buffering ({current_fill / max(1, needed) * 100:.0f}%)"
+                    if not is_buffer_ready
+                    else "Training"
                 )
-
-                if not is_buffer_ready_for_learning:
-                    percent_buffer = current_fill / max(1, needed) * 100
-                    self.status = f"Buffering ({percent_buffer:.0f}%)"
-                else:
-                    self.status = "Training"
-
-                # *** KEY CHANGE: Always schedule trainer step if is_training is True ***
                 should_step_trainer = True
             else:  # Not training
-                # Avoid overwriting "Buffering" or "Error" status when paused
                 if not self.status.startswith("Buffering") and self.status != "Error":
                     self.status = "Paused"
 
-            # --- Execute trainer step if scheduled ---
             if should_step_trainer:
-                # print("[DEBUG Update] Should step trainer.") # DEBUG LOG
-                if not hasattr(self, "trainer") or self.trainer is None:
-                    print("Error: Trainer became unavailable during _update.")  # LOG
+                if not self.trainer:
+                    print("Error: Trainer became unavailable during _update.")
                     self.status = "Error: Trainer Lost"
                     self.is_training = False
                 else:
-                    # print("[DEBUG Update] Calling trainer.step()") # DEBUG LOG
                     try:
                         step_start_time = time.time()
                         self.trainer.step()
@@ -623,31 +495,18 @@ class MainApp:
                     except Exception as e:
                         print(
                             f"\n--- ERROR DURING TRAINING UPDATE (Step: {getattr(self.trainer, 'global_step', 'N/A')}) ---"
-                        )  # LOG
+                        )
                         traceback.print_exc()
-                        print(f"--- Pausing training due to error. ---")  # LOG
+                        print("--- Pausing training due to error. ---")
                         self.is_training = False
                         self.status = "Error: Training Step Failed"
-                        self.app_state = "Error"  # Transition to error state
+                        self.app_state = "Error"
 
-        # --- Update logic specific to Playing state ---
         elif self.app_state == "Playing":
-            if self.demo_env:
-                if hasattr(self.demo_env, "_update_timers") and callable(
-                    getattr(self.demo_env, "_update_timers")
-                ):
-                    self.demo_env._update_timers()
-                else:
-                    print("Warning: demo_env missing _update_timers method.")  # LOG
+            if self.demo_env and hasattr(self.demo_env, "_update_timers"):
+                self.demo_env._update_timers()
             self.status = "Playing Demo"
-
-        # --- Update logic for other states ---
-        elif self.app_state == "Initializing":
-            # Status is set during the cleanup/init process itself
-            pass
-        elif self.app_state == "Error":
-            # Status is set when the error occurs
-            pass
+        # Other states (Initializing, Error) have status set elsewhere
 
     def _render(self):
         """Renders the UI based on the current application state."""
@@ -655,31 +514,29 @@ class MainApp:
         plot_data: Dict[str, Deque] = {}
         buffer_capacity = 0
 
-        # Gather stats data
-        if hasattr(self, "stats_recorder") and self.stats_recorder:
+        if self.stats_recorder:
             current_step = getattr(self.trainer, "global_step", 0)
             try:
                 stats_summary = self.stats_recorder.get_summary(current_step)
             except Exception as e:
-                print(f"Error getting stats summary: {e}")  # LOG
+                print(f"Error getting stats summary: {e}")
                 stats_summary = {"global_step": current_step}
             try:
                 plot_data = self.stats_recorder.get_plot_data()
             except Exception as e:
-                print(f"Error getting plot data: {e}")  # LOG
+                print(f"Error getting plot data: {e}")
                 plot_data = {}
         elif self.app_state == "Error":
             stats_summary = {"global_step": getattr(self.trainer, "global_step", 0)}
 
-        # Get buffer capacity
-        if hasattr(self, "buffer") and self.buffer:
+        if self.buffer:
             try:
                 buffer_capacity = getattr(self.buffer, "capacity", 0)
             except Exception:
                 buffer_capacity = 0
 
-        if not hasattr(self, "renderer") or self.renderer is None:
-            print("Error: Renderer not initialized in _render.")  # LOG
+        if not self.renderer:
+            print("Error: Renderer not initialized in _render.")
             try:  # Basic error render
                 self.screen.fill((0, 0, 0))
                 font = pygame.font.SysFont(None, 50)
@@ -692,12 +549,7 @@ class MainApp:
                 pass
             return
 
-        # LOGGING: Check flag value before rendering
-        # print(f"[MainApp::_render] Calling render_all. cleanup_confirmation_active = {self.cleanup_confirmation_active}, app_state = {self.app_state}") # LOG (Moved to inside render for better context)
-
-        # Call the main render function
         try:
-            # *** KEY CHANGE: Pass the cleanup_confirmation_active flag ***
             self.renderer.render_all(
                 app_state=self.app_state,
                 is_training=self.is_training,
@@ -707,7 +559,7 @@ class MainApp:
                 envs=(self.envs if hasattr(self, "envs") else []),
                 num_envs=self.num_envs,
                 env_config=self.env_config,
-                cleanup_confirmation_active=self.cleanup_confirmation_active,  # Pass the flag
+                cleanup_confirmation_active=self.cleanup_confirmation_active,
                 cleanup_message=self.cleanup_message,
                 last_cleanup_message_time=self.last_cleanup_message_time,
                 tensorboard_log_dir=(
@@ -719,22 +571,42 @@ class MainApp:
                 demo_env=self.demo_env,
             )
         except Exception as render_all_err:
-            print(f"CRITICAL ERROR in renderer.render_all: {render_all_err}")  # LOG
+            print(f"CRITICAL ERROR in renderer.render_all: {render_all_err}")
             traceback.print_exc()
             try:
                 self.app_state = "Error"
                 self.status = "Render Error"
                 self.renderer._render_error_screen(self.status)
             except Exception as e:
-                print(f"Error rendering error screen: {e}")  # LOG
+                print(f"Error rendering error screen: {e}")
 
         # Clear transient message
         if time.time() - self.last_cleanup_message_time >= 5.0:
             self.cleanup_message = ""
 
+    def _perform_cleanup(self):
+        """Handles final cleanup of resources."""
+        print("Exiting application...")
+        if self.trainer:
+            print("Performing final trainer cleanup...")
+            try:
+                save_on_exit = self.status != "Cleaning" and self.app_state != "Error"
+                self.trainer.cleanup(save_final=save_on_exit)
+            except Exception as final_cleanup_err:
+                print(f"Error during final trainer cleanup: {final_cleanup_err}")
+        elif self.stats_recorder:  # Close stats recorder even if trainer failed/missing
+            print("Closing stats recorder...")
+            try:
+                self.stats_recorder.close()
+            except Exception as log_e:
+                print(f"Error closing stats recorder on exit: {log_e}")
+
+        pygame.quit()
+        print("Application exited.")
+
     def run(self):
         """Main application loop."""
-        print("Starting main application loop...")  # LOG
+        print("Starting main application loop...")
         running = True
         try:
             while running:
@@ -743,15 +615,15 @@ class MainApp:
                 # Handle Input
                 if self.input_handler:
                     try:
-                        # *** KEY CHANGE: Pass cleanup flag to input handler ***
                         running = self.input_handler.handle_input(
                             self.app_state, self.cleanup_confirmation_active
                         )
                     except Exception as input_err:
                         print(
                             f"\n--- UNHANDLED ERROR IN INPUT LOOP ({self.app_state}) ---"
-                        )  # LOG
+                        )
                         traceback.print_exc()
+                        running = False  # Exit on unhandled input error
                 else:  # Basic exit if handler failed
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
@@ -762,10 +634,10 @@ class MainApp:
                         ):
                             if self.app_state == "Playing":
                                 self._exit_demo_mode()
-                            elif (
-                                not self.cleanup_confirmation_active
-                            ):  # Only exit if overlay not active
+                            elif not self.cleanup_confirmation_active:
                                 running = False
+                    if not running:
+                        break
 
                 if not running:
                     break
@@ -776,23 +648,19 @@ class MainApp:
                 except Exception as update_err:
                     print(
                         f"\n--- UNHANDLED ERROR IN UPDATE LOOP ({self.app_state}) ---"
-                    )  # LOG
+                    )
                     traceback.print_exc()
-                    print(f"--- Setting status to Error ---")  # LOG
                     self.status = "Error: Update Loop Failed"
                     self.app_state = "Error"
                     self.is_training = False
 
                 # Render Frame
                 try:
-                    # *** KEY CHANGE: Rendering is now handled entirely by _render ***
-                    # which calls renderer.render_all, which handles states and overlays
                     self._render()
-                    # No need for separate error screen rendering here anymore
                 except Exception as render_err:
                     print(
                         f"\n--- UNHANDLED ERROR IN RENDER LOOP ({self.app_state}) ---"
-                    )  # LOG
+                    )
                     traceback.print_exc()
                     self.status = "Error: Render Loop Failed"
                     self.app_state = "Error"
@@ -807,49 +675,25 @@ class MainApp:
                     time.sleep(sleep_time)
 
         except KeyboardInterrupt:
-            print("\nCtrl+C detected. Exiting gracefully...")  # LOG
+            print("\nCtrl+C detected. Exiting gracefully...")
         except Exception as e:
-            print(
-                f"\n--- UNHANDLED EXCEPTION IN MAIN LOOP ({self.app_state}) ---"
-            )  # LOG
+            print(f"\n--- UNHANDLED EXCEPTION IN MAIN LOOP ({self.app_state}) ---")
             traceback.print_exc()
-            print("--- EXITING ---")  # LOG
+            print("--- EXITING ---")
         finally:
-            print("Exiting application...")  # LOG
-            # Final Cleanup
-            if hasattr(self, "trainer") and self.trainer:
-                print("Performing final trainer cleanup...")  # LOG
-                try:
-                    # *** KEY CHANGE: Don't save if cleanup was in progress or error state ***
-                    save_on_exit = (
-                        self.status != "Cleaning" and self.app_state != "Error"
-                    )
-                    self.trainer.cleanup(save_final=save_on_exit)
-                except Exception as final_cleanup_err:
-                    print(
-                        f"Error during final trainer cleanup: {final_cleanup_err}"
-                    )  # LOG
-                    traceback.print_exc()
-            elif hasattr(self, "stats_recorder") and self.stats_recorder:
-                print("Closing stats recorder...")  # LOG
-                try:
-                    self.stats_recorder.close()
-                except Exception as log_e:
-                    print(f"Error closing stats recorder on exit: {log_e}")  # LOG
-                    traceback.print_exc()
-
-            pygame.quit()
-            print("Application exited.")  # LOG
+            self._perform_cleanup()
 
 
+# --- Main Execution Block ---
 if __name__ == "__main__":
-    # Ensure base directories exist
+    # Ensure base directories exist before logger setup
     os.makedirs(BASE_CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(BASE_LOG_DIR, exist_ok=True)
-    os.makedirs(RUN_LOG_DIR, exist_ok=True)
+    os.makedirs(RUN_LOG_DIR, exist_ok=True)  # Ensure run-specific log dir exists
 
     log_filepath = os.path.join(RUN_LOG_DIR, "console_output.log")
 
+    # Setup logging
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     logger = TeeLogger(log_filepath, original_stdout)
@@ -857,29 +701,40 @@ if __name__ == "__main__":
     sys.stderr = logger
 
     app_instance = None
+    exit_code = 0
 
     try:
         if run_pre_checks():
             app_instance = MainApp()
-            app_instance.run()
+            app_instance.run()  # run() now handles cleanup internally
     except SystemExit as exit_err:
-        print(
-            f"Exiting due to SystemExit (Code: {getattr(exit_err, 'code', 'N/A')})."
-        )  # LOG
+        print(f"Exiting due to SystemExit (Code: {getattr(exit_err, 'code', 'N/A')}).")
+        exit_code = (
+            getattr(exit_err, "code", 1)
+            if isinstance(getattr(exit_err, "code", 1), int)
+            else 1
+        )
     except Exception as main_err:
-        print("\n--- UNHANDLED EXCEPTION DURING APP INITIALIZATION OR RUN ---")  # LOG
+        print("\n--- UNHANDLED EXCEPTION DURING APP INITIALIZATION OR RUN ---")
         traceback.print_exc()
-        print("--- EXITING DUE TO ERROR ---")  # LOG
+        print("--- EXITING DUE TO ERROR ---")
+        exit_code = 1
+        # Ensure cleanup is attempted even if run() didn't finish
+        if app_instance and hasattr(app_instance, "_perform_cleanup"):
+            print("Attempting cleanup after main exception...")
+            try:
+                app_instance._perform_cleanup()
+            except Exception as cleanup_err:
+                print(f"Error during cleanup after main exception: {cleanup_err}")
     finally:
         # Restore logging
-        if "logger" in locals() and logger:
+        if logger:
             final_app_state = getattr(app_instance, "app_state", "UNKNOWN")
             print(
                 f"Restoring console output (Final App State: {final_app_state}). Full log saved to: {log_filepath}"
-            )  # LOG
+            )
             logger.close()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
-        print(
-            f"Console logging restored. Full log should be in: {log_filepath}"
-        )  # Final message to actual console
+        print(f"Console logging restored. Full log should be in: {log_filepath}")
+        sys.exit(exit_code)  # Exit with appropriate code
