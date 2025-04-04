@@ -22,6 +22,10 @@ from .general import (
 
 
 def print_config_info_and_validate():
+    # --- MODIFIED: Instantiate EnvConfig ---
+    env_config_instance = EnvConfig()
+    # --- END MODIFIED ---
+
     print("-" * 70)
     print(f"RUN ID: {RUN_ID}")
     print(f"Log Directory: {RUN_LOG_DIR}")
@@ -30,7 +34,9 @@ def print_config_info_and_validate():
     print(
         f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
     )
-    if EnvConfig.GRID_FEATURES_PER_CELL != 3:
+    # --- MODIFIED: Check GRID_FEATURES_PER_CELL on instance ---
+    if env_config_instance.GRID_FEATURES_PER_CELL != 3:
+        # --- END MODIFIED ---
         print(
             "Warning: Network assumes 3 features per cell (Occupied, Is_Up, Is_Death)."
         )
@@ -63,27 +69,39 @@ def print_config_info_and_validate():
         )
         + " ---"
     )
+    # --- MODIFIED: Print state shapes and action dim from instance ---
     print(
-        f"Config: Env=(R={EnvConfig.ROWS}, C={EnvConfig.COLS}), StateDim={EnvConfig.STATE_DIM}, ActionDim={EnvConfig.ACTION_DIM}"
+        f"Config: Env=(R={env_config_instance.ROWS}, C={env_config_instance.COLS}), "
+        f"GridState={env_config_instance.GRID_STATE_SHAPE}, "
+        f"ShapeState={env_config_instance.SHAPE_STATE_DIM}, "
+        f"ActionDim={env_config_instance.ACTION_DIM}"
     )
+    # --- END MODIFIED ---
     cnn_str = str(ModelConfig.Network.CONV_CHANNELS).replace(" ", "")
     mlp_str = str(ModelConfig.Network.COMBINED_FC_DIMS).replace(" ", "")
+    # --- MODIFIED: Print shape MLP dims from config ---
+    shape_mlp_cfg_str = str(ModelConfig.Network.SHAPE_FEATURE_MLP_DIMS).replace(" ", "")
     print(
-        f"Network: CNN={cnn_str}, ShapeMLP={ModelConfig.Network.SHAPE_MLP_HIDDEN_DIM}, Fusion={mlp_str}, Dueling={DQNConfig.USE_DUELING}"
+        f"Network: CNN={cnn_str}, ShapeEmb={ModelConfig.Network.SHAPE_EMBEDDING_DIM}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}, Dueling={DQNConfig.USE_DUELING}"
     )
+    # --- END MODIFIED ---
+    # --- MODIFIED: Access NUM_ENVS from instance ---
     print(
-        f"Training: NUM_ENVS={EnvConfig.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M, BUFFER={BufferConfig.REPLAY_BUFFER_SIZE/1e6:.1f}M, BATCH={TrainConfig.BATCH_SIZE}"
+        f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M, BUFFER={BufferConfig.REPLAY_BUFFER_SIZE/1e6:.1f}M, BATCH={TrainConfig.BATCH_SIZE}"
     )
+    # --- END MODIFIED ---
     print(
         f"Buffer: PER={BufferConfig.USE_PER}, N-Step={BufferConfig.N_STEP if BufferConfig.USE_N_STEP else 'N/A'}"
     )
     print(
         f"Stats: AVG_WINDOW={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ}"
     )
-    if EnvConfig.NUM_ENVS >= 1024:
+    # --- MODIFIED: Access NUM_ENVS from instance ---
+    if env_config_instance.NUM_ENVS >= 1024:
+        # --- END MODIFIED ---
         print(
             "*" * 70
-            + f"\n*** Warning: NUM_ENVS={EnvConfig.NUM_ENVS}. Monitor system resources. ***"
+            + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. Monitor system resources. ***"
             + (
                 "\n*** Using MPS device. Performance varies. Force CPU via env var if needed. ***"
                 if DEVICE.type == "mps"
@@ -92,7 +110,9 @@ def print_config_info_and_validate():
             + "\n"
             + "*" * 70
         )
+    # --- MODIFIED: Access NUM_ENVS from instance ---
     print(
-        f"--- Rendering {VisConfig.NUM_ENVS_TO_RENDER if VisConfig.NUM_ENVS_TO_RENDER > 0 else 'ALL'} of {EnvConfig.NUM_ENVS} environments ---"
+        f"--- Rendering {VisConfig.NUM_ENVS_TO_RENDER if VisConfig.NUM_ENVS_TO_RENDER > 0 else 'ALL'} of {env_config_instance.NUM_ENVS} environments ---"
     )
+    # --- END MODIFIED ---
     print("-" * 70)

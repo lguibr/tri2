@@ -5,7 +5,7 @@ from typing import Deque, Dict, Any, Optional, Union, List, Tuple, Callable
 import numpy as np
 import torch
 from .stats_recorder import StatsRecorderBase
-from config import EnvConfig, StatsConfig
+from config import EnvConfig, StatsConfig  # Removed EnvConfig import, not needed here
 import warnings
 
 
@@ -31,7 +31,9 @@ class SimpleStatsRecorder(StatsRecorderBase):
 
         # Data Deques
         step_reward_window = max(avg_window * 10, 1000)
-        self.step_rewards: Deque[float] = deque(maxlen=step_reward_window)
+        self.step_rewards: Deque[float] = deque(
+            maxlen=step_reward_window
+        )  # Keep for potential detailed reward analysis
         self.losses: Deque[float] = deque(maxlen=avg_window)
         self.grad_norms: Deque[float] = deque(maxlen=avg_window)
         self.avg_max_qs: Deque[float] = deque(maxlen=avg_window)
@@ -45,7 +47,9 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.best_rl_score_history: Deque[float] = deque(maxlen=avg_window)
         self.best_game_score_history: Deque[int] = deque(maxlen=avg_window)
         self.lr_values: Deque[float] = deque(maxlen=avg_window)
-        self.epsilon_values: Deque[float] = deque(maxlen=avg_window)
+        self.epsilon_values: Deque[float] = deque(
+            maxlen=avg_window
+        )  # Keep even if using Noisy
 
         # Current State / Best Values
         self.total_episodes = 0
@@ -57,21 +61,20 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.current_sps: float = 0.0
         self.current_lr: float = 0.0
 
-        # --- MODIFIED: Detailed Best Tracking ---
+        # --- ENHANCED Best Tracking ---
         self.best_score: float = -float("inf")
         self.previous_best_score: float = -float("inf")
         self.best_score_step: int = 0
 
-        self.best_game_score: int = -float("inf")  # Use float for consistent init
-        self.previous_best_game_score: int = -float("inf")
+        self.best_game_score: float = -float("inf")  # Use float for consistent init
+        self.previous_best_game_score: float = -float("inf")
         self.best_game_score_step: int = 0
 
-        self.best_loss: float = float("inf")  # Lower is better for loss
+        self.best_loss: float = float("inf")
         self.previous_best_loss: float = float("inf")
         self.best_loss_step: int = 0
-        # --- END MODIFIED ---
+        # --- END ENHANCED ---
 
-        # Timing / Logging Control
         self.last_log_time: float = time.time()
         self.last_log_step: int = 0
         self.start_time: float = time.time()
@@ -88,7 +91,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
     ):
-        # Use provided global_step or the internally tracked one
         current_step = (
             global_step if global_step is not None else self.current_global_step
         )
@@ -103,11 +105,11 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.total_episodes = episode_num
         step_info = f"at Step ~{current_step/1e6:.1f}M"
 
-        # --- MODIFIED: Update detailed best score tracking ---
+        # --- ENHANCED Best Score Tracking ---
         if episode_score > self.best_score:
-            self.previous_best_score = self.best_score  # Store old best
+            self.previous_best_score = self.best_score
             self.best_score = episode_score
-            self.best_score_step = current_step  # Record step
+            self.best_score_step = current_step
             prev_str = (
                 f"{self.previous_best_score:.2f}"
                 if self.previous_best_score > -float("inf")
@@ -118,23 +120,23 @@ class SimpleStatsRecorder(StatsRecorderBase):
             )
 
         if game_score is not None and game_score > self.best_game_score:
-            self.previous_best_game_score = self.best_game_score  # Store old best
-            self.best_game_score = game_score
-            self.best_game_score_step = current_step  # Record step
+            self.previous_best_game_score = self.best_game_score
+            self.best_game_score = float(game_score)  # Store as float
+            self.best_game_score_step = current_step
             prev_str = (
                 f"{self.previous_best_game_score:.0f}"
                 if self.previous_best_game_score > -float("inf")
                 else "N/A"
             )
             print(
-                f"--- 🎮 New Best Game: {self.best_game_score} {step_info} (Prev: {prev_str}) ---"
+                f"--- 🎮 New Best Game: {self.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
             )
-        # --- END MODIFIED ---
+        # --- END ENHANCED ---
 
         # Update history deques for plotting best scores over time
         current_best_rl = self.best_score if self.best_score > -float("inf") else 0.0
         current_best_game = (
-            self.best_game_score if self.best_game_score > -float("inf") else 0
+            int(self.best_game_score) if self.best_game_score > -float("inf") else 0
         )
         self.best_rl_score_history.append(current_best_rl)
         self.best_game_score_history.append(current_best_game)
@@ -144,23 +146,18 @@ class SimpleStatsRecorder(StatsRecorderBase):
         if g_step > self.current_global_step:
             self.current_global_step = g_step
 
-        # Append data to deques if present in step_data
         if "loss" in step_data and step_data["loss"] is not None and g_step > 0:
             current_loss = step_data["loss"]
             self.losses.append(current_loss)
-            # --- MODIFIED: Track best loss ---
+            # --- ENHANCED Best Loss Tracking ---
             if current_loss < self.best_loss:
                 self.previous_best_loss = self.best_loss
                 self.best_loss = current_loss
                 self.best_loss_step = g_step
-                prev_str = (
-                    f"{self.previous_best_loss:.4f}"
-                    if self.previous_best_loss < float("inf")
-                    else "N/A"
-                )
                 # Optional: Print new best loss to console
+                # prev_str = f"{self.previous_best_loss:.4f}" if self.previous_best_loss < float("inf") else "N/A"
                 # print(f"--- ✨ New Best Loss: {self.best_loss:.4f} at Step ~{g_step/1e6:.1f}M (Prev: {prev_str}) ---")
-            # --- END MODIFIED ---
+            # --- END ENHANCED ---
 
         if (
             "grad_norm" in step_data
@@ -168,8 +165,9 @@ class SimpleStatsRecorder(StatsRecorderBase):
             and g_step > 0
         ):
             self.grad_norms.append(step_data["grad_norm"])
-        if "step_reward" in step_data and step_data["step_reward"] is not None:
-            self.step_rewards.append(step_data["step_reward"])
+        # Removed step_reward tracking, focus on episode rewards
+        # if "step_reward" in step_data and step_data["step_reward"] is not None:
+        #     self.step_rewards.append(step_data["step_reward"])
         if (
             "avg_max_q" in step_data
             and step_data["avg_max_q"] is not None
@@ -189,50 +187,40 @@ class SimpleStatsRecorder(StatsRecorderBase):
             self.current_epsilon = step_data["epsilon"]
             self.epsilon_values.append(self.current_epsilon)
 
-        # Calculate SPS
         if "step_time" in step_data and step_data["step_time"] > 1e-6:
             num_steps_in_call = step_data.get("num_steps_processed", 1)
             sps = num_steps_in_call / step_data["step_time"]
             self.sps_values.append(sps)
-            self.current_sps = sps
+            self.current_sps = sps  # Update current SPS immediately
 
-        # Trigger console log periodically
         self.log_summary(g_step)
 
     def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
         if current_global_step is None:
             current_global_step = self.current_global_step
 
-        # Calculate averages safely
-        avg_sps = np.mean(self.sps_values) if self.sps_values else self.current_sps
-        avg_score = np.mean(self.episode_scores) if self.episode_scores else 0.0
-        avg_length = np.mean(self.episode_lengths) if self.episode_lengths else 0.0
-        avg_loss = np.mean(self.losses) if self.losses else 0.0
-        avg_max_q = np.mean(self.avg_max_qs) if self.avg_max_qs else 0.0
-        avg_game_score = np.mean(self.game_scores) if self.game_scores else 0.0
-        avg_lines_cleared = (
-            np.mean(self.episode_lines_cleared) if self.episode_lines_cleared else 0.0
-        )
-        avg_lr = np.mean(self.lr_values) if self.lr_values else self.current_lr
+        # Use np.mean with checks for empty deques
+        def safe_mean(q: Deque, default=0.0) -> float:
+            return float(np.mean(q)) if q else default
 
         summary = {
             # Averages
-            "avg_score_window": avg_score,
-            "avg_length_window": avg_length,
-            "avg_loss_window": avg_loss,
-            "avg_max_q_window": avg_max_q,
-            "avg_game_score_window": avg_game_score,
-            "avg_lines_cleared_window": avg_lines_cleared,
-            "avg_sps_window": avg_sps,
-            "avg_lr_window": avg_lr,
+            "avg_score_window": safe_mean(self.episode_scores),
+            "avg_length_window": safe_mean(self.episode_lengths),
+            "avg_loss_window": safe_mean(self.losses),
+            "avg_max_q_window": safe_mean(self.avg_max_qs),
+            "avg_game_score_window": safe_mean(self.game_scores),
+            "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
+            "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
+            "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
             # Current / Total
             "total_episodes": self.total_episodes,
             "beta": self.current_beta,
             "buffer_size": self.current_buffer_size,
-            "steps_per_second": self.current_sps,
+            "steps_per_second": self.current_sps,  # Use the latest calculated SPS
             "global_step": current_global_step,
             "current_lr": self.current_lr,
-            # --- MODIFIED: Add detailed best tracking ---
+            # --- ENHANCED Best Tracking ---
             "best_score": self.best_score,
             "previous_best_score": self.previous_best_score,
             "best_score_step": self.best_score_step,
@@ -242,7 +230,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
             "best_loss": self.best_loss,
             "previous_best_loss": self.previous_best_loss,
             "best_loss_step": self.best_loss_step,
-            # --- END MODIFIED ---
+            # --- END ENHANCED ---
             # Counts (for debugging/UI)
             "num_ep_scores": len(self.episode_scores),
             "num_losses": len(self.losses),
@@ -262,16 +250,15 @@ class SimpleStatsRecorder(StatsRecorderBase):
         runtime_hrs = elapsed_runtime / 3600
 
         best_score_val = (
-            summary["best_score"] if summary["best_score"] > -float("inf") else "N/A"
+            f"{summary['best_score']:.2f}"
+            if summary["best_score"] > -float("inf")
+            else "N/A"
         )
-        if isinstance(best_score_val, float):
-            best_score_val = f"{best_score_val:.2f}"
-
         best_loss_val = (
-            summary["best_loss"] if summary["best_loss"] < float("inf") else "N/A"
+            f"{summary['best_loss']:.4f}"
+            if summary["best_loss"] < float("inf")
+            else "N/A"
         )
-        if isinstance(best_loss_val, float):
-            best_loss_val = f"{best_loss_val:.4f}"
 
         log_str = (
             f"[{runtime_hrs:.1f}h|Stats] Step: {global_step/1e6:<6.2f}M | "
@@ -281,6 +268,12 @@ class SimpleStatsRecorder(StatsRecorderBase):
             f"LR: {summary['current_lr']:.1e} | "
             f"Buf: {summary['buffer_size']/1e6:.2f}M"
         )
+        # Add PER Beta if used
+        if (
+            summary["beta"] > 0 and summary["beta"] < 1.0
+        ):  # Crude check if PER is active
+            log_str += f" | Beta: {summary['beta']:.3f}"
+
         print(log_str)
 
         self.last_log_time = time.time()
@@ -288,6 +281,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
 
     def get_plot_data(self) -> Dict[str, Deque]:
         """Returns copies of deques needed for UI plotting."""
+        # Ensure all expected keys exist, even if empty
         return {
             "episode_scores": self.episode_scores.copy(),
             "episode_lengths": self.episode_lengths.copy(),
@@ -304,7 +298,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
             "epsilon_values": self.epsilon_values.copy(),
         }
 
-    # --- No-op methods for compatibility with base class ---
+    # --- No-op methods ---
     def record_histogram(
         self,
         tag: str,
@@ -327,5 +321,4 @@ class SimpleStatsRecorder(StatsRecorderBase):
         pass
 
     def close(self):
-        """Closes the recorder (no-op for simple recorder)."""
         print("[SimpleStatsRecorder] Closed.")

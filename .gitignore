@@ -2,3 +2,5 @@ __pycache__
 checkpoints
 logs
 venv
+.DS_Store
+fonts

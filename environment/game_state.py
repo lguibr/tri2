@@ -1,28 +1,29 @@
 # File: environment/game_state.py
 import time
 import numpy as np
-from typing import List, Optional, Tuple
-from collections import deque  # Import deque
-from typing import Deque  # Import Deque
+from typing import List, Optional, Tuple, Dict, Union  # Added Dict, Union
+from collections import deque
+from typing import Deque
 
 from .grid import Grid
 from .shape import Shape
 from config import EnvConfig, RewardConfig
 
+# --- MODIFIED: Define StateType for clarity ---
+StateType = Dict[str, np.ndarray]  # e.g., {"grid": ndarray, "shapes": ndarray}
+# --- END MODIFIED ---
+
 
 class GameState:
     def __init__(self):
-        self.grid = Grid()
+        self.env_config = EnvConfig()  # Store config instance
+        self.grid = Grid(self.env_config)  # Pass config to Grid
         self.shapes: List[Optional[Shape]] = [
-            Shape() for _ in range(EnvConfig.NUM_SHAPE_SLOTS)
+            Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)
         ]
         self.score = 0.0  # Cumulative RL reward
         self.game_score = 0  # Game-specific score
-
-        # --- MODIFIED: Initialize lines cleared tracker ---
         self.lines_cleared_this_episode = 0
-        # --- END MODIFIED ---
-
         self.blink_time = 0.0
         self.last_time = time.time()
         self.freeze_time = 0.0
@@ -30,16 +31,12 @@ class GameState:
         self._last_action_valid = True
         self.rewards = RewardConfig
 
-    def reset(self) -> np.ndarray:
-        self.grid = Grid()
-        self.shapes = [Shape() for _ in range(EnvConfig.NUM_SHAPE_SLOTS)]
+    def reset(self) -> StateType:  # Return new StateType
+        self.grid = Grid(self.env_config)
+        self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
         self.score = 0.0
         self.game_score = 0
-
-        # --- MODIFIED: Reset lines cleared tracker ---
         self.lines_cleared_this_episode = 0
-        # --- END MODIFIED ---
-
         self.blink_time = 0.0
         self.freeze_time = 0.0
         self.game_over = False
@@ -47,7 +44,6 @@ class GameState:
         self.last_time = time.time()
         return self.get_state()
 
-    # valid_actions, is_over, is_frozen, decode_act remain the same
     def valid_actions(self) -> List[int]:
         if self.game_over or self.freeze_time > 0:
             return []
@@ -56,6 +52,9 @@ class GameState:
         for i, sh in enumerate(self.shapes):
             if not sh:
                 continue
+            # --- OPTIMIZATION: Check only potentially valid root cells ---
+            # Instead of checking all R*C cells, we could optimize,
+            # but for moderate grids, checking all is simpler and likely fast enough.
             for r in range(self.grid.rows):
                 for c in range(self.grid.cols):
                     if self.grid.can_place(sh, r, c):
@@ -90,34 +89,30 @@ class GameState:
         self._last_action_valid = False
         reward = self.rewards.PENALTY_INVALID_MOVE
         # Check if game is over due to invalid move AND no valid moves left
-        if not self.valid_actions():
-            self.game_over = True
-            self.freeze_time = 1.0  # Freeze on game over
-            reward += self.rewards.PENALTY_GAME_OVER
+        # Note: This check might be redundant if step() already checks valid_actions()
+        # before calling this. Let's assume step() handles the game over check.
+        # if not self.valid_actions():
+        #     self.game_over = True
+        #     self.freeze_time = 1.0
+        #     reward += self.rewards.PENALTY_GAME_OVER
         return reward
 
     def _handle_valid_placement(
         self, shp: Shape, s_idx: int, rr: int, cc: int
     ) -> float:
         self._last_action_valid = True
-        reward = 0.0
-
-        # Reward for placing shape
-        reward += self.rewards.REWARD_PLACE_PER_TRI * len(shp.triangles)
-        self.game_score += len(shp.triangles)  # Simple game score increment
+        reward = 0.0  # Start with zero reward for placement
 
         # Place the shape
         self.grid.place(shp, rr, cc)
         self.shapes[s_idx] = None  # Remove shape from available slots
+        self.game_score += len(shp.triangles)  # Update game score
 
         # Clear lines and get rewards/score
         lines_cleared, triangles_cleared = self.grid.clear_filled_rows()
-
-        # --- MODIFIED: Accumulate lines cleared ---
         self.lines_cleared_this_episode += lines_cleared
-        # --- END MODIFIED ---
 
-        # Apply line clear rewards
+        # Apply line clear rewards (more significant now)
         if lines_cleared == 1:
             reward += self.rewards.REWARD_CLEAR_1
         elif lines_cleared == 2:
@@ -127,23 +122,24 @@ class GameState:
 
         # Bonus game score for cleared triangles
         if triangles_cleared > 0:
-            self.game_score += triangles_cleared * 2  # Example bonus score
-            self.blink_time = 0.5  # Visual feedback
-            self.freeze_time = 0.5  # Short pause after clearing
+            self.game_score += triangles_cleared * 2
+            self.blink_time = 0.5
+            self.freeze_time = 0.5
 
-        # Penalty for creating holes
+        # Penalty for creating holes (can be tuned)
         num_holes = self.grid.count_holes()
         reward += num_holes * self.rewards.PENALTY_HOLE_PER_HOLE
 
         # Refill shapes if all slots are empty
         if all(x is None for x in self.shapes):
-            self.shapes = [Shape() for _ in range(EnvConfig.NUM_SHAPE_SLOTS)]
+            self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
 
         # Check if game is over after placement (no more valid moves)
+        # This check is crucial here
         if not self.valid_actions():
             self.game_over = True
-            self.freeze_time = 1.0  # Freeze on game over
-            reward += self.rewards.PENALTY_GAME_OVER
+            self.freeze_time = 1.0
+            reward += self.rewards.PENALTY_GAME_OVER  # Apply game over penalty
 
         return reward
 
@@ -151,51 +147,62 @@ class GameState:
         """Performs one game step based on the chosen action."""
         self._update_timers()
 
-        # If already game over or frozen, return immediately
         if self.game_over:
             return (0.0, True)
         if self.freeze_time > 0:
-            return (0.0, False)  # Return 0 reward, not done
+            return (0.0, False)
 
-        # Decode action
+        # Check if the chosen action 'a' is actually valid *now*
+        # This prevents issues if the agent selects an action that became invalid
+        # between the time valid_actions() was called and step() is executed.
+        # However, in a typical RL loop, the agent gets valid actions just before selecting.
+        # We rely on the agent masking correctly. If an invalid action is passed,
+        # we penalize it.
+
         s_idx, rr, cc = self.decode_act(a)
-
-        # Check if the chosen shape exists and placement is valid
         shp = self.shapes[s_idx] if 0 <= s_idx < len(self.shapes) else None
+
+        # Check placement validity
         is_valid_placement = shp is not None and self.grid.can_place(shp, rr, cc)
 
-        # Calculate reward based on placement validity
         if is_valid_placement:
             current_rl_reward = self._handle_valid_placement(shp, s_idx, rr, cc)
         else:
             current_rl_reward = self._handle_invalid_placement()
+            # If the *only* reason the game ends is because the agent chose an invalid
+            # move when valid moves *did* exist, we might not set game_over here,
+            # but the penalty should discourage it. If no valid moves exist at all,
+            # game_over should have been set earlier or will be set in _handle_valid_placement
+            # after the next valid move (if any). Let's ensure game over is checked robustly.
+            if not self.valid_actions():  # Double check if NO valid actions remain
+                if not self.game_over:  # Avoid applying penalty twice
+                    self.game_over = True
+                    self.freeze_time = 1.0
+                    current_rl_reward += self.rewards.PENALTY_GAME_OVER
 
-        # Add small reward for surviving the step if not game over
-        if not self.game_over:
-            current_rl_reward += self.rewards.REWARD_ALIVE_STEP
-
-        # Update total RL score
+        # No REWARD_ALIVE_STEP anymore
         self.score += current_rl_reward
-
-        # Return the RL reward for this step and the done flag
         return (current_rl_reward, self.game_over)
 
-    # get_state remains the same
-    def get_state(self) -> np.ndarray:
-        """Generates the state representation as a flat numpy array."""
+    # --- MODIFIED: get_state returns a dictionary ---
+    def get_state(self) -> StateType:
+        """
+        Generates the state representation as a dictionary containing
+        'grid' (numpy array [C, H, W]) and 'shapes' (numpy array [N_SLOTS, FEAT_PER_SHAPE]).
+        """
         # 1. Grid Features
-        # [Channel, Height, Width] -> Flattened
-        board_state = self.grid.get_feature_matrix().flatten()
+        grid_state = self.grid.get_feature_matrix()  # Shape: [3, H, W]
 
         # 2. Shape Features
-        shape_features_per = EnvConfig.SHAPE_FEATURES_PER_SHAPE
-        num_shapes_expected = EnvConfig.NUM_SHAPE_SLOTS
+        shape_features_per = self.env_config.SHAPE_FEATURES_PER_SHAPE
+        num_shapes_expected = self.env_config.NUM_SHAPE_SLOTS
         shape_features_total = num_shapes_expected * shape_features_per
-        shape_rep = np.zeros(shape_features_total, dtype=np.float32)
+        shape_rep = np.zeros(
+            (num_shapes_expected, shape_features_per), dtype=np.float32
+        )
 
-        idx = 0
         # Normalization constants (adjust if needed)
-        max_tris_norm = 6.0  # Max expected triangles in a shape + 1
+        max_tris_norm = 6.0
         max_h_norm = float(self.grid.rows)
         max_w_norm = float(self.grid.cols)
 
@@ -211,29 +218,26 @@ class GameState:
                 width = mxc - mnc + 1
 
                 # Normalize features (clip to [0, 1])
-                shape_rep[idx] = np.clip(float(n) / max_tris_norm, 0.0, 1.0)
-                shape_rep[idx + 1] = np.clip(float(ups) / max_tris_norm, 0.0, 1.0)
-                shape_rep[idx + 2] = np.clip(float(dns) / max_tris_norm, 0.0, 1.0)
-                shape_rep[idx + 3] = np.clip(float(height) / max_h_norm, 0.0, 1.0)
-                shape_rep[idx + 4] = np.clip(float(width) / max_w_norm, 0.0, 1.0)
+                shape_rep[i, 0] = np.clip(float(n) / max_tris_norm, 0.0, 1.0)
+                shape_rep[i, 1] = np.clip(float(ups) / max_tris_norm, 0.0, 1.0)
+                shape_rep[i, 2] = np.clip(float(dns) / max_tris_norm, 0.0, 1.0)
+                shape_rep[i, 3] = np.clip(float(height) / max_h_norm, 0.0, 1.0)
+                shape_rep[i, 4] = np.clip(float(width) / max_w_norm, 0.0, 1.0)
             # else: Features remain 0 if shape slot is empty
 
-            idx += shape_features_per
+        # --- Return dictionary ---
+        state_dict = {
+            "grid": grid_state.astype(np.float32),
+            "shapes": shape_rep.astype(
+                np.float32
+            ),  # Shape: [NUM_SLOTS, FEAT_PER_SHAPE]
+        }
+        return state_dict
 
-        # 3. Concatenate grid and shape features
-        state_array = np.concatenate((board_state, shape_rep))
-
-        # Validation check
-        if len(state_array) != EnvConfig.STATE_DIM:
-            raise ValueError(
-                f"State length mismatch in get_state: Got {len(state_array)}, Expected {EnvConfig.STATE_DIM}"
-            )
-        return state_array.astype(np.float32)  # Ensure float32
+    # --- END MODIFIED ---
 
     def is_blinking(self) -> bool:
-        """Returns True if the game should be blinking (e.g., after line clear)."""
         return self.blink_time > 0
 
     def get_shapes(self) -> List[Shape]:
-        """Returns a list of the currently available shapes (excluding None)."""
         return [s for s in self.shapes if s is not None]

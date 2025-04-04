@@ -3,54 +3,84 @@ from typing import NamedTuple, Union, Tuple, List, Dict, Any, Optional
 import numpy as np
 import torch
 
+# --- MODIFIED: StateType is now Dict ---
+# from environment.game_state import StateType # Import from env if defined there
+StateType = Dict[str, np.ndarray]  # e.g., {"grid": ndarray, "shapes": ndarray}
+# --- END MODIFIED ---
 
-class Transition(NamedTuple):
-    state: np.ndarray
-    action: int
-    reward: float  # For N-step buffer, this holds the N-step RL reward
-    next_state: np.ndarray  # For N-step buffer, this holds the N-step next state
-    done: bool  # For N-step buffer, this holds the N-step done flag
-    n_step_discount: Optional[float] = None  # gamma^k for N-step
-
-
-# Type alias for state
-StateType = np.ndarray
 # Type alias for action
 ActionType = int
 
-# --- Batch Types (Numpy) ---
-# Standard 1-step batch
-NumpyBatch = Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
-# (states, actions, rewards, next_states, dones)
 
-# N-step batch (includes discount factor gamma^k)
-NumpyNStepBatch = Tuple[
-    np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray
+class Transition(NamedTuple):
+    state: StateType  # State is now a Dict
+    action: ActionType
+    reward: float
+    next_state: StateType  # Next state is now a Dict
+    done: bool
+    n_step_discount: Optional[float] = None
+
+
+# --- Batch Types (Numpy) ---
+# States and next_states are now lists of dictionaries
+NumpyStateBatch = List[StateType]
+NumpyActionBatch = np.ndarray
+NumpyRewardBatch = np.ndarray
+NumpyDoneBatch = np.ndarray
+NumpyDiscountBatch = np.ndarray  # For N-step
+
+# Standard 1-step batch
+NumpyBatch = Tuple[
+    NumpyStateBatch, NumpyActionBatch, NumpyRewardBatch, NumpyStateBatch, NumpyDoneBatch
 ]
-# (states, actions, n_step_rewards, n_step_next_states, n_step_dones, n_step_discounts)
+
+# N-step batch
+NumpyNStepBatch = Tuple[
+    NumpyStateBatch,
+    NumpyActionBatch,
+    NumpyRewardBatch,
+    NumpyStateBatch,
+    NumpyDoneBatch,
+    NumpyDiscountBatch,
+]
 
 # Prioritized 1-step batch
 PrioritizedNumpyBatch = Tuple[NumpyBatch, np.ndarray, np.ndarray]
-# ((s,a,r,ns,d), indices, weights)
+# ((s_dicts, a, r, ns_dicts, d), indices, weights)
 
 # Prioritized N-step batch
 PrioritizedNumpyNStepBatch = Tuple[NumpyNStepBatch, np.ndarray, np.ndarray]
-# ((s,a,rn,nsn,dn,gamman), indices, weights)
+# ((s_dicts, a, rn, nsn_dicts, dn, gamman), indices, weights)
 
 
 # --- Batch Types (Tensor) ---
+# State tensors are now tuples (grid_tensor, shape_tensor)
+TensorStateBatch = Tuple[torch.Tensor, torch.Tensor]
+TensorActionBatch = torch.Tensor
+TensorRewardBatch = torch.Tensor
+TensorDoneBatch = torch.Tensor
+TensorDiscountBatch = torch.Tensor  # For N-step
+TensorWeightsBatch = torch.Tensor  # For PER
+
 # Standard 1-step batch
 TensorBatch = Tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+    TensorStateBatch,
+    TensorActionBatch,
+    TensorRewardBatch,
+    TensorStateBatch,
+    TensorDoneBatch,
 ]
-# (states, actions, rewards, next_states, dones)
 
-# N-step batch (includes discount factor gamma^k)
+# N-step batch
 TensorNStepBatch = Tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+    TensorStateBatch,
+    TensorActionBatch,
+    TensorRewardBatch,
+    TensorStateBatch,
+    TensorDoneBatch,
+    TensorDiscountBatch,
 ]
-# (states, actions, n_step_rewards, n_step_next_states, n_step_dones, n_step_discounts)
 
 
 # --- Agent State ---
-AgentStateDict = Dict[str, Any]
+AgentStateDict = Dict[str, Any]  # Remains the same
