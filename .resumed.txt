@@ -813,6 +813,7 @@ File: visualization/__init__.py
 
 
 File: init/rl_components.py
+# File: init/rl_components.py
 import sys
 import traceback
 import numpy as np
@@ -845,28 +846,28 @@ from agent.dqn_agent import DQNAgent
 from agent.replay_buffer.base_buffer import ReplayBufferBase
 from agent.replay_buffer.buffer_utils import create_replay_buffer
 from training.trainer import Trainer
+
+# --- MODIFIED IMPORTS ---
 from stats.stats_recorder import StatsRecorderBase
+from stats.aggregator import StatsAggregator
+from stats.simple_stats_recorder import SimpleStatsRecorder
 from stats.tensorboard_logger import TensorBoardStatsRecorder
+
+# --- END MODIFIED ---
 
 
 def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
     print(f"Initializing {num_envs} game environments...")
     try:
-        envs = [
-            GameState() for _ in range(num_envs)
-        ]  # GameState uses its internal EnvConfig instance now
-        s_test_dict = envs[0].reset()  # Returns dict
+        envs = [GameState() for _ in range(num_envs)]
+        s_test_dict = envs[0].reset()
 
         if not isinstance(s_test_dict, dict):
             raise TypeError("Env reset did not return a dictionary state.")
-
-        # --- MODIFIED: Check grid component shape (2 channels) ---
         if "grid" not in s_test_dict:
             raise KeyError("State dict missing 'grid'")
         grid_state = s_test_dict["grid"]
-        expected_grid_shape = (
-            env_config.GRID_STATE_SHAPE
-        )  # Get expected shape (2, H, W) from instance
+        expected_grid_shape = env_config.GRID_STATE_SHAPE
         if (
             not isinstance(grid_state, np.ndarray)
             or grid_state.shape != expected_grid_shape
@@ -875,9 +876,7 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
                 f"Initial grid state shape mismatch! Env:{grid_state.shape}, Cfg:{expected_grid_shape}"
             )
         print(f"Initial grid state shape check PASSED: {grid_state.shape}")
-        # --- END MODIFIED ---
 
-        # Check shapes component (unchanged)
         if "shapes" not in s_test_dict:
             raise KeyError("State dict missing 'shapes'")
         shape_state = s_test_dict["shapes"]
@@ -917,35 +916,46 @@ def initialize_agent_buffer(
     buffer_config: BufferConfig,
 ) -> Tuple[DQNAgent, ReplayBufferBase]:
     print("Initializing Agent and Buffer...")
-    # Pass EnvConfig instance to DQNAgent
     agent = DQNAgent(config=model_config, dqn_config=dqn_config, env_config=env_config)
     buffer = create_replay_buffer(config=buffer_config, dqn_config=dqn_config)
     print("Agent and Buffer initialized.")
     return agent, buffer
 
 
+# --- MODIFIED: initialize_stats_recorder ---
 def initialize_stats_recorder(
     stats_config: StatsConfig,
     tb_config: TensorBoardConfig,
     config_dict: Dict[str, Any],
     agent: Optional[DQNAgent],
-    env_config: EnvConfig,  # Expecting instance
+    env_config: EnvConfig,
 ) -> StatsRecorderBase:
-    """Creates the TensorBoard recorder, logs graph (on CPU) and hparams."""
-    print(f"Initializing Stats Recorder (TensorBoard)...")
-    avg_window = stats_config.STATS_AVG_WINDOW
-    console_log_freq = stats_config.CONSOLE_LOG_FREQ
+    """
+    Creates the StatsAggregator, SimpleStatsRecorder, and TensorBoardStatsRecorder.
+    Returns the final TensorBoardStatsRecorder instance.
+    """
+    print(f"Initializing Statistics Components...")
 
+    # 1. Create the Aggregator
+    stats_aggregator = StatsAggregator(
+        avg_window=stats_config.STATS_AVG_WINDOW,
+        plot_window=stats_config.PLOT_DATA_WINDOW,
+    )
+
+    # 2. Create the Console Logger (uses the aggregator)
+    console_recorder = SimpleStatsRecorder(
+        aggregator=stats_aggregator,
+        console_log_interval=stats_config.CONSOLE_LOG_FREQ,
+    )
+
+    # 3. Prepare for TensorBoard Logger (Graph, HParams)
     dummy_grid_cpu = None
     dummy_shapes_cpu = None
     model_for_graph_cpu = None
-
     if agent and agent.online_net:
         try:
-            # --- MODIFIED: Create dummy grid with 2 channels ---
-            expected_grid_shape = env_config.GRID_STATE_SHAPE  # Get shape (2, H, W)
+            expected_grid_shape = env_config.GRID_STATE_SHAPE
             dummy_grid_np = np.zeros(expected_grid_shape, dtype=np.float32)
-            # --- END MODIFIED ---
             dummy_shapes_np = np.zeros(
                 (env_config.NUM_SHAPE_SLOTS, env_config.SHAPE_FEATURES_PER_SHAPE),
                 dtype=np.float32,
@@ -953,33 +963,24 @@ def initialize_stats_recorder(
             dummy_grid_cpu = torch.tensor(dummy_grid_np, device="cpu").unsqueeze(0)
             dummy_shapes_cpu = torch.tensor(dummy_shapes_np, device="cpu").unsqueeze(0)
 
-            if not hasattr(agent, "dqn_config"):
-                raise AttributeError("DQNAgent missing 'dqn_config'")
-            if not hasattr(agent.online_net, "config"):
-                raise AttributeError("Agent's online_net missing 'config'")
+            if not hasattr(agent, "dqn_config") or not hasattr(
+                agent.online_net, "config"
+            ):
+                raise AttributeError(
+                    "Agent or network missing required config attributes."
+                )
 
-            # Recreate model on CPU for graph logging
             model_for_graph_cpu = type(agent.online_net)(
-                env_config=env_config,  # Pass instance
-                action_dim=env_config.ACTION_DIM,  # Access property value
+                env_config=env_config,
+                action_dim=env_config.ACTION_DIM,
                 model_config=agent.online_net.config,
                 dqn_config=agent.dqn_config,
                 dueling=agent.online_net.dueling,
                 use_noisy=agent.online_net.use_noisy,
             ).to("cpu")
-
             model_for_graph_cpu.load_state_dict(agent.online_net.state_dict())
             model_for_graph_cpu.eval()
-            print(
-                "[Stats Init] Prepared model copy and dummy input on CPU for graph logging."
-            )
-        except AttributeError as ae:
-            print(
-                f"Warning: Attribute error preparing model/input for graph logging: {ae}. Check AgentNetwork init/attributes."
-            )
-            dummy_grid_cpu = None
-            dummy_shapes_cpu = None
-            model_for_graph_cpu = None
+            print("[Stats Init] Prepared model copy and dummy input on CPU for graph.")
         except Exception as e:
             print(f"Warning: Failed to prepare model/input for graph logging: {e}")
             traceback.print_exc()
@@ -987,6 +988,7 @@ def initialize_stats_recorder(
             dummy_shapes_cpu = None
             model_for_graph_cpu = None
 
+    # 4. Create the TensorBoard Logger (uses aggregator and console logger)
     print(f"Using TensorBoard Logger (Log Dir: {tb_config.LOG_DIR})")
     try:
         dummy_input_tuple = (
@@ -994,35 +996,42 @@ def initialize_stats_recorder(
             if dummy_grid_cpu is not None and dummy_shapes_cpu is not None
             else None
         )
-        stats_recorder = TensorBoardStatsRecorder(
+        tb_recorder = TensorBoardStatsRecorder(
+            aggregator=stats_aggregator,
+            console_recorder=console_recorder,
             log_dir=tb_config.LOG_DIR,
             hparam_dict=config_dict,
             model_for_graph=model_for_graph_cpu,
-            dummy_input_for_graph=dummy_input_tuple,  # Pass tuple
-            console_log_interval=console_log_freq,
-            avg_window=avg_window,
-            histogram_log_interval=tb_config.HISTOGRAM_LOG_FREQ,
-            image_log_interval=tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1,
+            dummy_input_for_graph=dummy_input_tuple,
+            histogram_log_interval=(
+                tb_config.HISTOGRAM_LOG_FREQ if tb_config.LOG_HISTOGRAMS else -1
+            ),
+            image_log_interval=(
+                tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1
+            ),
             shape_q_log_interval=(
                 tb_config.SHAPE_Q_LOG_FREQ
                 if tb_config.LOG_SHAPE_PLACEMENT_Q_VALUES
                 else -1
-            ),  # Pass new freq
+            ),
         )
-        print("Stats Recorder initialized.")
-        return stats_recorder
+        print("Statistics Components initialized successfully.")
+        return tb_recorder  # Return the main recorder instance
     except Exception as e:
         print(f"FATAL: Error initializing TensorBoardStatsRecorder: {e}. Exiting.")
         traceback.print_exc()
         raise e
 
 
+# --- END MODIFIED ---
+
+
 def initialize_trainer(
     envs: List[GameState],
     agent: DQNAgent,
     buffer: ReplayBufferBase,
-    stats_recorder: StatsRecorderBase,
-    env_config: EnvConfig,  # Expecting instance
+    stats_recorder: StatsRecorderBase,  # This is now the TB recorder instance
+    env_config: EnvConfig,
     dqn_config: DQNConfig,
     train_config: TrainConfig,
     buffer_config: BufferConfig,
@@ -1034,7 +1043,7 @@ def initialize_trainer(
         agent=agent,
         buffer=buffer,
         stats_recorder=stats_recorder,
-        env_config=env_config,  # Pass instance
+        env_config=env_config,
         dqn_config=dqn_config,
         train_config=train_config,
         buffer_config=buffer_config,
@@ -1771,7 +1780,6 @@ __all__ = ["UIRenderer", "InputHandler"]
 
 File: ui/plotter.py
 # File: ui/plotter.py
-# (No significant changes needed, this file was already focused)
 import pygame
 import numpy as np
 from typing import Dict, Optional, Deque, List, Union, Tuple
@@ -1781,7 +1789,6 @@ import time
 import warnings
 from io import BytesIO
 
-# Ensure Matplotlib uses Agg backend for non-interactive plotting
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -1792,12 +1799,12 @@ try:
     plt.style.use("dark_background")
     plt.rcParams.update(
         {
-            "font.size": 9,
-            "axes.labelsize": 9,
-            "axes.titlesize": 10,
-            "xtick.labelsize": 8,
-            "ytick.labelsize": 8,
-            "legend.fontsize": 7,
+            "font.size": 8,  # Slightly smaller default font
+            "axes.labelsize": 8,
+            "axes.titlesize": 9,  # Slightly smaller title
+            "xtick.labelsize": 7,  # Smaller ticks
+            "ytick.labelsize": 7,
+            "legend.fontsize": 6,  # Smaller legend
             "figure.facecolor": "#262626",
             "axes.facecolor": "#303030",
             "axes.edgecolor": "#707070",
@@ -1817,36 +1824,30 @@ except Exception as e:
 def normalize_color_for_matplotlib(
     color_tuple_0_255: Tuple[int, int, int],
 ) -> Tuple[float, float, float]:
-    """Converts a 0-255 RGB tuple to a 0.0-1.0 RGB tuple for Matplotlib."""
     if isinstance(color_tuple_0_255, tuple) and len(color_tuple_0_255) == 3:
         return tuple(c / 255.0 for c in color_tuple_0_255)
     else:
         print(f"Warning: Invalid color tuple {color_tuple_0_255}, returning black.")
-        return (0.0, 0.0, 0.0)  # Return black on error
+        return (0.0, 0.0, 0.0)
 
 
 class Plotter:
-    """Handles creating Pygame surfaces from Matplotlib plots of training data."""
-
     def __init__(self):
-        self.plot_surface: Optional[pygame.Surface] = None  # Cached plot surface
+        self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        self.plot_update_interval: float = 1.0  # Seconds between plot redraws
-        self.rolling_window_size = (
-            StatsConfig.STATS_AVG_WINDOW
-        )  # Window for rolling avg line
-        self.default_line_width = 1.5
-        self.avg_line_width = 2.0
+        self.plot_update_interval: float = 1.0
+        self.rolling_window_size = StatsConfig.STATS_AVG_WINDOW
+        self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW  # Max points to plot
+        self.default_line_width = 1.0  # Thinner default line
+        self.avg_line_width = 1.5  # Thinner avg line
         self.avg_line_alpha = 0.7
 
     def create_plot_surface(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Creates a Pygame surface containing Matplotlib plots (3x3 layout)."""
         if target_width <= 10 or target_height <= 10 or not plot_data:
-            return None  # Cannot render if area is too small or no data
+            return None
 
-        # Extract data lists from the dictionary, handle missing keys gracefully
         data_lists = {
             key: list(plot_data.get(key, deque()))
             for key in [
@@ -1862,35 +1863,34 @@ class Plotter:
             ]
         }
 
-        # Check if there's *any* data to plot
         if not any(data_lists.values()):
             return None
 
         fig = None
         try:
-            # Ignore UserWarnings from Matplotlib (e.g., about tight_layout)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=UserWarning)
 
-                dpi = 85  # Adjust DPI based on desired resolution vs performance
+                # --- MODIFIED: Slightly higher DPI ---
+                dpi = 90
                 fig_width_in = target_width / dpi
                 fig_height_in = target_height / dpi
 
                 fig, axes = plt.subplots(
                     3, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
-                # Adjust spacing to prevent labels/titles overlapping
+                # --- MODIFIED: Tighter subplot adjustments ---
                 fig.subplots_adjust(
-                    hspace=0.65,
-                    wspace=0.4,
-                    left=0.12,
-                    right=0.97,
-                    bottom=0.15,
-                    top=0.92,
+                    hspace=0.55,  # Reduced vertical space
+                    wspace=0.35,  # Reduced horizontal space
+                    left=0.10,  # Reduced left margin
+                    right=0.98,  # Reduced right margin
+                    bottom=0.12,  # Reduced bottom margin
+                    top=0.95,  # Reduced top margin
                 )
+                # --- END MODIFIED ---
                 axes_flat = axes.flatten()
 
-                # Define colors using VisConfig and normalize for Matplotlib
                 colors = {
                     "rl_score": normalize_color_for_matplotlib(
                         VisConfig.GOOGLE_COLORS[0]
@@ -1901,22 +1901,18 @@ class Plotter:
                     "loss": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[3]),
                     "len": normalize_color_for_matplotlib(VisConfig.BLUE),
                     "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
-                    "best_game": normalize_color_for_matplotlib(
-                        (255, 165, 0)
-                    ),  # Orange
-                    "lr": normalize_color_for_matplotlib((255, 0, 255)),  # Magenta
+                    "best_game": normalize_color_for_matplotlib((255, 165, 0)),
+                    "lr": normalize_color_for_matplotlib((255, 0, 255)),
                     "buffer": normalize_color_for_matplotlib(VisConfig.RED),
-                    "beta": normalize_color_for_matplotlib(
-                        (100, 100, 255)
-                    ),  # Light Blue
+                    "beta": normalize_color_for_matplotlib((100, 100, 255)),
                     "avg": normalize_color_for_matplotlib(VisConfig.YELLOW),
                     "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
                 }
 
-                # X-axis label reflects the visible window size
-                plot_window_label = f"Plot Window (~{self.rolling_window_size} points)"
+                # --- MODIFIED: X-axis label reflects plot window ---
+                plot_window_label = f"Latest {min(self.plot_data_window, max(len(d) for d in data_lists.values() if d))} Points"
+                # --- END MODIFIED ---
 
-                # --- Plot each metric ---
                 self._plot_data_list(
                     axes_flat[0],
                     data_lists["episode_scores"],
@@ -1977,7 +1973,6 @@ class Plotter:
                     y_log_scale=True,
                 )
 
-                # Convert buffer size to fill percentage
                 buffer_fill_percent = [
                     (s / max(1, BufferConfig.REPLAY_BUFFER_SIZE) * 100)
                     for s in data_lists["buffer_sizes"]
@@ -1991,7 +1986,6 @@ class Plotter:
                     xlabel=plot_window_label,
                 )
 
-                # Plot PER Beta only if PER is enabled
                 if BufferConfig.USE_PER:
                     self._plot_data_list(
                         axes_flat[8],
@@ -2002,7 +1996,6 @@ class Plotter:
                         xlabel=plot_window_label,
                     )
                 else:
-                    # Show placeholder if PER is disabled
                     axes_flat[8].text(
                         0.5,
                         0.5,
@@ -2016,13 +2009,9 @@ class Plotter:
                     axes_flat[8].set_yticks([])
                     axes_flat[8].set_xticks([])
 
-                # General plot styling
                 for ax in axes_flat:
-                    ax.tick_params(
-                        axis="x", rotation=0
-                    )  # Ensure x-axis labels are horizontal
+                    ax.tick_params(axis="x", rotation=0)
 
-                # --- Convert Matplotlib plot to Pygame surface ---
                 buf = BytesIO()
                 fig.savefig(
                     buf,
@@ -2034,7 +2023,6 @@ class Plotter:
                 plot_img_surface = pygame.image.load(buf).convert()
                 buf.close()
 
-                # Scale surface smoothly if generated size doesn't match target (can happen with DPI/figsize)
                 if (
                     plot_img_surface.get_size() != (target_width, target_height)
                     and target_width > 0
@@ -2053,7 +2041,6 @@ class Plotter:
             traceback.print_exc()
             return None
         finally:
-            # Ensure Matplotlib figure is closed to free memory
             if fig is not None:
                 plt.close(fig)
 
@@ -2069,18 +2056,18 @@ class Plotter:
         placeholder_text: Optional[str] = None,
         y_log_scale: bool = False,
     ):
-        """Helper function to plot a single list of data onto a Matplotlib axis."""
         n_points = len(data)
         latest_val_str = ""
-        window_size = self.rolling_window_size  # Window for rolling average
+        avg_window = self.rolling_window_size  # Window for rolling average line
 
-        # Calculate latest value/average to display in title
         if data:
             current_val = data[-1]
-            if n_points >= window_size and avg_color is not None:
-                try:  # Handle potential errors if data contains non-numerics briefly
-                    latest_avg = np.mean(data[-window_size:])
-                    latest_val_str = f" (Now: {current_val:.3g}, Avg: {latest_avg:.3g})"
+            if n_points >= avg_window and avg_color is not None:
+                try:
+                    latest_avg = np.mean(data[-avg_window:])
+                    latest_val_str = (
+                        f" (Now: {current_val:.3g}, Avg{avg_window}: {latest_avg:.3g})"
+                    )
                 except Exception:
                     latest_val_str = f" (Now: {current_val:.3g})"
             else:
@@ -2089,7 +2076,6 @@ class Plotter:
             f"{label}{latest_val_str}", fontsize=plt.rcParams["axes.titlesize"]
         )
 
-        # Handle empty data case
         placeholder_text_color = normalize_color_for_matplotlib(VisConfig.GRAY)
         if n_points == 0:
             if show_placeholder:
@@ -2111,7 +2097,6 @@ class Plotter:
             return
 
         try:
-            # Plot raw data points
             x_coords = np.arange(n_points)
             ax.plot(
                 x_coords,
@@ -2121,23 +2106,19 @@ class Plotter:
                 label=f"{label} (Raw)",
             )
 
-            # Plot rolling average if applicable
-            if avg_color is not None and n_points >= window_size:
-                # Use convolution for efficient rolling average calculation
-                weights = np.ones(window_size) / window_size
+            if avg_color is not None and n_points >= avg_window:
+                weights = np.ones(avg_window) / avg_window
                 rolling_avg = np.convolve(data, weights, mode="valid")
-                # Adjust x-coordinates for the rolling average plot
-                avg_x_coords = np.arange(window_size - 1, n_points)
+                avg_x_coords = np.arange(avg_window - 1, n_points)
                 ax.plot(
                     avg_x_coords,
                     rolling_avg,
                     color=avg_color,
                     linewidth=self.avg_line_width,
                     alpha=self.avg_line_alpha,
-                    label=f"{label} (Avg {window_size})",
+                    label=f"{label} (Avg {avg_window})",
                 )
 
-            # --- Styling ---
             ax.tick_params(axis="both", which="major")
             if xlabel:
                 ax.set_xlabel(xlabel)
@@ -2147,37 +2128,45 @@ class Plotter:
                 alpha=plt.rcParams["grid.alpha"],
             )
 
-            # Set Y limits dynamically based on data range
             min_val = np.min(data)
             max_val = np.max(data)
-            # Add padding to Y limits, ensuring some padding even if min=max
             padding = (
                 (max_val - min_val) * 0.1
                 if max_val > min_val
                 else max(abs(max_val * 0.1), 1.0)
             )
-            padding = max(padding, 1e-6)  # Ensure padding is non-zero
+            padding = max(padding, 1e-6)
             ax.set_ylim(min_val - padding, max_val + padding)
 
-            # Apply log scale if requested and data is positive
-            if y_log_scale and min_val > 1e-9:  # Use small epsilon for > 0 check
+            if y_log_scale and min_val > 1e-9:
                 ax.set_yscale("log")
-                # Adjust lower y-limit for log scale to avoid issues near zero
                 ax.set_ylim(bottom=max(min_val * 0.9, 1e-9))
             else:
-                ax.set_yscale("linear")  # Ensure linear scale otherwise
+                ax.set_yscale("linear")
 
-            # Set X limits dynamically
             if n_points > 1:
                 ax.set_xlim(-0.02 * n_points, n_points - 1 + 0.02 * n_points)
             elif n_points == 1:
-                ax.set_xlim(-0.5, 0.5)  # Handle single point case
+                ax.set_xlim(-0.5, 0.5)
 
-            # Adjust number of x-axis ticks for readability
-            if n_points > 10:
+            # --- MODIFIED: Adjust x-ticks based on number of points ---
+            if n_points > 1000:
                 ax.xaxis.set_major_locator(
                     plt.MaxNLocator(integer=True, nbins=4)
-                )  # Limit tick count
+                )  # Fewer ticks for many points
+
+                # Optionally format as 'k' or 'M'
+                def format_func(value, tick_number):
+                    if value >= 1_000_000:
+                        return f"{value/1_000_000:.1f}M"
+                    if value >= 1_000:
+                        return f"{value/1_000:.0f}k"
+                    return f"{int(value)}"
+
+                ax.xaxis.set_major_formatter(plt.FuncFormatter(format_func))
+            elif n_points > 10:
+                ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
+            # --- END MODIFIED ---
 
         except Exception as plot_err:
             print(f"ERROR during _plot_data_list for '{label}': {plot_err}")
@@ -2198,12 +2187,9 @@ class Plotter:
     def get_cached_or_updated_plot(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Returns the cached plot surface or generates a new one if the interval has passed,
-        size changed, or data just arrived."""
         current_time = time.time()
-        has_data = any(plot_data.values())  # Check if any deque has data
+        has_data = any(plot_data.values())
 
-        # Conditions for updating the plot
         needs_update_time = (
             current_time - self.last_plot_update_time > self.plot_update_interval
         )
@@ -2211,10 +2197,8 @@ class Plotter:
             target_width,
             target_height,
         )
-        first_data_received = (
-            has_data and self.plot_surface is None
-        )  # Update when first data comes in
-        can_create_plot = target_width > 50 and target_height > 50  # Basic size check
+        first_data_received = has_data and self.plot_surface is None
+        can_create_plot = target_width > 50 and target_height > 50
 
         if can_create_plot and (
             needs_update_time or size_changed or first_data_received
@@ -2222,7 +2206,6 @@ class Plotter:
             new_plot_surface = self.create_plot_surface(
                 plot_data, target_width, target_height
             )
-            # Only update cache if plot generation was successful
             if new_plot_surface:
                 self.plot_surface = new_plot_surface
                 self.last_plot_update_time = current_time
@@ -3701,6 +3684,7 @@ __all__ = [
 
 
 File: config/core.py
+# File: config/core.py
 # --- Core Configuration Classes ---
 import torch
 from typing import Deque, Dict, Any, List, Type, Tuple, Optional
@@ -3715,7 +3699,7 @@ class VisConfig:
     VISUAL_STEP_DELAY = 0
     LEFT_PANEL_WIDTH = SCREEN_WIDTH // 2
     ENV_SPACING = 1
-    ENV_GRID_PADDING = 1  # Padding inside each environment cell
+    ENV_GRID_PADDING = 1
     FPS = 0
     WHITE = (255, 255, 255)
     BLACK = (0, 0, 0)
@@ -3726,162 +3710,130 @@ class VisConfig:
     YELLOW = (255, 255, 100)
     GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
     NUM_ENVS_TO_RENDER = 48
-    # --- NEW: Added flash color ---
-    LINE_CLEAR_FLASH_COLOR = (180, 180, 220)  # Light purplish-white flash
-    # --- END NEW ---
+    LINE_CLEAR_FLASH_COLOR = (180, 180, 220)
 
 
 # --- Environment ---
 class EnvConfig:
     NUM_ENVS = 256
-    # --- MODIFIED DIMENSIONS ---
     ROWS = 8
     COLS = 15
-    # --- END MODIFIED ---
-
-    # Features per grid cell: Occupied (1/0), Is_Up (1/0)
     GRID_FEATURES_PER_CELL = 2
-    # Features per shape: N_Triangles, N_Up, N_Down, Height, Width (all normalized)
     SHAPE_FEATURES_PER_SHAPE = 5
-    NUM_SHAPE_SLOTS = 3  # How many shapes are available to choose from
+    NUM_SHAPE_SLOTS = 3
 
     @property
     def GRID_STATE_SHAPE(self) -> Tuple[int, int, int]:
-        # Shape of the grid input to the CNN: [Channels, Height, Width]
         return (self.GRID_FEATURES_PER_CELL, self.ROWS, self.COLS)
 
     @property
     def SHAPE_STATE_DIM(self) -> int:
-        # Total dimension of the flattened shape features input to the MLP
         return self.NUM_SHAPE_SLOTS * self.SHAPE_FEATURES_PER_SHAPE
 
     @property
     def ACTION_DIM(self) -> int:
-        # Total number of possible discrete actions (Shape_Slot * Grid_Position)
-        # The network outputs Q-values for all these potential actions.
-        # Invalid actions (based on current state) are masked out during selection.
         return self.NUM_SHAPE_SLOTS * (self.ROWS * self.COLS)
 
 
 # --- Reward Shaping (RL Reward) ---
 class RewardConfig:
-    REWARD_PLACE_PER_TRI = 0.0  # Small reward for placing triangles (can be non-zero)
+    REWARD_PLACE_PER_TRI = 0.0
     REWARD_CLEAR_1 = 1.0
     REWARD_CLEAR_2 = 3.0
     REWARD_CLEAR_3PLUS = 6.0
-    PENALTY_INVALID_MOVE = -0.1  # Penalty for attempting an impossible placement
-    PENALTY_HOLE_PER_HOLE = -0.05  # Penalty per empty cell below an occupied cell
-    PENALTY_GAME_OVER = -1.0  # Large penalty for losing the game
-    REWARD_ALIVE_STEP = 0.0  # Small reward for surviving each step (can be non-zero)
+    PENALTY_INVALID_MOVE = -0.1
+    PENALTY_HOLE_PER_HOLE = -0.05
+    PENALTY_GAME_OVER = -1.0
+    REWARD_ALIVE_STEP = 0.0
 
 
 # --- DQN Algorithm ---
 class DQNConfig:
-    GAMMA = 0.99  # Discount factor for future rewards
-    TARGET_UPDATE_FREQ = (
-        5_000  # How often to copy online network weights to target network (steps)
-    )
-    LEARNING_RATE = 5e-5  # AdamW optimizer learning rate
-    ADAM_EPS = 1e-4  # AdamW epsilon for numerical stability
-    GRADIENT_CLIP_NORM = 10.0  # Max norm for gradient clipping (0 to disable)
-    USE_DOUBLE_DQN = True  # Use Double DQN target calculation
-    USE_DUELING = True  # Use Dueling Network Architecture
-    USE_NOISY_NETS = (
-        True  # Use Noisy Linear layers for exploration (instead of epsilon-greedy)
-    )
-    # --- Distributional (C51) DQN Settings ---
+    GAMMA = 0.99
+    TARGET_UPDATE_FREQ = 5_000
+    LEARNING_RATE = 5e-5
+    ADAM_EPS = 1e-4
+    GRADIENT_CLIP_NORM = 10.0
+    USE_DOUBLE_DQN = True
+    USE_DUELING = True
+    USE_NOISY_NETS = True
     USE_DISTRIBUTIONAL = True
-    V_MIN = -10.0  # Minimum value for distributional support
-    V_MAX = 10.0  # Maximum value for distributional support
-    NUM_ATOMS = 51  # Number of atoms in the distribution
-    # --- Learning Rate Scheduler ---
-    USE_LR_SCHEDULER = True  # Use Cosine Annealing LR scheduler
-    LR_SCHEDULER_T_MAX: int = TOTAL_TRAINING_STEPS  # Scheduler period (total steps)
-    LR_SCHEDULER_ETA_MIN: float = 1e-7  # Minimum learning rate for scheduler
+    V_MIN = -10.0
+    V_MAX = 10.0
+    NUM_ATOMS = 51
+    USE_LR_SCHEDULER = True
+    LR_SCHEDULER_T_MAX: int = TOTAL_TRAINING_STEPS
+    LR_SCHEDULER_ETA_MIN: float = 1e-7
 
 
 # --- Training Loop ---
 class TrainConfig:
-    BATCH_SIZE = 64  # Number of experiences sampled per training step
-    LEARN_START_STEP = 5_000  # Global steps before learning starts (buffer warmup)
-    LEARN_FREQ = 4  # Perform a learning update every N global steps
-    CHECKPOINT_SAVE_FREQ = (
-        20_000  # Save model and buffer state every N global steps (0 to disable)
-    )
-    LOAD_CHECKPOINT_PATH: str | None = (
-        None  # Path to agent .pth file to load (optional)
-    )
-    LOAD_BUFFER_PATH: str | None = None  # Path to buffer .pkl file to load (optional)
+    BATCH_SIZE = 64
+    LEARN_START_STEP = 5_000
+    LEARN_FREQ = 4
+    CHECKPOINT_SAVE_FREQ = 20_000
+    LOAD_CHECKPOINT_PATH: str | None = None
+    LOAD_BUFFER_PATH: str | None = None
 
 
 # --- Replay Buffer ---
 class BufferConfig:
-    REPLAY_BUFFER_SIZE = 200_000  # Maximum number of transitions in the buffer
-    USE_N_STEP = True  # Use N-Step returns
-    N_STEP = 3  # Number of steps for N-Step returns
-    USE_PER = True  # Use Prioritized Experience Replay
-    PER_ALPHA = 0.6  # PER exponent α (controls prioritization intensity)
-    PER_BETA_START = 0.4  # Initial PER importance sampling exponent β
-    PER_BETA_FRAMES = TOTAL_TRAINING_STEPS // 2  # Steps over which β anneals to 1.0
-    PER_EPSILON = 1e-6  # Small value added to priorities to ensure non-zero probability
+    REPLAY_BUFFER_SIZE = 200_000
+    USE_N_STEP = True
+    N_STEP = 3
+    USE_PER = True
+    PER_ALPHA = 0.6
+    PER_BETA_START = 0.4
+    PER_BETA_FRAMES = TOTAL_TRAINING_STEPS // 2
+    PER_EPSILON = 1e-6
 
 
 # --- Model Architecture ---
 class ModelConfig:
-    class Network:  # Nested class for network-specific parameters
-        # Get grid dimensions dynamically from EnvConfig to avoid hardcoding
+    class Network:
         _env_cfg_instance = EnvConfig()
         HEIGHT = _env_cfg_instance.ROWS
         WIDTH = _env_cfg_instance.COLS
-        del _env_cfg_instance  # Avoid keeping instance here
-        # --- CNN Branch ---
-        CONV_CHANNELS = [32, 64, 64]  # Output channels for each conv layer
+        del _env_cfg_instance
+        CONV_CHANNELS = [32, 64, 64]
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
-        CONV_PADDING = 1  # Use 'same' padding equivalent if stride=1, kernel=3
+        CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
-        USE_BATCHNORM_CONV = True  # Use BatchNorm after conv layers (before activation)
-        # --- Shape MLP Branch ---
-        # Note: Input dim is calculated automatically (NUM_SHAPE_SLOTS * SHAPE_FEATURES_PER_SHAPE)
-        SHAPE_FEATURE_MLP_DIMS = [64]  # Hidden layer dimensions for shape feature MLP
+        USE_BATCHNORM_CONV = True
+        SHAPE_FEATURE_MLP_DIMS = [64]
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
-        # --- Fusion MLP Branch ---
-        # Note: Input dim is calculated automatically (CNN_out_flat + ShapeMLP_out)
-        COMBINED_FC_DIMS = [256, 128]  # Hidden layer dimensions after fusion
+        COMBINED_FC_DIMS = [256, 128]
         COMBINED_ACTIVATION = torch.nn.ReLU
-        USE_BATCHNORM_FC = True  # Use BatchNorm in fusion MLP layers
-        DROPOUT_FC = 0.0  # Dropout probability in fusion MLP layers (0 to disable)
+        USE_BATCHNORM_FC = True
+        DROPOUT_FC = 0.0
 
 
 # --- Statistics and Logging ---
 class StatsConfig:
-    STATS_AVG_WINDOW = (
-        100  # Window size for calculating rolling averages (episodes/steps)
-    )
-    CONSOLE_LOG_FREQ = (
-        5_000  # Log summary to console every N global steps (0 to disable)
-    )
+    STATS_AVG_WINDOW = 100
+    CONSOLE_LOG_FREQ = 5_000
+    # --- NEW: Plot Data Window ---
+    PLOT_DATA_WINDOW = 10_000  # Max points to store for plotting
+    # --- END NEW ---
 
 
 # --- TensorBoard Logging ---
 class TensorBoardConfig:
-    LOG_HISTOGRAMS = True  # Log histograms of weights, biases, Q-values, etc.
-    HISTOGRAM_LOG_FREQ = 10_000  # Log histograms every N global steps
-    LOG_IMAGES = True  # Log sample environment states as images
-    IMAGE_LOG_FREQ = 50_000  # Log images every N global steps
-    LOG_DIR: Optional[str] = None  # Set automatically in config/__init__.py
-    # --- Specific Histogram Logging ---
-    LOG_SHAPE_PLACEMENT_Q_VALUES = (
-        True  # Log Q-value distributions for shapes/placements
-    )
-    SHAPE_Q_LOG_FREQ = 5_000  # How often to log these specific Q-value histograms
+    LOG_HISTOGRAMS = True
+    HISTOGRAM_LOG_FREQ = 10_000
+    LOG_IMAGES = True
+    IMAGE_LOG_FREQ = 50_000
+    LOG_DIR: Optional[str] = None
+    LOG_SHAPE_PLACEMENT_Q_VALUES = True
+    SHAPE_Q_LOG_FREQ = 5_000
 
 
-# --- NEW: Demo Mode Visuals (Optional) ---
+# --- Demo Mode Visuals ---
 class DemoConfig:
-    BACKGROUND_COLOR = (10, 10, 20)  # Slightly different background
-    PREVIEW_COLOR = (200, 200, 200, 100)  # Semi-transparent white for placement preview
-    INVALID_PREVIEW_COLOR = (255, 0, 0, 100)  # Red preview if invalid
+    BACKGROUND_COLOR = (10, 10, 20)
+    PREVIEW_COLOR = (200, 200, 200, 100)
+    INVALID_PREVIEW_COLOR = (255, 0, 0, 100)
     SELECTED_SHAPE_HIGHLIGHT_COLOR = VisConfig.YELLOW
     HUD_FONT_SIZE = 24
     HELP_FONT_SIZE = 18
@@ -7745,68 +7697,49 @@ class Shape:
         return (min(rr), min(cc), max(rr), max(cc))
 
 
-File: stats/__init__.py
-# File: stats/__init__.py
-from .stats_recorder import StatsRecorderBase
-from .simple_stats_recorder import SimpleStatsRecorder
-from .tensorboard_logger import TensorBoardStatsRecorder
-
-__all__ = ["StatsRecorderBase", "SimpleStatsRecorder", "TensorBoardStatsRecorder"]
-
-
-File: stats/simple_stats_recorder.py
-# File: stats/simple_stats_recorder.py
+File: stats/aggregator.py
+# File: stats/aggregator.py
 import time
 from collections import deque
-from typing import Deque, Dict, Any, Optional, Union, List, Tuple, Callable
+from typing import Deque, Dict, Any, Optional
 import numpy as np
-import torch
-from .stats_recorder import StatsRecorderBase
-from config import EnvConfig, StatsConfig  # Removed EnvConfig import, not needed here
-import warnings
+from config import StatsConfig
 
 
-class SimpleStatsRecorder(StatsRecorderBase):
+class StatsAggregator:
     """
-    Records stats in memory using deques for rolling averages.
-    Provides no-op implementations for histogram, image, hparam, graph logging.
-    Primarily used internally by TensorBoardStatsRecorder for UI/console display,
-    or can be used standalone for simple console logging.
+    Handles aggregation and storage of training statistics using deques.
+    Calculates rolling averages and tracks best values. Does not perform logging.
     """
 
     def __init__(
         self,
-        console_log_interval: int = 50_000,
         avg_window: int = StatsConfig.STATS_AVG_WINDOW,
+        plot_window: int = StatsConfig.PLOT_DATA_WINDOW,
     ):
         if avg_window <= 0:
             avg_window = 100
-        self.console_log_interval = (
-            max(1, console_log_interval) if console_log_interval > 0 else -1
-        )
-        self.avg_window = avg_window
+        if plot_window <= 0:
+            plot_window = 10000  # Ensure a minimum plot window
 
-        # Data Deques
-        step_reward_window = max(avg_window * 10, 1000)
-        self.step_rewards: Deque[float] = deque(
-            maxlen=step_reward_window
-        )  # Keep for potential detailed reward analysis
-        self.losses: Deque[float] = deque(maxlen=avg_window)
-        self.grad_norms: Deque[float] = deque(maxlen=avg_window)
-        self.avg_max_qs: Deque[float] = deque(maxlen=avg_window)
-        self.episode_scores: Deque[float] = deque(maxlen=avg_window)
-        self.episode_lengths: Deque[int] = deque(maxlen=avg_window)
-        self.game_scores: Deque[int] = deque(maxlen=avg_window)
-        self.episode_lines_cleared: Deque[int] = deque(maxlen=avg_window)
-        self.sps_values: Deque[float] = deque(maxlen=avg_window)
-        self.buffer_sizes: Deque[int] = deque(maxlen=avg_window)
-        self.beta_values: Deque[float] = deque(maxlen=avg_window)
-        self.best_rl_score_history: Deque[float] = deque(maxlen=avg_window)
-        self.best_game_score_history: Deque[int] = deque(maxlen=avg_window)
-        self.lr_values: Deque[float] = deque(maxlen=avg_window)
-        self.epsilon_values: Deque[float] = deque(
-            maxlen=avg_window
-        )  # Keep even if using Noisy
+        self.avg_window = avg_window
+        self.plot_window = plot_window
+
+        # Data Deques (using plot_window for history needed for plots)
+        self.losses: Deque[float] = deque(maxlen=plot_window)
+        self.grad_norms: Deque[float] = deque(maxlen=plot_window)
+        self.avg_max_qs: Deque[float] = deque(maxlen=plot_window)
+        self.episode_scores: Deque[float] = deque(maxlen=plot_window)
+        self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
+        self.game_scores: Deque[int] = deque(maxlen=plot_window)
+        self.episode_lines_cleared: Deque[int] = deque(maxlen=plot_window)
+        self.sps_values: Deque[float] = deque(maxlen=plot_window)
+        self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
+        self.beta_values: Deque[float] = deque(maxlen=plot_window)
+        self.best_rl_score_history: Deque[float] = deque(maxlen=plot_window)
+        self.best_game_score_history: Deque[int] = deque(maxlen=plot_window)
+        self.lr_values: Deque[float] = deque(maxlen=plot_window)
+        self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
 
         # Current State / Best Values
         self.total_episodes = 0
@@ -7818,25 +7751,20 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.current_sps: float = 0.0
         self.current_lr: float = 0.0
 
-        # --- ENHANCED Best Tracking ---
         self.best_score: float = -float("inf")
         self.previous_best_score: float = -float("inf")
         self.best_score_step: int = 0
 
-        self.best_game_score: float = -float("inf")  # Use float for consistent init
+        self.best_game_score: float = -float("inf")
         self.previous_best_game_score: float = -float("inf")
         self.best_game_score_step: int = 0
 
         self.best_loss: float = float("inf")
         self.previous_best_loss: float = float("inf")
         self.best_loss_step: int = 0
-        # --- END ENHANCED ---
 
-        self.last_log_time: float = time.time()
-        self.last_log_step: int = 0
-        self.start_time: float = time.time()
         print(
-            f"[SimpleStatsRecorder] Initialized. Avg Window: {self.avg_window}, Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'}"
+            f"[StatsAggregator] Initialized. Avg Window: {self.avg_window}, Plot Window: {self.plot_window}"
         )
 
     def record_episode(
@@ -7847,10 +7775,12 @@ class SimpleStatsRecorder(StatsRecorderBase):
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
-    ):
+    ) -> Dict[str, Any]:
+        """Records episode data and updates best values. Returns update info."""
         current_step = (
             global_step if global_step is not None else self.current_global_step
         )
+        update_info = {"new_best_rl": False, "new_best_game": False}
 
         self.episode_scores.append(episode_score)
         self.episode_lengths.append(episode_length)
@@ -7860,37 +7790,19 @@ class SimpleStatsRecorder(StatsRecorderBase):
             self.episode_lines_cleared.append(lines_cleared)
             self.total_lines_cleared += lines_cleared
         self.total_episodes = episode_num
-        step_info = f"at Step ~{current_step/1e6:.1f}M"
 
-        # --- ENHANCED Best Score Tracking ---
         if episode_score > self.best_score:
             self.previous_best_score = self.best_score
             self.best_score = episode_score
             self.best_score_step = current_step
-            prev_str = (
-                f"{self.previous_best_score:.2f}"
-                if self.previous_best_score > -float("inf")
-                else "N/A"
-            )
-            print(
-                f"\n--- 🏆 New Best RL: {self.best_score:.2f} {step_info} (Prev: {prev_str}) ---"
-            )
+            update_info["new_best_rl"] = True
 
         if game_score is not None and game_score > self.best_game_score:
             self.previous_best_game_score = self.best_game_score
-            self.best_game_score = float(game_score)  # Store as float
+            self.best_game_score = float(game_score)
             self.best_game_score_step = current_step
-            prev_str = (
-                f"{self.previous_best_game_score:.0f}"
-                if self.previous_best_game_score > -float("inf")
-                else "N/A"
-            )
-            print(
-                f"--- 🎮 New Best Game: {self.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
-            )
-        # --- END ENHANCED ---
+            update_info["new_best_game"] = True
 
-        # Update history deques for plotting best scores over time
         current_best_rl = self.best_score if self.best_score > -float("inf") else 0.0
         current_best_game = (
             int(self.best_game_score) if self.best_game_score > -float("inf") else 0
@@ -7898,38 +7810,28 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.best_rl_score_history.append(current_best_rl)
         self.best_game_score_history.append(current_best_game)
 
-    def record_step(self, step_data: Dict[str, Any]):
+        return update_info
+
+    def record_step(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Records step data and updates best loss. Returns update info."""
         g_step = step_data.get("global_step", self.current_global_step)
         if g_step > self.current_global_step:
             self.current_global_step = g_step
 
+        update_info = {"new_best_loss": False}
+
         if "loss" in step_data and step_data["loss"] is not None and g_step > 0:
             current_loss = step_data["loss"]
             self.losses.append(current_loss)
-            # --- ENHANCED Best Loss Tracking ---
             if current_loss < self.best_loss:
                 self.previous_best_loss = self.best_loss
                 self.best_loss = current_loss
                 self.best_loss_step = g_step
-                # Optional: Print new best loss to console
-                # prev_str = f"{self.previous_best_loss:.4f}" if self.previous_best_loss < float("inf") else "N/A"
-                # print(f"--- ✨ New Best Loss: {self.best_loss:.4f} at Step ~{g_step/1e6:.1f}M (Prev: {prev_str}) ---")
-            # --- END ENHANCED ---
+                update_info["new_best_loss"] = True
 
-        if (
-            "grad_norm" in step_data
-            and step_data["grad_norm"] is not None
-            and g_step > 0
-        ):
+        if "grad_norm" in step_data and step_data["grad_norm"] is not None:
             self.grad_norms.append(step_data["grad_norm"])
-        # Removed step_reward tracking, focus on episode rewards
-        # if "step_reward" in step_data and step_data["step_reward"] is not None:
-        #     self.step_rewards.append(step_data["step_reward"])
-        if (
-            "avg_max_q" in step_data
-            and step_data["avg_max_q"] is not None
-            and g_step > 0
-        ):
+        if "avg_max_q" in step_data and step_data["avg_max_q"] is not None:
             self.avg_max_qs.append(step_data["avg_max_q"])
         if "beta" in step_data and step_data["beta"] is not None:
             self.current_beta = step_data["beta"]
@@ -7943,25 +7845,25 @@ class SimpleStatsRecorder(StatsRecorderBase):
         if "epsilon" in step_data and step_data["epsilon"] is not None:
             self.current_epsilon = step_data["epsilon"]
             self.epsilon_values.append(self.current_epsilon)
-
         if "step_time" in step_data and step_data["step_time"] > 1e-6:
-            num_steps_in_call = step_data.get("num_steps_processed", 1)
-            sps = num_steps_in_call / step_data["step_time"]
+            num_steps = step_data.get("num_steps_processed", 1)
+            sps = num_steps / step_data["step_time"]
             self.sps_values.append(sps)
-            self.current_sps = sps  # Update current SPS immediately
+            self.current_sps = sps
 
-        self.log_summary(g_step)
+        return update_info
 
     def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
+        """Calculates and returns a dictionary of summary statistics."""
         if current_global_step is None:
             current_global_step = self.current_global_step
 
-        # Use np.mean with checks for empty deques
         def safe_mean(q: Deque, default=0.0) -> float:
-            return float(np.mean(q)) if q else default
+            # Calculate mean over the *averaging* window, not the plot window
+            window_data = list(q)[-self.avg_window :]
+            return float(np.mean(window_data)) if window_data else default
 
         summary = {
-            # Averages
             "avg_score_window": safe_mean(self.episode_scores),
             "avg_length_window": safe_mean(self.episode_lengths),
             "avg_loss_window": safe_mean(self.losses),
@@ -7970,14 +7872,12 @@ class SimpleStatsRecorder(StatsRecorderBase):
             "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
             "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
             "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
-            # Current / Total
             "total_episodes": self.total_episodes,
             "beta": self.current_beta,
             "buffer_size": self.current_buffer_size,
-            "steps_per_second": self.current_sps,  # Use the latest calculated SPS
+            "steps_per_second": self.current_sps,
             "global_step": current_global_step,
             "current_lr": self.current_lr,
-            # --- ENHANCED Best Tracking ---
             "best_score": self.best_score,
             "previous_best_score": self.previous_best_score,
             "best_score_step": self.best_score_step,
@@ -7987,12 +7887,137 @@ class SimpleStatsRecorder(StatsRecorderBase):
             "best_loss": self.best_loss,
             "previous_best_loss": self.previous_best_loss,
             "best_loss_step": self.best_loss_step,
-            # --- END ENHANCED ---
-            # Counts (for debugging/UI)
             "num_ep_scores": len(self.episode_scores),
             "num_losses": len(self.losses),
         }
         return summary
+
+    def get_plot_data(self) -> Dict[str, Deque]:
+        """Returns copies of deques (up to plot_window size) for UI plotting."""
+        return {
+            "episode_scores": self.episode_scores.copy(),
+            "episode_lengths": self.episode_lengths.copy(),
+            "losses": self.losses.copy(),
+            "avg_max_qs": self.avg_max_qs.copy(),
+            "game_scores": self.game_scores.copy(),
+            "episode_lines_cleared": self.episode_lines_cleared.copy(),
+            "sps_values": self.sps_values.copy(),
+            "buffer_sizes": self.buffer_sizes.copy(),
+            "beta_values": self.beta_values.copy(),
+            "best_rl_score_history": self.best_rl_score_history.copy(),
+            "best_game_score_history": self.best_game_score_history.copy(),
+            "lr_values": self.lr_values.copy(),
+            "epsilon_values": self.epsilon_values.copy(),
+        }
+
+
+File: stats/__init__.py
+# File: stats/__init__.py
+from .stats_recorder import StatsRecorderBase
+from .aggregator import StatsAggregator
+from .simple_stats_recorder import SimpleStatsRecorder
+from .tensorboard_logger import TensorBoardStatsRecorder
+
+__all__ = [
+    "StatsRecorderBase",
+    "StatsAggregator",
+    "SimpleStatsRecorder",
+    "TensorBoardStatsRecorder",
+]
+
+
+File: stats/simple_stats_recorder.py
+# File: stats/simple_stats_recorder.py
+import time
+from collections import deque
+from typing import Deque, Dict, Any, Optional, Union, List
+import numpy as np
+import torch
+from .stats_recorder import StatsRecorderBase
+from .aggregator import StatsAggregator
+from config import StatsConfig
+
+
+class SimpleStatsRecorder(StatsRecorderBase):
+    """
+    Logs aggregated statistics to the console periodically.
+    Delegates data storage and aggregation to a StatsAggregator instance.
+    Provides no-op implementations for histogram, image, hparam, graph logging.
+    """
+
+    def __init__(
+        self,
+        aggregator: StatsAggregator,
+        console_log_interval: int = StatsConfig.CONSOLE_LOG_FREQ,
+    ):
+        self.aggregator = aggregator
+        self.console_log_interval = (
+            max(1, console_log_interval) if console_log_interval > 0 else -1
+        )
+        self.last_log_time: float = time.time()
+        self.last_log_step: int = 0
+        self.start_time: float = time.time()
+        print(
+            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'}"
+        )
+
+    def record_episode(
+        self,
+        episode_score: float,
+        episode_length: int,
+        episode_num: int,
+        global_step: Optional[int] = None,
+        game_score: Optional[int] = None,
+        lines_cleared: Optional[int] = None,
+    ):
+        """Passes episode data to the aggregator and checks for console logging."""
+        update_info = self.aggregator.record_episode(
+            episode_score,
+            episode_length,
+            episode_num,
+            global_step,
+            game_score,
+            lines_cleared,
+        )
+        current_step = (
+            global_step
+            if global_step is not None
+            else self.aggregator.current_global_step
+        )
+        step_info = f"at Step ~{current_step/1e6:.1f}M"
+
+        if update_info.get("new_best_rl"):
+            prev_str = (
+                f"{self.aggregator.previous_best_score:.2f}"
+                if self.aggregator.previous_best_score > -float("inf")
+                else "N/A"
+            )
+            print(
+                f"\n--- 🏆 New Best RL: {self.aggregator.best_score:.2f} {step_info} (Prev: {prev_str}) ---"
+            )
+        if update_info.get("new_best_game"):
+            prev_str = (
+                f"{self.aggregator.previous_best_game_score:.0f}"
+                if self.aggregator.previous_best_game_score > -float("inf")
+                else "N/A"
+            )
+            print(
+                f"--- 🎮 New Best Game: {self.aggregator.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
+            )
+
+    def record_step(self, step_data: Dict[str, Any]):
+        """Passes step data to the aggregator and triggers console logging."""
+        _ = self.aggregator.record_step(step_data)
+        g_step = step_data.get("global_step", self.aggregator.current_global_step)
+        self.log_summary(g_step)
+
+    def get_summary(self, current_global_step: int) -> Dict[str, Any]:
+        """Retrieves summary statistics from the aggregator."""
+        return self.aggregator.get_summary(current_global_step)
+
+    def get_plot_data(self) -> Dict[str, Deque]:
+        """Retrieves plot data deques from the aggregator."""
+        return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
         """Logs summary statistics to the console periodically."""
@@ -8018,17 +8043,14 @@ class SimpleStatsRecorder(StatsRecorderBase):
         )
 
         log_str = (
-            f"[{runtime_hrs:.1f}h|Stats] Step: {global_step/1e6:<6.2f}M | "
+            f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
             f"Ep: {summary['total_episodes']:<7} | SPS: {summary['steps_per_second']:<5.0f} | "
             f"RLScore(Avg): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
             f"Loss(Avg): {summary['avg_loss_window']:.4f} (Best: {best_loss_val}) | "
             f"LR: {summary['current_lr']:.1e} | "
             f"Buf: {summary['buffer_size']/1e6:.2f}M"
         )
-        # Add PER Beta if used
-        if (
-            summary["beta"] > 0 and summary["beta"] < 1.0
-        ):  # Crude check if PER is active
+        if summary["beta"] > 0 and summary["beta"] < 1.0:
             log_str += f" | Beta: {summary['beta']:.3f}"
 
         print(log_str)
@@ -8036,26 +8058,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time = time.time()
         self.last_log_step = global_step
 
-    def get_plot_data(self) -> Dict[str, Deque]:
-        """Returns copies of deques needed for UI plotting."""
-        # Ensure all expected keys exist, even if empty
-        return {
-            "episode_scores": self.episode_scores.copy(),
-            "episode_lengths": self.episode_lengths.copy(),
-            "losses": self.losses.copy(),
-            "avg_max_qs": self.avg_max_qs.copy(),
-            "game_scores": self.game_scores.copy(),
-            "episode_lines_cleared": self.episode_lines_cleared.copy(),
-            "sps_values": self.sps_values.copy(),
-            "buffer_sizes": self.buffer_sizes.copy(),
-            "beta_values": self.beta_values.copy(),
-            "best_rl_score_history": self.best_rl_score_history.copy(),
-            "best_game_score_history": self.best_game_score_history.copy(),
-            "lr_values": self.lr_values.copy(),
-            "epsilon_values": self.epsilon_values.copy(),
-        }
-
-    # --- No-op methods ---
+    # --- No-op methods for non-console logging ---
     def record_histogram(
         self,
         tag: str,
@@ -8073,7 +8076,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         pass
 
     def record_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[torch.Tensor] = None
+        self, model: torch.nn.Module, input_to_model: Optional[Any] = None
     ):
         pass
 
@@ -8086,9 +8089,9 @@ File: stats/stats_recorder.py
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Deque, List, Dict, Any, Optional, Union  # Added Union
+from typing import Deque, List, Dict, Any, Optional, Union
 import numpy as np
-import torch  # Added torch for Tensor type hints
+import torch
 
 
 class StatsRecorderBase(ABC):
@@ -8097,7 +8100,7 @@ class StatsRecorderBase(ABC):
     @abstractmethod
     def record_episode(
         self,
-        episode_score: float,  # RL Score
+        episode_score: float,
         episode_length: int,
         episode_num: int,
         global_step: Optional[int] = None,
@@ -8109,10 +8112,9 @@ class StatsRecorderBase(ABC):
 
     @abstractmethod
     def record_step(self, step_data: Dict[str, Any]):
-        """Record stats from a training or environment step (e.g., loss, rewards)."""
+        """Record stats from a training or environment step."""
         pass
 
-    # --- New Abstract Methods ---
     @abstractmethod
     def record_histogram(
         self,
@@ -8137,26 +8139,29 @@ class StatsRecorderBase(ABC):
 
     @abstractmethod
     def record_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[torch.Tensor] = None
+        self, model: torch.nn.Module, input_to_model: Optional[Any] = None
     ):
         """Record the model graph."""
         pass
 
-    # --- End New ---
-
     @abstractmethod
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        """Return a dictionary containing summary statistics (usually averaged)."""
+        """Return a dictionary containing summary statistics."""
+        pass
+
+    @abstractmethod
+    def get_plot_data(self) -> Dict[str, Deque]:
+        """Return copies of data deques for plotting."""
         pass
 
     @abstractmethod
     def log_summary(self, global_step: int):
-        """Trigger the logging action (e.g., print to console, write to TensorBoard)."""
+        """Trigger the logging action (e.g., print to console)."""
         pass
 
     @abstractmethod
     def close(self):
-        """Perform any necessary cleanup (e.g., close files/writers)."""
+        """Perform any necessary cleanup."""
         pass
 
 
