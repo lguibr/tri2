@@ -10,6 +10,7 @@ from .core import (
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
+    DemoConfig,  # Add this if you created the class
 )
 from .general import (
     DEVICE,
@@ -44,6 +45,7 @@ __all__ = [
     "ModelConfig",
     "StatsConfig",
     "TensorBoardConfig",
+    "DemoConfig",  # Add this
     # General Constants/Paths
     "DEVICE",
     "RANDOM_SEED",

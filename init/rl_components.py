@@ -34,32 +34,25 @@ from training.trainer import Trainer
 from stats.stats_recorder import StatsRecorderBase
 from stats.tensorboard_logger import TensorBoardStatsRecorder
 
-# Removed ensure_numpy import
 
-
-def initialize_envs(
-    num_envs: int, env_config: EnvConfig  # Expecting an INSTANCE here
-) -> List[GameState]:
+def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
     print(f"Initializing {num_envs} game environments...")
     try:
-        # --- MODIFIED: Pass env_config instance to GameState if needed ---
-        # Assuming GameState() now correctly uses the EnvConfig class attributes
-        # If GameState needs the instance, change to: GameState(env_config)
-        envs = [GameState() for _ in range(num_envs)]
-        # --- END MODIFIED ---
-
+        envs = [
+            GameState() for _ in range(num_envs)
+        ]  # GameState uses its internal EnvConfig instance now
         s_test_dict = envs[0].reset()  # Returns dict
 
         if not isinstance(s_test_dict, dict):
             raise TypeError("Env reset did not return a dictionary state.")
 
-        # Check grid component
+        # --- MODIFIED: Check grid component shape (2 channels) ---
         if "grid" not in s_test_dict:
             raise KeyError("State dict missing 'grid'")
         grid_state = s_test_dict["grid"]
-        # --- MODIFIED: Access property value correctly ---
-        expected_grid_shape = env_config.GRID_STATE_SHAPE  # Access property value
-        # --- END MODIFIED ---
+        expected_grid_shape = (
+            env_config.GRID_STATE_SHAPE
+        )  # Get expected shape (2, H, W) from instance
         if (
             not isinstance(grid_state, np.ndarray)
             or grid_state.shape != expected_grid_shape
@@ -68,17 +61,16 @@ def initialize_envs(
                 f"Initial grid state shape mismatch! Env:{grid_state.shape}, Cfg:{expected_grid_shape}"
             )
         print(f"Initial grid state shape check PASSED: {grid_state.shape}")
+        # --- END MODIFIED ---
 
-        # Check shapes component
+        # Check shapes component (unchanged)
         if "shapes" not in s_test_dict:
             raise KeyError("State dict missing 'shapes'")
         shape_state = s_test_dict["shapes"]
-        # --- MODIFIED: Access property value correctly ---
         expected_shape_shape = (
             env_config.NUM_SHAPE_SLOTS,
             env_config.SHAPE_FEATURES_PER_SHAPE,
-        )  # Access attributes directly
-        # --- END MODIFIED ---
+        )
         if (
             not isinstance(shape_state, np.ndarray)
             or shape_state.shape != expected_shape_shape
@@ -88,18 +80,14 @@ def initialize_envs(
             )
         print(f"Initial shape state shape check PASSED: {shape_state.shape}")
 
-        _ = envs[0].valid_actions()
-        # --- MODIFIED: Test step with a valid action if possible ---
         valid_acts_init = envs[0].valid_actions()
         if valid_acts_init:
-            _, _ = envs[0].step(
-                valid_acts_init[0]
-            )  # Test step function with a valid action
+            _, _ = envs[0].step(valid_acts_init[0])
         else:
             print(
                 "Warning: No valid actions available after initial reset for testing step()."
             )
-        # --- END MODIFIED ---
+
         print(f"Successfully initialized {num_envs} environments.")
         return envs
     except Exception as e:
@@ -111,10 +99,11 @@ def initialize_envs(
 def initialize_agent_buffer(
     model_config: ModelConfig,
     dqn_config: DQNConfig,
-    env_config: EnvConfig,  # Expecting an INSTANCE here
+    env_config: EnvConfig,
     buffer_config: BufferConfig,
 ) -> Tuple[DQNAgent, ReplayBufferBase]:
     print("Initializing Agent and Buffer...")
+    # Pass EnvConfig instance to DQNAgent
     agent = DQNAgent(config=model_config, dqn_config=dqn_config, env_config=env_config)
     buffer = create_replay_buffer(config=buffer_config, dqn_config=dqn_config)
     print("Agent and Buffer initialized.")
@@ -126,7 +115,7 @@ def initialize_stats_recorder(
     tb_config: TensorBoardConfig,
     config_dict: Dict[str, Any],
     agent: Optional[DQNAgent],
-    env_config: EnvConfig,  # Expecting an INSTANCE here
+    env_config: EnvConfig,  # Expecting instance
 ) -> StatsRecorderBase:
     """Creates the TensorBoard recorder, logs graph (on CPU) and hparams."""
     print(f"Initializing Stats Recorder (TensorBoard)...")
@@ -139,31 +128,26 @@ def initialize_stats_recorder(
 
     if agent and agent.online_net:
         try:
-            # --- MODIFIED: Access property value correctly ---
-            dummy_grid_np = np.zeros(
-                env_config.GRID_STATE_SHAPE, dtype=np.float32
-            )  # Access property value
+            # --- MODIFIED: Create dummy grid with 2 channels ---
+            expected_grid_shape = env_config.GRID_STATE_SHAPE  # Get shape (2, H, W)
+            dummy_grid_np = np.zeros(expected_grid_shape, dtype=np.float32)
+            # --- END MODIFIED ---
             dummy_shapes_np = np.zeros(
                 (env_config.NUM_SHAPE_SLOTS, env_config.SHAPE_FEATURES_PER_SHAPE),
                 dtype=np.float32,
-            )  # Access attributes
-            # --- END MODIFIED ---
+            )
             dummy_grid_cpu = torch.tensor(dummy_grid_np, device="cpu").unsqueeze(0)
             dummy_shapes_cpu = torch.tensor(dummy_shapes_np, device="cpu").unsqueeze(0)
 
             if not hasattr(agent, "dqn_config"):
-                raise AttributeError(
-                    "DQNAgent instance is missing 'dqn_config' attribute."
-                )
+                raise AttributeError("DQNAgent missing 'dqn_config'")
             if not hasattr(agent.online_net, "config"):
-                raise AttributeError("Agent's online_net missing 'config' attribute.")
+                raise AttributeError("Agent's online_net missing 'config'")
 
             # Recreate model on CPU for graph logging
             model_for_graph_cpu = type(agent.online_net)(
                 env_config=env_config,  # Pass instance
-                # --- MODIFIED: Access property value correctly ---
                 action_dim=env_config.ACTION_DIM,  # Access property value
-                # --- END MODIFIED ---
                 model_config=agent.online_net.config,
                 dqn_config=agent.dqn_config,
                 dueling=agent.online_net.dueling,
@@ -205,6 +189,11 @@ def initialize_stats_recorder(
             avg_window=avg_window,
             histogram_log_interval=tb_config.HISTOGRAM_LOG_FREQ,
             image_log_interval=tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1,
+            shape_q_log_interval=(
+                tb_config.SHAPE_Q_LOG_FREQ
+                if tb_config.LOG_SHAPE_PLACEMENT_Q_VALUES
+                else -1
+            ),  # Pass new freq
         )
         print("Stats Recorder initialized.")
         return stats_recorder
@@ -219,7 +208,7 @@ def initialize_trainer(
     agent: DQNAgent,
     buffer: ReplayBufferBase,
     stats_recorder: StatsRecorderBase,
-    env_config: EnvConfig,  # Expecting an INSTANCE here
+    env_config: EnvConfig,  # Expecting instance
     dqn_config: DQNConfig,
     train_config: TrainConfig,
     buffer_config: BufferConfig,

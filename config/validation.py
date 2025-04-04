@@ -9,6 +9,7 @@ from .core import (
     StatsConfig,
     TensorBoardConfig,
     VisConfig,
+    DemoConfig,  # Added DemoConfig just in case for future validation
 )
 from .general import (
     RUN_ID,
@@ -32,18 +33,21 @@ def print_config_info_and_validate():
     print(f"Checkpoint Directory: {RUN_CHECKPOINT_DIR}")
     print(f"Device: {DEVICE}")
     print(
-        f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
+        f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
+        f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}, "
+        f"ShapeQs={'ON' if TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES else 'OFF'}"  # Added ShapeQ log status
     )
     # --- MODIFIED: Check GRID_FEATURES_PER_CELL on instance ---
-    if env_config_instance.GRID_FEATURES_PER_CELL != 3:
+    if env_config_instance.GRID_FEATURES_PER_CELL != 2:  # Check against 2 now
         # --- END MODIFIED ---
         print(
-            "Warning: Network assumes 3 features per cell (Occupied, Is_Up, Is_Death)."
+            f"Warning: Network expects {EnvConfig.GRID_FEATURES_PER_CELL} features per cell (Occupied, Is_Up)."
+            f" Config has: {env_config_instance.GRID_FEATURES_PER_CELL}"
         )
     if TrainConfig.LOAD_CHECKPOINT_PATH:
         print(
             "*" * 70
-            + f"\n*** Warning: LOAD CHECKPOINT from: {TrainConfig.LOAD_CHECKPOINT_PATH} ***\n*** Ensure ckpt matches current Model/DQN Config (distributional, scheduler). ***\n"
+            + f"\n*** Warning: LOAD CHECKPOINT from: {TrainConfig.LOAD_CHECKPOINT_PATH} ***\n*** Ensure ckpt matches current Model/DQN Config (distributional, noisy, dueling, scheduler). ***\n"
             + "*" * 70
         )
     else:
@@ -63,7 +67,7 @@ def print_config_info_and_validate():
     print(
         f"--- Using LR Scheduler: {DQNConfig.USE_LR_SCHEDULER}"
         + (
-            f" (CosineAnnealingLR, T_max={DQNConfig.LR_SCHEDULER_T_MAX}, eta_min={DQNConfig.LR_SCHEDULER_ETA_MIN})"
+            f" (CosineAnnealingLR, T_max={DQNConfig.LR_SCHEDULER_T_MAX/1e6:.1f}M steps, eta_min={DQNConfig.LR_SCHEDULER_ETA_MIN:.1e})"
             if DQNConfig.USE_LR_SCHEDULER
             else ""
         )
@@ -81,13 +85,15 @@ def print_config_info_and_validate():
     mlp_str = str(ModelConfig.Network.COMBINED_FC_DIMS).replace(" ", "")
     # --- MODIFIED: Print shape MLP dims from config ---
     shape_mlp_cfg_str = str(ModelConfig.Network.SHAPE_FEATURE_MLP_DIMS).replace(" ", "")
+    # --- MODIFIED: Removed ShapeEmb ---
     print(
-        f"Network: CNN={cnn_str}, ShapeEmb={ModelConfig.Network.SHAPE_EMBEDDING_DIM}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}, Dueling={DQNConfig.USE_DUELING}"
+        f"Network: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}, Dueling={DQNConfig.USE_DUELING}"
     )
     # --- END MODIFIED ---
+
     # --- MODIFIED: Access NUM_ENVS from instance ---
     print(
-        f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M, BUFFER={BufferConfig.REPLAY_BUFFER_SIZE/1e6:.1f}M, BATCH={TrainConfig.BATCH_SIZE}"
+        f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M, BUFFER={BufferConfig.REPLAY_BUFFER_SIZE/1e6:.1f}M, BATCH={TrainConfig.BATCH_SIZE}, LEARN_START={TrainConfig.LEARN_START_STEP/1e3:.1f}k"
     )
     # --- END MODIFIED ---
     print(

@@ -8,7 +8,7 @@ import pickle
 import random
 import traceback
 import pygame
-from typing import List, Optional, Union, Tuple, Callable, Dict  # Added Dict
+from typing import List, Optional, Union, Tuple, Callable, Dict
 from collections import deque
 
 from config import (
@@ -23,17 +23,13 @@ from config import (
     RewardConfig,
     TOTAL_TRAINING_STEPS,
 )
-
-# --- MODIFIED: Import specific StateType ---
-from environment.game_state import GameState, StateType  # Use the Dict type
-
-# --- END MODIFIED ---
+from environment.game_state import GameState, StateType  # Use the Dict type from env
 from agent.dqn_agent import DQNAgent
 from agent.replay_buffer.base_buffer import ReplayBufferBase
 from agent.replay_buffer.buffer_utils import create_replay_buffer
 from stats.stats_recorder import StatsRecorderBase
 from utils.helpers import ensure_numpy, load_object, save_object
-from utils.types import ActionType  # Removed StateType import here
+from utils.types import ActionType
 
 
 class Trainer:
@@ -69,7 +65,7 @@ class Trainer:
         self.buffer_config = buffer_config
         self.model_config = model_config
         self.reward_config = RewardConfig
-        self.tb_config = TensorBoardConfig
+        self.tb_config = TensorBoardConfig()  # Instantiate
         self.vis_config = VisConfig
         self.model_save_path = model_save_path
         self.buffer_save_path = buffer_save_path
@@ -78,15 +74,12 @@ class Trainer:
         self.episode_count = 0
         self.last_image_log_step = -self.tb_config.IMAGE_LOG_FREQ
 
-        # --- MODIFIED: Initialize current_states as list of dicts ---
         try:
-            # Get initial state dictionaries
             self.current_states: List[StateType] = [env.reset() for env in self.envs]
         except Exception as e:
             print(f"FATAL ERROR during initial environment reset: {e}")
             traceback.print_exc()
             raise e
-        # --- END MODIFIED ---
 
         self.current_episode_scores = np.zeros(self.num_envs, dtype=np.float32)
         self.current_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
@@ -103,7 +96,6 @@ class Trainer:
             self._load_buffer_state(load_buffer_path)
         else:
             print("[Trainer] No buffer specified, starting buffer empty.")
-            # Ensure buffer is created even if not loading
             if not hasattr(self, "buffer") or self.buffer is None:
                 self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
 
@@ -116,7 +108,7 @@ class Trainer:
         self.stats_recorder.record_step(
             {
                 "buffer_size": len(self.buffer),
-                "epsilon": 0.0,  # Assuming Noisy Nets, otherwise need epsilon tracking
+                "epsilon": 0.0,
                 "beta": initial_beta,
                 "lr": initial_lr,
                 "global_step": self.global_step,
@@ -128,21 +120,18 @@ class Trainer:
             f"[Trainer] Init complete. Start Step={self.global_step}, Ep={self.episode_count}, Buf={len(self.buffer)}, Beta={initial_beta:.4f}, LR={initial_lr:.1e}"
         )
 
+    # --- _load_checkpoint, _reset_trainer_state, _load_buffer_state, _save_checkpoint, _update_beta (Unchanged) ---
     def _load_checkpoint(self, path_to_load: str):
-        """Loads agent and trainer state from a checkpoint file."""
         if not os.path.isfile(path_to_load):
             print(
                 f"[Trainer] LOAD WARNING: Checkpoint file not found at {path_to_load}. Starting fresh."
             )
             self._reset_trainer_state()
             return
-
         print(f"[Trainer] Loading agent checkpoint from: {path_to_load}")
         try:
             checkpoint = torch.load(path_to_load, map_location=self.device)
-            self.agent.load_state_dict(
-                checkpoint
-            )  # Agent handles loading its components
+            self.agent.load_state_dict(checkpoint)
             self.global_step = checkpoint.get("global_step", 0)
             self.episode_count = checkpoint.get("episode_count", 0)
             print(
@@ -153,12 +142,7 @@ class Trainer:
                 f"[Trainer] Checkpoint file disappeared? ({path_to_load}). Starting fresh."
             )
             self._reset_trainer_state()
-        except (
-            KeyError,
-            AttributeError,
-            TypeError,
-            RuntimeError,
-        ) as e:  # Catch more potential load errors
+        except (KeyError, AttributeError, TypeError, RuntimeError) as e:
             print(
                 f"[Trainer] Checkpoint load error ('{e}'). Incompatible? Starting fresh."
             )
@@ -170,22 +154,18 @@ class Trainer:
             self._reset_trainer_state()
 
     def _reset_trainer_state(self):
-        """Resets trainer-specific state variables."""
         self.global_step = 0
         self.episode_count = 0
 
     def _load_buffer_state(self, path_to_load: str):
-        """Loads replay buffer state from a file."""
         if not os.path.isfile(path_to_load):
             print(
                 f"[Trainer] LOAD WARNING: Buffer file not found at {path_to_load}. Starting empty."
             )
             self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
             return
-
         print(f"[Trainer] Attempting to load buffer state from: {path_to_load}")
         try:
-            # Recreate buffer first to ensure correct type and config
             self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
             self.buffer.load_state(path_to_load)
             print(f"[Trainer] Buffer state loaded. Size: {len(self.buffer)}")
@@ -197,7 +177,7 @@ class Trainer:
             AttributeError,
             ValueError,
             TypeError,
-        ) as e:  # Catch more load errors
+        ) as e:
             print(
                 f"[Trainer] ERROR loading buffer (incompatible/corrupt?): {e}. Starting empty."
             )
@@ -209,12 +189,9 @@ class Trainer:
             self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
 
     def _save_checkpoint(self, is_final=False):
-        """Saves agent and buffer state."""
         prefix = "FINAL" if is_final else f"step_{self.global_step}"
         save_dir = os.path.dirname(self.model_save_path)
         os.makedirs(save_dir, exist_ok=True)
-
-        # Save Agent State
         print(
             f"[Trainer] Saving agent checkpoint ({prefix}) to: {self.model_save_path}"
         )
@@ -227,8 +204,6 @@ class Trainer:
         except Exception as e:
             print(f"[Trainer] ERROR saving agent checkpoint ({prefix}): {e}")
             traceback.print_exc()
-
-        # Save Buffer State
         print(
             f"[Trainer] Saving buffer state ({prefix}) to: {self.buffer_save_path} (Size: {len(self.buffer)})"
         )
@@ -242,7 +217,6 @@ class Trainer:
             traceback.print_exc()
 
     def _update_beta(self) -> float:
-        """Updates PER beta based on global step and records it."""
         if not self.buffer_config.USE_PER:
             beta = 1.0
         else:
@@ -253,64 +227,83 @@ class Trainer:
             beta = start + fraction * (end - start)
             if hasattr(self.buffer, "set_beta"):
                 self.buffer.set_beta(beta)
-
         self.stats_recorder.record_step({"beta": beta, "global_step": self.global_step})
         return beta
 
-    # --- MODIFIED: _collect_experience handles dictionary states ---
+    # --- End Unchanged Methods ---
+
     def _collect_experience(self):
         """Collects one step of experience from each parallel environment."""
         actions: List[ActionType] = [-1] * self.num_envs
         step_rewards_batch = np.zeros(self.num_envs, dtype=np.float32)
         start_time = time.time()
+        batch_chosen_shape_slots = np.full(self.num_envs, -1, dtype=np.int32)
+        batch_shape_slot_max_qs = []
 
-        # 1. Select actions for all environments based on current states (dicts)
+        # --- FIX: Access NUM_SHAPE_SLOTS via self.env_config ---
+        num_slots = self.env_config.NUM_SHAPE_SLOTS
+        # --- END FIX ---
+
+        # 1. Select actions for all environments
         for i in range(self.num_envs):
             current_state_dict = self.current_states[i]
             valid_actions = self.envs[i].valid_actions()
             if not valid_actions:
-                actions[i] = 0  # Default action if no valid moves
+                actions[i] = 0
+                batch_chosen_shape_slots[i] = -1
+                # --- FIX: Use num_slots variable ---
+                batch_shape_slot_max_qs.append(
+                    np.full(num_slots, -np.inf, dtype=np.float32)
+                )
+                # --- END FIX ---
             else:
                 try:
-                    # Epsilon is ignored by agent if using Noisy Nets
-                    # Pass the state dictionary directly to the agent
                     actions[i] = self.agent.select_action(
                         current_state_dict, 0.0, valid_actions
                     )
+                    chosen_slot, shape_qs, _ = (
+                        self.agent.get_last_shape_selection_info()
+                    )
+                    batch_chosen_shape_slots[i] = (
+                        chosen_slot if chosen_slot is not None else -1
+                    )
+                    # --- FIX: Use num_slots variable ---
+                    qs_to_log = (
+                        shape_qs if shape_qs is not None else [-np.inf] * num_slots
+                    )
+                    batch_shape_slot_max_qs.append(
+                        np.array(qs_to_log[:num_slots], dtype=np.float32)
+                    )
+                    # --- END FIX ---
                 except Exception as e:
                     print(f"ERROR: Agent select_action failed for env {i}: {e}")
                     traceback.print_exc()
                     actions[i] = random.choice(valid_actions)
+                    batch_chosen_shape_slots[i] = -1
+                    # --- FIX: Use num_slots variable ---
+                    batch_shape_slot_max_qs.append(
+                        np.full(num_slots, -np.inf, dtype=np.float32)
+                    )
+                    # --- END FIX ---
 
-        # 2. Step all environments
-        next_states_list: List[StateType] = [
-            {} for _ in range(self.num_envs)
-        ]  # List of dicts
+        # 2. Step all environments (Logic Unchanged)
+        next_states_list: List[StateType] = [{} for _ in range(self.num_envs)]
         rewards_list = np.zeros(self.num_envs, dtype=np.float32)
         dones_list = np.zeros(self.num_envs, dtype=bool)
 
         for i in range(self.num_envs):
             env = self.envs[i]
-            current_state_dict = self.current_states[
-                i
-            ]  # State used for action selection
+            current_state_dict = self.current_states[i]
             action = actions[i]
-
             try:
                 reward, done = env.step(action)
-                # Get the state dictionary resulting from the action
                 next_state_dict = env.get_state()
-
                 rewards_list[i] = reward
                 dones_list[i] = done
                 step_rewards_batch[i] = reward
-
-                # Push the transition (State Dict, A, R, Next State Dict, D)
                 self.buffer.push(
                     current_state_dict, action, reward, next_state_dict, done
                 )
-
-                # Update episode trackers
                 self.current_episode_scores[i] += reward
                 self.current_episode_lengths[i] += 1
                 if not done:
@@ -318,8 +311,6 @@ class Trainer:
                     self.current_episode_lines_cleared[i] = (
                         env.lines_cleared_this_episode
                     )
-
-                # Handle environment termination
                 if done:
                     self.episode_count += 1
                     self.stats_recorder.record_episode(
@@ -330,17 +321,13 @@ class Trainer:
                         game_score=self.current_episode_game_scores[i],
                         lines_cleared=self.current_episode_lines_cleared[i],
                     )
-                    # Reset environment and store the *new* starting state dictionary
                     next_states_list[i] = env.reset()
-                    # Reset episode trackers
                     self.current_episode_scores[i] = 0.0
                     self.current_episode_lengths[i] = 0
                     self.current_episode_game_scores[i] = 0
                     self.current_episode_lines_cleared[i] = 0
                 else:
-                    # If not done, the next state is the one observed
                     next_states_list[i] = next_state_dict
-
             except Exception as e:
                 print(f"ERROR: Env {i} step/reset failed (Action: {action}): {e}")
                 traceback.print_exc()
@@ -348,12 +335,11 @@ class Trainer:
                 dones_list[i] = True
                 step_rewards_batch[i] = self.reward_config.PENALTY_GAME_OVER
                 try:
-                    crashed_state_reset = env.reset()  # Get state dict
+                    crashed_state_reset = env.reset()
                 except Exception as reset_e:
                     print(
                         f"FATAL: Env {i} failed to reset after crash: {reset_e}. Creating zero state."
                     )
-                    # Create a zero state dictionary matching the expected structure
                     grid_zeros = np.zeros(
                         self.env_config.GRID_STATE_SHAPE, dtype=np.float32
                     )
@@ -365,7 +351,6 @@ class Trainer:
                         dtype=np.float32,
                     )
                     crashed_state_reset = {"grid": grid_zeros, "shapes": shape_zeros}
-
                 self.buffer.push(
                     current_state_dict,
                     action,
@@ -388,11 +373,10 @@ class Trainer:
                 self.current_episode_game_scores[i] = 0
                 self.current_episode_lines_cleared[i] = 0
 
-        # 3. Update current states for the next iteration
         self.current_states = next_states_list
         self.global_step += self.num_envs
 
-        # 4. Record step statistics
+        # 4. Record step statistics (including shape selection info)
         end_time = time.time()
         step_duration = end_time - start_time
         step_log_data = {
@@ -404,9 +388,22 @@ class Trainer:
         if self.tb_config.LOG_HISTOGRAMS:
             step_log_data["step_rewards_batch"] = step_rewards_batch
             step_log_data["action_batch"] = np.array(actions, dtype=np.int32)
-        self.stats_recorder.record_step(step_log_data)
+            valid_chosen_slots = batch_chosen_shape_slots[
+                batch_chosen_shape_slots != -1
+            ]
+            if len(valid_chosen_slots) > 0:
+                step_log_data["chosen_shape_slot_batch"] = valid_chosen_slots
+            if batch_shape_slot_max_qs:
+                flat_shape_qs = np.concatenate(batch_shape_slot_max_qs)
+                valid_flat_shape_qs = flat_shape_qs[np.isfinite(flat_shape_qs)]
+                if len(valid_flat_shape_qs) > 0:
+                    step_log_data["shape_slot_max_q_batch"] = valid_flat_shape_qs
+        if self.tb_config.LOG_SHAPE_PLACEMENT_Q_VALUES:
+            batch_q_vals = self.agent.get_last_batch_q_values_for_actions()
+            if batch_q_vals is not None:
+                step_log_data["batch_q_values_actions_taken"] = batch_q_vals
 
-    # --- END MODIFIED ---
+        self.stats_recorder.record_step(step_log_data)
 
     def _train_batch(self):
         """Samples a batch, computes loss, updates agent, and records stats."""
@@ -436,7 +433,6 @@ class Trainer:
                         "Warning: Buffer sample returned None (Uniform). Skipping training step."
                     )
                     return
-
         except Exception as e:
             print(f"ERROR sampling buffer: {e}")
             traceback.print_exc()
@@ -445,59 +441,31 @@ class Trainer:
         # Compute loss and TD errors
         loss = torch.tensor(0.0)
         td_errors = None
-        raw_q_values_for_log = None  # For histogram logging
 
         try:
-            # --- Optional: Log raw Q-values before loss computation ---
-            if self.tb_config.LOG_HISTOGRAMS:
-                with torch.no_grad():
-                    # Convert numpy batch (with dict states) to tensors
-                    tensor_batch_log = self.agent._np_batch_to_tensor(
-                        batch_tuple, self.buffer_config.USE_N_STEP
-                    )
-                    states_tuple_log, _, _, _, _ = tensor_batch_log[:5]
-                    grids_log, shapes_log = states_tuple_log
-
-                    self.agent.online_net.eval()
-                    if self.agent.use_distributional:
-                        dist_logits = self.agent.online_net(grids_log, shapes_log)
-                        raw_q_values_for_log = (
-                            F.softmax(dist_logits, dim=2) * self.agent.support
-                        ).sum(dim=2)
-                    else:
-                        raw_q_values_for_log = self.agent.online_net(
-                            grids_log, shapes_log
-                        )
-                    self.agent.online_net.train()  # Switch back
-            # --- End Optional Logging ---
-
-            # Compute loss (handles distributional/standard, PER weights, dict states)
             loss, td_errors = self.agent.compute_loss(
                 batch_tuple, self.buffer_config.USE_N_STEP, is_weights_np
             )
-
         except Exception as e:
             print(f"ERROR computing loss: {e}")
             traceback.print_exc()
-            return  # Skip update if loss computation fails
+            return
 
         # Update agent
         grad_norm = None
         try:
             grad_norm = self.agent.update(loss)
             if grad_norm is None and self.gradient_clip_norm > 0:
-                # Grad norm is None likely because clipping failed (e.g., NaN grads)
                 print("Warning: Agent update skipped due to likely gradient issue.")
-                return  # Skip priority update if agent update failed
+                return
         except Exception as e:
             print(f"ERROR updating agent: {e}")
             traceback.print_exc()
-            return  # Skip priority update
+            return
 
         # Update priorities in PER buffer
         if self.buffer_config.USE_PER and indices is not None and td_errors is not None:
             try:
-                # Ensure td_errors are numpy for SumTree
                 td_errors_np = ensure_numpy(td_errors)
                 self.buffer.update_priorities(indices, td_errors_np)
             except Exception as e:
@@ -513,11 +481,9 @@ class Trainer:
             "lr": current_lr,
             "global_step": self.global_step,
         }
-        if self.tb_config.LOG_HISTOGRAMS:
-            if raw_q_values_for_log is not None:
-                train_log_data["batch_q_values"] = raw_q_values_for_log
-            if td_errors is not None:
-                train_log_data["batch_td_errors"] = td_errors
+        if self.tb_config.LOG_HISTOGRAMS and td_errors is not None:
+            train_log_data["batch_td_errors"] = td_errors
+
         self.stats_recorder.record_step(train_log_data)
 
     def step(self):
@@ -545,13 +511,11 @@ class Trainer:
         """Logs an image of a random environment state to TensorBoard periodically."""
         if not self.tb_config.LOG_IMAGES:
             return
-
         img_freq = self.tb_config.IMAGE_LOG_FREQ
-        steps_before_this_iter = self.global_step - self.num_envs
-        if (
-            img_freq > 0
-            and steps_before_this_iter // img_freq < self.global_step // img_freq
-        ):
+        if img_freq <= 0:
+            return
+        steps_since_last = self.global_step - self.last_image_log_step
+        if steps_since_last >= img_freq:
             try:
                 env_idx = random.randint(0, self.num_envs - 1)
                 img_array = self._get_env_image_as_numpy(env_idx)
@@ -564,6 +528,7 @@ class Trainer:
                         img_tensor,
                         self.global_step,
                     )
+                    self.last_image_log_step = self.global_step  # Update last log step
             except Exception as e:
                 print(f"Error logging environment image: {e}")
 
@@ -571,23 +536,19 @@ class Trainer:
         """Renders a single environment state to a NumPy array for logging."""
         if not (0 <= env_index < self.num_envs):
             return None
-
         env = self.envs[env_index]
         img_h = 300
-        # Use env_config instance stored in trainer
         aspect_ratio = (self.env_config.COLS * 0.75 + 0.25) / max(
             1, self.env_config.ROWS
         )
         img_w = int(img_h * aspect_ratio)
         if img_w <= 0 or img_h <= 0:
             return None
-
         try:
             temp_surf = pygame.Surface((img_w, img_h))
             cell_w_px = img_w / (self.env_config.COLS * 0.75 + 0.25)
             cell_h_px = img_h / max(1, self.env_config.ROWS)
             temp_surf.fill(self.vis_config.BLACK)
-
             if hasattr(env, "grid") and hasattr(env.grid, "triangles"):
                 for r in range(env.grid.rows):
                     for c in range(env.grid.cols):
@@ -595,16 +556,15 @@ class Trainer:
                             env.grid.triangles[r]
                         ):
                             t = env.grid.triangles[r][c]
+                            if t.is_death:
+                                continue
                             pts = t.get_points(
                                 ox=0, oy=0, cw=int(cell_w_px), ch=int(cell_h_px)
                             )
                             color = self.vis_config.GRAY
-                            if t.is_death:
-                                color = (10, 10, 10)
-                            elif t.is_occupied:
+                            if t.is_occupied:
                                 color = t.color if t.color else self.vis_config.RED
                             pygame.draw.polygon(temp_surf, color, pts)
-
             img_array = pygame.surfarray.array3d(temp_surf)
             return np.transpose(img_array, (1, 0, 2))  # W, H, C -> H, W, C
         except Exception as e:
@@ -617,14 +577,14 @@ class Trainer:
         save_freq = self.train_config.CHECKPOINT_SAVE_FREQ
         if save_freq <= 0 and not force_save:
             return
-
-        steps_before_this_iter = self.global_step - self.num_envs
         should_save_freq = (
             save_freq > 0
             and self.global_step > 0
-            and steps_before_this_iter // save_freq < self.global_step // save_freq
+            and (
+                self.global_step // save_freq
+                > (self.global_step - self.num_envs) // save_freq
+            )
         )
-
         if force_save or should_save_freq:
             self._save_checkpoint(is_final=False)
 
@@ -656,13 +616,11 @@ class Trainer:
                 self.buffer.flush_pending()
             except Exception as flush_e:
                 print(f"Error flushing buffer during cleanup: {flush_e}")
-
         if save_final:
             print("[Trainer] Saving final checkpoint...")
             self._save_checkpoint(is_final=True)
         else:
             print("[Trainer] Skipping final save as requested.")
-
         if (
             hasattr(self, "stats_recorder")
             and self.stats_recorder
@@ -672,5 +630,4 @@ class Trainer:
                 self.stats_recorder.close()
             except Exception as close_e:
                 print(f"Error closing stats recorder during cleanup: {close_e}")
-
         print("[Trainer] Cleanup complete.")

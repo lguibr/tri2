@@ -5,8 +5,11 @@ import torch.nn.functional as F
 import numpy as np
 import math
 
+# --- MODIFIED: Import EnvConfig directly ---
 from config import ModelConfig, EnvConfig, DQNConfig, DEVICE
-from typing import Tuple, List, Type, Optional  # Added Optional
+
+# --- END MODIFIED ---
+from typing import Tuple, List, Type, Optional
 
 from .noisy_layer import NoisyLinear
 
@@ -19,9 +22,7 @@ class AgentNetwork(nn.Module):
 
     def __init__(
         self,
-        # --- MODIFIED: Take EnvConfig instance ---
-        env_config: EnvConfig,
-        # --- END MODIFIED ---
+        env_config: EnvConfig,  # Expecting instance
         action_dim: int,
         model_config: ModelConfig.Network,
         dqn_config: DQNConfig,
@@ -43,20 +44,22 @@ class AgentNetwork(nn.Module):
             f"[AgentNetwork] Distributional C51: {self.use_distributional} ({self.num_atoms} atoms)"
         )
 
-        # --- MODIFIED: Calculate dims from EnvConfig instance ---
+        # --- MODIFIED: Calculate dims from EnvConfig instance (now 2 channels) ---
         self.grid_c, self.grid_h, self.grid_w = self.env_config.GRID_STATE_SHAPE
+        # --- END MODIFIED ---
         self.shape_feat_dim = self.env_config.SHAPE_STATE_DIM
         self.num_shape_slots = self.env_config.NUM_SHAPE_SLOTS
         self.shape_feat_per_slot = self.env_config.SHAPE_FEATURES_PER_SHAPE
-        # --- END MODIFIED ---
 
         print(f"[AgentNetwork] Initializing (Noisy Heads: {self.use_noisy}):")
-        print(f"  Input Grid Shape: {(self.grid_c, self.grid_h, self.grid_w)}")
+        # --- MODIFIED: Print updated grid shape ---
+        print(f"  Input Grid Shape: [B, {self.grid_c}, {self.grid_h}, {self.grid_w}]")
+        # --- END MODIFIED ---
         print(
             f"  Input Shape Features Dim: {self.shape_feat_dim} ({self.num_shape_slots} slots x {self.shape_feat_per_slot} features)"
         )
 
-        # Build network branches
+        # Build network branches (CNN input channels handled automatically by self.grid_c)
         self.conv_base, conv_out_h, conv_out_w, conv_out_c = self._build_cnn_branch()
         self.conv_out_size = self._get_conv_out_size(
             (self.grid_c, self.grid_h, self.grid_w)
@@ -65,10 +68,8 @@ class AgentNetwork(nn.Module):
             f"  CNN Output Dim (HxWxC): ({conv_out_h}x{conv_out_w}x{conv_out_c}) -> Flat: {self.conv_out_size}"
         )
 
-        # --- MODIFIED: Build shape MLP based on new config ---
         self.shape_mlp, self.shape_mlp_out_dim = self._build_shape_mlp_branch()
         print(f"  Shape MLP Output Dim: {self.shape_mlp_out_dim}")
-        # --- END MODIFIED ---
 
         combined_features_dim = self.conv_out_size + self.shape_mlp_out_dim
         print(f"  Combined Features Dim: {combined_features_dim}")
@@ -82,8 +83,9 @@ class AgentNetwork(nn.Module):
         head_type = NoisyLinear if self.use_noisy else nn.Linear
         output_type = "Distributional" if self.use_distributional else "Q-Value"
         print(
-            f"  Using {'Dueling' if self.dueling else 'Single'} Heads ({head_type.__name__}), Output: {output_type}"
+            f"  Using {'Dueling' if self.dueling else 'Single'} Heads ({head_type.__name__}), Output: {output_type} [{self.action_dim * (self.num_atoms if self.use_distributional else 1)} units]"
         )
+
         # Final check
         if hasattr(self.conv_base, "0") and hasattr(self.conv_base[0], "weight"):
             print(
@@ -96,10 +98,13 @@ class AgentNetwork(nn.Module):
 
     def _build_cnn_branch(self) -> Tuple[nn.Sequential, int, int, int]:
         conv_layers: List[nn.Module] = []
+        # --- Uses self.grid_c (now 2) ---
         current_channels = self.grid_c
         h, w = self.grid_h, self.grid_w
         cfg = self.config
-        print(f"  Building CNN on device: {self.device}")
+        print(
+            f"  Building CNN (Input Channels: {current_channels}) on device: {self.device}"
+        )
         for i, out_channels in enumerate(cfg.CONV_CHANNELS):
             conv_layer = nn.Conv2d(
                 current_channels,
@@ -113,19 +118,11 @@ class AgentNetwork(nn.Module):
             if cfg.USE_BATCHNORM_CONV:
                 conv_layers.append(nn.BatchNorm2d(out_channels).to(self.device))
             conv_layers.append(cfg.CONV_ACTIVATION())
-            # --- REMOVED POOLING ---
-            # pool_layer = nn.MaxPool2d(
-            #     kernel_size=cfg.POOL_KERNEL_SIZE, stride=cfg.POOL_STRIDE
-            # ).to(self.device)
-            # conv_layers.append(pool_layer)
-            # --- END REMOVED ---
             current_channels = out_channels
-            # --- Adjust H, W calculation (no pooling) ---
+            # --- Adjust H, W calculation (still no pooling) ---
             h = (h + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
             w = (w + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
-            # h = (h - cfg.POOL_KERNEL_SIZE) // cfg.POOL_STRIDE + 1 # Removed
-            # w = (w - cfg.POOL_KERNEL_SIZE) // cfg.POOL_STRIDE + 1 # Removed
-            # --- END Adjust ---
+
         cnn_module = nn.Sequential(*conv_layers)
         if len(cnn_module) > 0 and hasattr(cnn_module[0], "weight"):
             print(f"    CNN Layer 0 device after build: {cnn_module[0].weight.device}")
@@ -135,34 +132,23 @@ class AgentNetwork(nn.Module):
         # Ensure conv_base is on the correct device before creating dummy input
         self.conv_base.to(self.device)
         with torch.no_grad():
+            # Input shape uses current self.grid_c (which is 2)
             dummy_input = torch.zeros(1, *shape, device=self.device)
-            self.conv_base.eval()  # Set to eval mode for deterministic output size
+            self.conv_base.eval()
             try:
                 output = self.conv_base(dummy_input)
                 out_size = int(np.prod(output.size()[1:]))
             except Exception as e:
                 print(f"Error calculating conv output size: {e}")
                 print(f"Input shape to CNN: {dummy_input.shape}")
-                # Attempt to calculate manually based on layers if forward fails
-                # This is complex and error-prone, better to fix the forward pass
-                # or network definition. Returning a placeholder.
-                out_size = 1  # Placeholder, likely incorrect
-            # self.conv_base.train() # Switch back if needed, but forward handles mode
+                out_size = 1  # Placeholder
             return out_size
 
-    # --- MODIFIED: Build shape MLP based on new config ---
     def _build_shape_mlp_branch(self) -> Tuple[nn.Sequential, int]:
         shape_mlp_layers: List[nn.Module] = []
         # Input dimension is NUM_SLOTS * FEAT_PER_SHAPE
         current_dim = self.env_config.SHAPE_STATE_DIM
         cfg = self.config
-
-        # Optional: Add embedding layer if shape features include IDs
-        # if cfg.SHAPE_EMBEDDING_DIM > 0:
-        #     # Assuming first feature is shape ID (needs adjustment if not)
-        #     # self.shape_embed = nn.Embedding(num_shape_types, cfg.SHAPE_EMBEDDING_DIM)
-        #     # current_dim = cfg.SHAPE_EMBEDDING_DIM + (self.shape_feat_per_slot - 1) * self.num_shape_slots
-        #     pass # Placeholder for embedding logic
 
         # MLP layers defined in config
         for hidden_dim in cfg.SHAPE_FEATURE_MLP_DIMS:
@@ -172,8 +158,6 @@ class AgentNetwork(nn.Module):
             current_dim = hidden_dim
 
         return nn.Sequential(*shape_mlp_layers), current_dim
-
-    # --- END MODIFIED ---
 
     def _build_fusion_mlp_branch(self, input_dim: int) -> Tuple[nn.Sequential, int]:
         fusion_layers: List[nn.Module] = []
@@ -214,7 +198,6 @@ class AgentNetwork(nn.Module):
                 self.head_input_dim, output_units_per_stream
             ).to(self.device)
 
-    # --- MODIFIED: Forward accepts separate tensors ---
     def forward(
         self, grid_tensor: torch.Tensor, shape_tensor: torch.Tensor
     ) -> torch.Tensor:
@@ -225,13 +208,14 @@ class AgentNetwork(nn.Module):
         if shape_tensor.device != model_device:
             shape_tensor = shape_tensor.to(model_device)
 
-        # Validate input shapes
+        # --- MODIFIED: Validate grid shape expects 2 channels ---
         expected_grid_shape = (self.grid_c, self.grid_h, self.grid_w)
         if grid_tensor.ndim != 4 or grid_tensor.shape[1:] != expected_grid_shape:
             raise ValueError(
                 f"AgentNetwork forward: Invalid grid_tensor shape {grid_tensor.shape}. Expected [B, {self.grid_c}, {self.grid_h}, {self.grid_w}]."
             )
-        # Shape tensor comes in as [B, N_SLOTS, FEAT_PER_SHAPE], flatten it
+        # --- END MODIFIED ---
+
         batch_size = grid_tensor.size(0)
         expected_shape_flat_dim = self.num_shape_slots * self.shape_feat_per_slot
         if shape_tensor.ndim == 3 and shape_tensor.shape[1:] == (
@@ -257,7 +241,7 @@ class AgentNetwork(nn.Module):
         combined_features = torch.cat((conv_output_flat, shape_output), dim=1)
         fused_output = self.fusion_mlp(combined_features)
 
-        # Output Heads (logic remains the same)
+        # Output Heads
         if self.dueling:
             value = self.value_head(fused_output)
             advantage = self.advantage_head(fused_output)
@@ -269,7 +253,9 @@ class AgentNetwork(nn.Module):
                 dist_logits = value + (advantage - adv_mean)
             else:
                 adv_mean = advantage.mean(dim=1, keepdim=True)
-                dist_logits = value + (advantage - adv_mean)
+                dist_logits = value + (
+                    advantage - adv_mean
+                )  # Output shape [B, action_dim]
 
         else:  # Non-Dueling
             dist_logits = self.output_head(fused_output)
@@ -277,10 +263,9 @@ class AgentNetwork(nn.Module):
                 dist_logits = dist_logits.view(
                     batch_size, self.action_dim, self.num_atoms
                 )
+            # Else: output shape [B, action_dim]
 
         return dist_logits
-
-    # --- END MODIFIED ---
 
     def reset_noise(self):
         """Resets noise in all NoisyLinear layers within the network."""

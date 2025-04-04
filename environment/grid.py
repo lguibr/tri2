@@ -3,23 +3,19 @@ import numpy as np
 from typing import List, Tuple
 from .triangle import Triangle
 from .shape import Shape
-
-# --- MODIFIED: Import EnvConfig directly ---
 from config import EnvConfig
-
-# --- END MODIFIED ---
 
 
 class Grid:
     """Represents the game board composed of Triangles."""
 
-    # --- MODIFIED: Accept EnvConfig in init ---
     def __init__(self, env_config: EnvConfig):
         self.rows = env_config.ROWS
         self.cols = env_config.COLS
-        # --- END MODIFIED ---
         # Padding defines 'death' cells on the sides
-        self.pad = [4, 3, 2, 1, 1, 2, 3, 4] + [0] * max(0, self.rows - 8)
+        # Use modulo for robustness if rows > len(pad)
+        _default_pad = [4, 3, 2, 1, 1, 2, 3, 4]
+        self.pad = _default_pad + [0] * max(0, self.rows - len(_default_pad))
         self.triangles: List[List[Triangle]] = []
         self._create()
 
@@ -28,8 +24,7 @@ class Grid:
         self.triangles = []
         for r in range(self.rows):
             rowt = []
-            # Use modulo for robustness if rows > len(pad)
-            p = self.pad[r % len(self.pad)]
+            p = self.pad[r]  # Access pre-calculated pad value
             for c in range(self.cols):
                 is_death_cell = c < p or c >= self.cols - p
                 is_up_cell = (r + c) % 2 == 0
@@ -48,6 +43,7 @@ class Grid:
             if not self.valid(nr, nc):
                 return False
             tri = self.triangles[nr][nc]
+            # Cannot place on death cells or occupied cells or if orientation mismatches
             if tri.is_death or tri.is_occupied or (tri.is_up != up):
                 return False
         return True
@@ -58,6 +54,7 @@ class Grid:
             nr, nc = rr + dr, cc + dc
             if self.valid(nr, nc):
                 tri = self.triangles[nr][nc]
+                # Double-check placement logic redundancy (can_place should prevent this)
                 if not tri.is_death and not tri.is_occupied:
                     tri.is_occupied = True
                     tri.color = shp.color
@@ -80,12 +77,13 @@ class Grid:
                     num_placeable_triangles_in_row += 1
                     if not t.is_occupied:
                         is_row_full = False
-                        break  # Optimization
+                        break
 
             if is_row_full and num_placeable_triangles_in_row > 0:
                 rows_to_clear_indices.append(r)
                 lines_cleared += 1
 
+        # Clear the rows marked for clearing
         for r_idx in rows_to_clear_indices:
             for t in self.triangles[r_idx]:
                 if not t.is_death and t.is_occupied:
@@ -93,7 +91,43 @@ class Grid:
                     t.is_occupied = False
                     t.color = None
 
-        # Note: Gravity is not implemented here
+        # Implement gravity (shifting rows down) - Basic version
+        if lines_cleared > 0:
+            # Create a new empty grid structure (preserving death cells)
+            new_triangles: List[List[Optional[Triangle]]] = [
+                [None for _ in range(self.cols)] for _ in range(self.rows)
+            ]
+            current_write_row = self.rows - 1
+
+            # Iterate upwards through the old grid
+            for r_old in range(self.rows - 1, -1, -1):
+                # Skip rows that were cleared
+                if r_old in rows_to_clear_indices:
+                    continue
+
+                # Copy non-cleared row to the lowest available position in the new grid
+                if current_write_row >= 0:
+                    for c in range(self.cols):
+                        old_tri = self.triangles[r_old][c]
+                        # Update row index of the triangle being moved
+                        old_tri.row = current_write_row
+                        new_triangles[current_write_row][c] = old_tri
+                    current_write_row -= 1
+
+            # Fill remaining top rows with new empty triangles (respecting death cells)
+            for r_new in range(current_write_row, -1, -1):
+                p = self.pad[r_new]  # Access pre-calculated pad value
+                for c in range(self.cols):
+                    is_death_cell = c < p or c >= self.cols - p
+                    is_up_cell = (r_new + c) % 2 == 0
+                    new_triangles[r_new][c] = Triangle(
+                        r_new, c, is_up=is_up_cell, is_death=is_death_cell
+                    )
+
+            # Ensure no None values remain and assign the new grid
+            self.triangles = [
+                [tri for tri in row if tri is not None] for row in new_triangles
+            ]
 
         return lines_cleared, triangles_cleared
 
@@ -105,6 +139,8 @@ class Grid:
             for r in range(self.rows):
                 tri = self.triangles[r][c]
                 if tri.is_death:
+                    # If a death cell is encountered, reset occupied_above for that column segment
+                    occupied_above = False
                     continue
 
                 if tri.is_occupied:
@@ -113,16 +149,20 @@ class Grid:
                     holes += 1
         return holes
 
+    # --- MODIFIED: Return 2 channels ---
     def get_feature_matrix(self) -> np.ndarray:
         """
         Returns grid state as a [Channel, Height, Width] numpy array (float32).
-        Channels: 0=Occupied, 1=Is_Up, 2=Is_Death
+        Channels: 0=Occupied, 1=Is_Up
         """
-        grid_state = np.zeros((3, self.rows, self.cols), dtype=np.float32)
+        grid_state = np.zeros((2, self.rows, self.cols), dtype=np.float32)
         for r in range(self.rows):
             for c in range(self.cols):
                 t = self.triangles[r][c]
-                grid_state[0, r, c] = 1.0 if t.is_occupied else 0.0
-                grid_state[1, r, c] = 1.0 if t.is_up else 0.0
-                grid_state[2, r, c] = 1.0 if t.is_death else 0.0
+                if not t.is_death:  # Only consider non-death cells for features
+                    grid_state[0, r, c] = 1.0 if t.is_occupied else 0.0
+                    grid_state[1, r, c] = 1.0 if t.is_up else 0.0
+                # else: Death cells remain 0.0 in both channels
         return grid_state
+
+    # --- END MODIFIED ---

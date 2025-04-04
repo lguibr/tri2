@@ -1,29 +1,19 @@
 # File: stats/tensorboard_logger.py
 import time
+import warnings
 from collections import deque
-from typing import Deque, Dict, Any, Optional, Union, List, Tuple, Callable
+from typing import Deque, Dict, Any, Optional, Union, List, Tuple
 import numpy as np
 import torch
 from torch.utils.tensorboard import SummaryWriter
-import warnings
-import traceback  # Import traceback
-
 from .simple_stats_recorder import SimpleStatsRecorder
-from config import TensorBoardConfig  # Import specific config
-
-# Filter known TensorBoard warnings
-warnings.filterwarnings(
-    "ignore", category=DeprecationWarning, module="torch.utils.tensorboard"
-)
-warnings.filterwarnings(
-    "ignore", category=UserWarning, module="torch.utils.tensorboard"
-)
+from config import TensorBoardConfig, StatsConfig, DEVICE
 
 
 class TensorBoardStatsRecorder(SimpleStatsRecorder):
     """
-    Extends SimpleStatsRecorder to log metrics, histograms, images,
-    hparams, and model graph to TensorBoard.
+    Extends SimpleStatsRecorder to log data to TensorBoard.
+    Inherits in-memory storage and console logging from SimpleStatsRecorder.
     """
 
     def __init__(
@@ -32,136 +22,149 @@ class TensorBoardStatsRecorder(SimpleStatsRecorder):
         hparam_dict: Dict[str, Any],
         model_for_graph: Optional[torch.nn.Module] = None,
         dummy_input_for_graph: Optional[
-            Union[torch.Tensor, Tuple[torch.Tensor, ...]]
-        ] = None,  # Accept tuple
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # Expect tuple now
         console_log_interval: int = 50_000,
-        avg_window: int = 100,
+        avg_window: int = StatsConfig.STATS_AVG_WINDOW,  # Use from config
         histogram_log_interval: int = 10_000,
-        image_log_interval: int = -1,  # Disabled by default
+        image_log_interval: int = 50_000,
+        # --- NEW: Pass shape Q log freq ---
+        shape_q_log_interval: int = TensorBoardConfig.SHAPE_Q_LOG_FREQ,
+        # --- END NEW ---
+        flush_secs: int = 120,
     ):
         super().__init__(console_log_interval, avg_window)
-        self.log_dir = log_dir
+        print(f"[TB Logger] Initializing TensorBoard writer in: {log_dir}")
+        self.writer = SummaryWriter(log_dir=log_dir, flush_secs=flush_secs)
         self.histogram_log_interval = (
             max(1, histogram_log_interval) if histogram_log_interval > 0 else -1
         )
         self.image_log_interval = (
             max(1, image_log_interval) if image_log_interval > 0 else -1
         )
-        self.last_histogram_log_step = -self.histogram_log_interval  # Ensure first log
-        self.last_image_log_step = -self.image_log_interval  # Ensure first log
+        # --- NEW: Store shape Q log freq ---
+        self.shape_q_log_interval = (
+            max(1, shape_q_log_interval) if shape_q_log_interval > 0 else -1
+        )
+        # --- END NEW ---
+        self.last_histogram_log_step = (
+            -self.histogram_log_interval
+        )  # Log on first opportunity
+        self.last_image_log_step = -self.image_log_interval  # Log on first opportunity
+        # --- NEW: Track last shape Q log step ---
+        self.last_shape_q_log_step = -self.shape_q_log_interval
+        # --- END NEW ---
 
-        try:
-            self.writer = SummaryWriter(log_dir=self.log_dir)
-            print(f"[TensorBoard] Writer initialized. Logging to: {self.log_dir}")
-            # Log hyperparameters immediately
-            self.record_hparams(
-                hparam_dict, {}
-            )  # Log hparams with empty metrics initially
-            # Log graph if model provided
-            if model_for_graph:
-                self.record_graph(model_for_graph, dummy_input_for_graph)
+        # Log hyperparameters immediately
+        self.record_hparams(hparam_dict, {})  # Log hparams without metrics initially
 
-        except Exception as e:
-            print(f"FATAL: Failed to initialize TensorBoard SummaryWriter: {e}")
-            print("TensorBoard logging will be disabled.")
-            traceback.print_exc()
-            self.writer = None  # Disable writer on error
+        # Log model graph if provided
+        if model_for_graph and dummy_input_for_graph:
+            self.record_graph(model_for_graph, dummy_input_for_graph)
 
-    def record_episode(self, *args, **kwargs):
-        super().record_episode(*args, **kwargs)
+    def record_episode(
+        self,
+        episode_score: float,
+        episode_length: int,
+        episode_num: int,
+        global_step: Optional[int] = None,
+        game_score: Optional[int] = None,
+        lines_cleared: Optional[int] = None,
+    ):
+        # Use parent method for in-memory tracking and best score updates
+        super().record_episode(
+            episode_score,
+            episode_length,
+            episode_num,
+            global_step,
+            game_score,
+            lines_cleared,
+        )
+
         # Log episode metrics to TensorBoard
-        if self.writer:
-            global_step = kwargs.get("global_step", self.current_global_step)
-            if "episode_score" in kwargs:
-                self.writer.add_scalar(
-                    "Episode/RL Score", kwargs["episode_score"], global_step
-                )
-            if "episode_length" in kwargs:
-                self.writer.add_scalar(
-                    "Episode/Length", kwargs["episode_length"], global_step
-                )
-            if "game_score" in kwargs and kwargs["game_score"] is not None:
-                self.writer.add_scalar(
-                    "Episode/Game Score", kwargs["game_score"], global_step
-                )
-            if "lines_cleared" in kwargs and kwargs["lines_cleared"] is not None:
-                self.writer.add_scalar(
-                    "Episode/Lines Cleared", kwargs["lines_cleared"], global_step
-                )
+        step = global_step if global_step is not None else self.current_global_step
+        if step > 0:  # Avoid logging at step 0 if not meaningful
+            self.writer.add_scalar("Episode/RL Score", episode_score, step)
+            self.writer.add_scalar("Episode/Length", episode_length, step)
+            if game_score is not None:
+                self.writer.add_scalar("Episode/Game Score", game_score, step)
+            if lines_cleared is not None:
+                self.writer.add_scalar("Episode/Lines Cleared", lines_cleared, step)
 
-            # Log running averages
-            summary = self.get_summary(global_step)
+            # Log averages as well
+            avg_score = np.mean(self.episode_scores) if self.episode_scores else 0.0
+            avg_length = np.mean(self.episode_lengths) if self.episode_lengths else 0.0
+            avg_game_score = np.mean(self.game_scores) if self.game_scores else 0.0
+
             self.writer.add_scalar(
-                "Averages/Avg RL Score (Window)",
-                summary["avg_score_window"],
-                global_step,
+                f"Episode/Avg RL Score ({self.avg_window})", avg_score, step
             )
             self.writer.add_scalar(
-                "Averages/Avg Ep Length (Window)",
-                summary["avg_length_window"],
-                global_step,
+                f"Episode/Avg Length ({self.avg_window})", avg_length, step
             )
             self.writer.add_scalar(
-                "Averages/Avg Game Score (Window)",
-                summary["avg_game_score_window"],
-                global_step,
+                f"Episode/Avg Game Score ({self.avg_window})", avg_game_score, step
             )
 
     def record_step(self, step_data: Dict[str, Any]):
-        super().record_step(step_data)  # Updates internal deques and logs console
-        if not self.writer:
-            return
+        # Use parent method for in-memory tracking, console logging trigger, etc.
+        super().record_step(step_data)
 
         g_step = step_data.get("global_step", self.current_global_step)
+        if g_step <= 0:
+            return  # Don't log step 0 data
 
-        # Log scalar metrics from step_data
-        if "loss" in step_data and step_data["loss"] is not None:
-            self.writer.add_scalar("Train/Loss", step_data["loss"], g_step)
-        if "avg_max_q" in step_data and step_data["avg_max_q"] is not None:
-            self.writer.add_scalar("Train/Avg Max Q", step_data["avg_max_q"], g_step)
-        if "grad_norm" in step_data and step_data["grad_norm"] is not None:
-            self.writer.add_scalar(
-                "Train/Gradient Norm", step_data["grad_norm"], g_step
-            )
-        if "beta" in step_data and step_data["beta"] is not None:
-            self.writer.add_scalar("Train/PER Beta", step_data["beta"], g_step)
-        if "lr" in step_data and step_data["lr"] is not None:
-            self.writer.add_scalar("Train/Learning Rate", step_data["lr"], g_step)
-        if "steps_per_second" in step_data:  # Log current SPS
-            self.writer.add_scalar(
-                "Performance/Steps Per Second", step_data["steps_per_second"], g_step
-            )
-        if "buffer_size" in step_data:
-            self.writer.add_scalar(
-                "Performance/Buffer Size", step_data["buffer_size"], g_step
-            )
+        # Log scalar values present in step_data
+        scalar_map = {
+            "loss": "Train/Loss",
+            "grad_norm": "Train/Gradient Norm",
+            "avg_max_q": "Train/Avg Max Q (batch)",
+            "beta": "Buffer/PER Beta",
+            "buffer_size": "Buffer/Size",
+            "steps_per_second": "Perf/Steps Per Second",
+            "lr": "Train/Learning Rate",
+            "epsilon": "Train/Epsilon",  # Keep logging even if noisy
+        }
+        for key, tag in scalar_map.items():
+            if key in step_data and step_data[key] is not None:
+                try:
+                    # Ensure value is float/int before logging
+                    value = float(step_data[key])
+                    if not np.isnan(value) and not np.isinf(value):
+                        self.writer.add_scalar(tag, value, g_step)
+                except (ValueError, TypeError):
+                    print(
+                        f"Warning: Could not convert value for '{key}' to float for TB scalar logging."
+                    )
 
-        # Log histograms periodically
+        # Log Histograms periodically
         if (
             self.histogram_log_interval > 0
             and g_step >= self.last_histogram_log_step + self.histogram_log_interval
         ):
-            if "batch_q_values" in step_data:
-                self.record_histogram(
-                    "Histograms/Batch Q-Values", step_data["batch_q_values"], g_step
-                )
-            if "batch_td_errors" in step_data:
-                self.record_histogram(
-                    "Histograms/Batch TD-Errors", step_data["batch_td_errors"], g_step
-                )
-            if "step_rewards_batch" in step_data:
-                self.record_histogram(
-                    "Histograms/Step Rewards (Batch)",
-                    step_data["step_rewards_batch"],
-                    g_step,
-                )
-            if "action_batch" in step_data:
-                self.record_histogram(
-                    "Histograms/Actions (Batch)", step_data["action_batch"], g_step
-                )
-            self.last_histogram_log_step = g_step
+            # Log standard histograms
+            hist_map = {
+                "step_rewards_batch": "Rewards/Step Reward Distribution",
+                "action_batch": "Actions/Chosen Action Index Distribution",
+                "batch_q_values_actions_taken": "Q-Values/Q for Chosen Actions (Batch)",  # From compute_loss via agent
+                "batch_td_errors": "Train/TD Error Distribution (Batch)",
+            }
+            for key, tag in hist_map.items():
+                if key in step_data and step_data[key] is not None:
+                    self.record_histogram(tag, step_data[key], g_step)
 
-        # Note: Image logging is handled by Trainer calling record_image directly
+            # --- NEW: Log Shape Selection Histograms ---
+            if TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES:
+                shape_hist_map = {
+                    "chosen_shape_slot_batch": "Actions/Chosen Shape Slot Distribution",
+                    "shape_slot_max_q_batch": "Q-Values/Max Q per Shape Slot (Batch)",
+                }
+                for key, tag in shape_hist_map.items():
+                    if key in step_data and step_data[key] is not None:
+                        self.record_histogram(tag, step_data[key], g_step)
+            # --- END NEW ---
+
+            self.last_histogram_log_step = g_step
 
     def record_histogram(
         self,
@@ -169,172 +172,155 @@ class TensorBoardStatsRecorder(SimpleStatsRecorder):
         values: Union[np.ndarray, torch.Tensor, List[float]],
         global_step: int,
     ):
-        if not self.writer:
+        """Records a histogram to TensorBoard."""
+        if not TensorBoardConfig.LOG_HISTOGRAMS:
             return
-        try:
-            # Ensure values are suitable for add_histogram (numpy array or tensor)
-            if isinstance(values, list):
-                values_np = np.array(values)
-            elif isinstance(values, torch.Tensor):
-                values_np = values.detach().cpu().numpy()
-            else:
-                values_np = values  # Assume numpy array
 
-            if values_np is not None and values_np.size > 0:
-                self.writer.add_histogram(tag, values_np, global_step)
-            # else: print(f"Warning: Skipping histogram '{tag}' due to empty/None values.")
-        except Exception as e:
-            print(f"Warning: Failed to log histogram '{tag}': {e}")
-            # traceback.print_exc() # Optional: for more detail
+        # Convert to numpy if it's a tensor
+        if isinstance(values, torch.Tensor):
+            values = values.detach().cpu().numpy()
+        # Ensure numpy array for processing
+        if not isinstance(values, np.ndarray):
+            try:
+                values = np.array(values)
+            except Exception as e:
+                print(
+                    f"Warning: Could not convert values for histogram '{tag}' to numpy array: {e}"
+                )
+                return
+
+        # Filter out NaN/inf values which cause TensorBoard errors
+        values = values[np.isfinite(values)]
+
+        if values.size > 0:
+            try:
+                self.writer.add_histogram(tag, values, global_step)
+            except ValueError as e:
+                print(
+                    f"Warning: TensorBoard add_histogram failed for '{tag}' (likely empty or invalid data after filtering): {e}"
+                )
+            except Exception as e:
+                print(
+                    f"ERROR: Unexpected error during TensorBoard add_histogram for '{tag}': {e}"
+                )
+        # else:
+        #     print(f"Debug: Skipping empty histogram for '{tag}' at step {global_step}")
 
     def record_image(
         self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
     ):
-        if not self.writer or self.image_log_interval <= 0:
+        """Records an image to TensorBoard."""
+        if not TensorBoardConfig.LOG_IMAGES or self.image_log_interval <= 0:
             return
-        # Check frequency (already done by caller in Trainer._maybe_log_image)
-        # if global_step < self.last_image_log_step + self.image_log_interval: return
 
+        # Check frequency handled by caller (Trainer._maybe_log_image)
         try:
-            # Ensure image has CHW format for add_image
-            if isinstance(image, np.ndarray):
-                if image.ndim == 3 and image.shape[2] in [1, 3, 4]:  # HWC
-                    img_tensor = torch.from_numpy(image).permute(2, 0, 1)
-                elif image.ndim == 3 and image.shape[0] in [1, 3, 4]:  # CHW
-                    img_tensor = torch.from_numpy(image)
-                elif image.ndim == 2:  # Grayscale HW -> add channel dim 1HW
-                    img_tensor = torch.from_numpy(image).unsqueeze(0)
-                else:
-                    print(
-                        f"Warning: Unsupported image shape for TB logging: {image.shape}"
-                    )
-                    return
-            elif isinstance(image, torch.Tensor):
-                if image.ndim == 3 and image.shape[0] in [1, 3, 4]:  # CHW
-                    img_tensor = image
-                elif (
-                    image.ndim == 4
-                    and image.shape[0] == 1
-                    and image.shape[1] in [1, 3, 4]
-                ):  # BCHW
-                    img_tensor = image.squeeze(0)
-                # Add more checks if needed (e.g., for HWC tensors)
-                else:
-                    print(
-                        f"Warning: Unsupported image tensor shape for TB logging: {image.shape}"
-                    )
-                    return
-            else:
-                print(f"Warning: Unsupported image type for TB logging: {type(image)}")
-                return
-
-            self.writer.add_image(tag, img_tensor, global_step)
-            self.last_image_log_step = global_step  # Update last log step
+            # Assuming image is CHW or HWC (numpy)
+            self.writer.add_image(
+                tag,
+                image,
+                global_step,
+                dataformats=(
+                    "CHW"
+                    if isinstance(image, torch.Tensor) and image.ndim == 3
+                    else "HWC"
+                ),
+            )
         except Exception as e:
-            print(f"Warning: Failed to log image '{tag}': {e}")
-            # traceback.print_exc()
+            print(f"Error logging image '{tag}' to TensorBoard: {e}")
+            traceback.print_exc()  # Print full traceback for image errors
 
     def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
-        if not self.writer:
-            return
+        """Records hyperparameters and metrics to TensorBoard HParams tab."""
         try:
-            # Sanitize hparam_dict: TensorBoard only supports bool, str, float, int, None
+            # Sanitize hparam_dict: TB only supports bool, string, float, int, None
             sanitized_hparams = {}
             for k, v in hparam_dict.items():
                 if isinstance(v, (bool, str, float, int)) or v is None:
                     sanitized_hparams[k] = v
-                elif isinstance(
-                    v, (list, tuple, dict, torch.device)
-                ):  # Convert complex types to string
-                    sanitized_hparams[k] = str(v)
-                # Add more specific conversions if needed
+                else:
+                    # Attempt to convert common types (like torch devices)
+                    if isinstance(v, torch.device):
+                        sanitized_hparams[k] = str(v)
+                    # Add other conversions if needed
+                    # Else, convert to string as fallback
+                    else:
+                        sanitized_hparams[k] = str(v)
 
-            # Ensure metric_dict values are simple types
+            # Sanitize metric_dict: Ensure values are numeric
             sanitized_metrics = {}
             for k, v in metric_dict.items():
-                if isinstance(v, (float, int)):
+                if isinstance(v, (float, int)) and not np.isnan(v) and not np.isinf(v):
                     sanitized_metrics[k] = v
+                # else: Skip non-numeric metrics
 
-            # Use "/" for grouping in TensorBoard HParams UI
-            formatted_hparams = {
-                k.replace(".", "/"): v for k, v in sanitized_hparams.items()
-            }
-
-            self.writer.add_hparams(formatted_hparams, sanitized_metrics)
-            print("[TensorBoard] Hyperparameters logged.")
+            self.writer.add_hparams(sanitized_hparams, sanitized_metrics)
+            print(f"[TB Logger] Recorded hyperparameters.")
         except Exception as e:
-            print(f"Warning: Failed to log hyperparameters: {e}")
-            # traceback.print_exc()
+            print(f"Error recording hyperparameters to TensorBoard: {e}")
 
-    # --- MODIFIED: record_graph handles tuple input ---
     def record_graph(
         self,
         model: torch.nn.Module,
-        input_to_model: Optional[Union[torch.Tensor, Tuple[torch.Tensor, ...]]] = None,
+        input_to_model: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # Expect tuple
     ):
-        """Record the model graph."""
-        if not self.writer:
+        """Records the model graph to TensorBoard."""
+        if input_to_model is None:
+            print("Warning: Cannot record graph without dummy input.")
             return
-        print("[TensorBoard] Attempting to log model graph...")
+        if not isinstance(input_to_model, tuple) or len(input_to_model) != 2:
+            print(
+                f"Warning: record_graph expects a tuple of (grid_tensor, shape_tensor), got {type(input_to_model)}. Skipping graph."
+            )
+            return
+
         try:
-            # Ensure model is on CPU for graph logging if it isn't already
-            original_device = next(model.parameters()).device
+            # Ensure model and input are on CPU for graph logging
             model.cpu()
+            dummy_grid_cpu, dummy_shapes_cpu = input_to_model
+            dummy_grid_cpu = dummy_grid_cpu.cpu()
+            dummy_shapes_cpu = dummy_shapes_cpu.cpu()
 
-            if input_to_model is not None:
-                # Ensure dummy input is also on CPU
-                if isinstance(input_to_model, torch.Tensor):
-                    input_cpu = input_to_model.cpu()
-                    self.writer.add_graph(model, input_to_model=input_cpu)
-                    print("[TensorBoard] Model graph logged (single input).")
-                elif isinstance(input_to_model, tuple):
-                    input_cpu_tuple = tuple(
-                        t.cpu() for t in input_to_model if isinstance(t, torch.Tensor)
-                    )
-                    # add_graph expects a tuple of inputs if the model's forward takes multiple args
-                    self.writer.add_graph(model, input_to_model=input_cpu_tuple)
-                    print("[TensorBoard] Model graph logged (tuple input).")
-                else:
-                    print(
-                        "Warning: Unsupported type for dummy_input_for_graph. Skipping graph input."
-                    )
-                    self.writer.add_graph(model)
-                    print("[TensorBoard] Model graph logged (no input).")
-            else:
-                # Log graph without dummy input (less informative)
-                self.writer.add_graph(model)
-                print("[TensorBoard] Model graph logged (no input).")
-
-            # Move model back to original device
-            model.to(original_device)
-
+            # Use add_graph with tuple input
+            with warnings.catch_warnings():  # Suppress ONNX warnings if they occur
+                warnings.simplefilter("ignore")
+                self.writer.add_graph(model, (dummy_grid_cpu, dummy_shapes_cpu))
+            print("[TB Logger] Recorded model graph.")
         except Exception as e:
-            print(f"Warning: Failed to log model graph: {e}")
-            traceback.print_exc()
-            # Ensure model is moved back even if logging fails
-            try:
-                model.to(original_device)
-            except:
-                pass
-
-    # --- END MODIFIED ---
+            print(f"Error recording model graph to TensorBoard: {e}")
+            # traceback.print_exc() # Optional: print traceback for debugging
+        finally:
+            # Move model back to its original device (important!)
+            model.to(DEVICE)
 
     def close(self):
-        """Closes the TensorBoard writer."""
-        super().close()  # Call parent's close (which is no-op)
+        """Closes the TensorBoard SummaryWriter."""
+        print("[TB Logger] Closing TensorBoard writer...")
         if self.writer:
             try:
-                # Log final metrics before closing?
-                # summary = self.get_summary(self.current_global_step)
-                # final_metrics = {
-                #     "hparam/final_avg_score": summary.get("avg_score_window", 0),
-                #     "hparam/best_score": summary.get("best_score", -float('inf')),
-                # }
-                # self.record_hparams({}, final_metrics) # Log only metrics
+                # Log final best metrics to HParams before closing
+                final_metrics = {
+                    "hparam/best_rl_score": (
+                        self.best_score if self.best_score > -float("inf") else 0.0
+                    ),
+                    "hparam/best_game_score": (
+                        self.best_game_score
+                        if self.best_game_score > -float("inf")
+                        else 0.0
+                    ),
+                    "hparam/best_loss": (
+                        self.best_loss if self.best_loss < float("inf") else 0.0
+                    ),
+                    "hparam/total_episodes": float(self.total_episodes),
+                }
+                # Make sure hparams were logged initially
+                # self.record_hparams({}, final_metrics) # Re-logging hparams might duplicate, just flush
 
                 self.writer.flush()
                 self.writer.close()
-                print("[TensorBoard] Writer closed.")
+                print("[TB Logger] TensorBoard writer closed.")
             except Exception as e:
                 print(f"Error closing TensorBoard writer: {e}")
-            self.writer = None
+        super().close()  # Call parent close if needed

@@ -2,19 +2,9 @@
 # --- Pre-Run Sanity Checks ---
 import sys
 import traceback
-import numpy as np  # Import numpy
-
-# --- MODIFIED: Import EnvConfig ---
-from config import EnvConfig
-
-# --- END MODIFIED ---
-
-# Import core components
-try:
-    from environment.game_state import GameState
-except ImportError as e:
-    print(f"Error importing environment: {e}")
-    sys.exit(1)
+import numpy as np
+from config import EnvConfig  # Import config class
+from environment.game_state import GameState
 
 
 def run_pre_checks() -> bool:
@@ -22,13 +12,10 @@ def run_pre_checks() -> bool:
     print("--- Pre-Run Checks ---")
     try:
         print("Checking GameState and Configuration Compatibility...")
-        # --- MODIFIED: Instantiate EnvConfig ---
-        env_config_instance = EnvConfig()
-        # --- END MODIFIED ---
+        env_config_instance = EnvConfig()  # Instantiate
 
         gs_test = GameState()
         gs_test.reset()
-        # --- MODIFIED: Check dictionary state structure ---
         s_test_dict = gs_test.get_state()
 
         if not isinstance(s_test_dict, dict):
@@ -37,11 +24,13 @@ def run_pre_checks() -> bool:
             )
         print("GameState state type check PASSED (returned dict).")
 
-        # Check 'grid' component
+        # --- MODIFIED: Check grid shape (2 channels) ---
         if "grid" not in s_test_dict:
             raise KeyError("State dictionary missing 'grid' key.")
         grid_state = s_test_dict["grid"]
-        expected_grid_shape = env_config_instance.GRID_STATE_SHAPE
+        expected_grid_shape = (
+            env_config_instance.GRID_STATE_SHAPE
+        )  # Uses property (2, H, W)
         if not isinstance(grid_state, np.ndarray):
             raise TypeError(
                 f"State 'grid' component should be numpy array, but got {type(grid_state)}"
@@ -51,8 +40,9 @@ def run_pre_checks() -> bool:
                 f"State 'grid' shape mismatch! GameState:{grid_state.shape}, EnvConfig:{expected_grid_shape}"
             )
         print(f"GameState 'grid' state shape check PASSED (Shape: {grid_state.shape}).")
+        # --- END MODIFIED ---
 
-        # Check 'shapes' component
+        # Check 'shapes' component (unchanged)
         if "shapes" not in s_test_dict:
             raise KeyError("State dictionary missing 'shapes' key.")
         shape_state = s_test_dict["shapes"]
@@ -71,15 +61,12 @@ def run_pre_checks() -> bool:
         print(
             f"GameState 'shapes' state shape check PASSED (Shape: {shape_state.shape})."
         )
-        # --- END MODIFIED ---
 
         _ = gs_test.valid_actions()
         print("GameState valid_actions check PASSED.")
-
         if not hasattr(gs_test, "game_score"):
             raise AttributeError("GameState missing 'game_score' attribute!")
         print("GameState 'game_score' attribute check PASSED.")
-
         if not hasattr(gs_test, "lines_cleared_this_episode"):
             raise AttributeError(
                 "GameState missing 'lines_cleared_this_episode' attribute!"
@@ -91,16 +78,9 @@ def run_pre_checks() -> bool:
         return True
     except (NameError, ImportError) as e:
         print(f"FATAL ERROR: Import/Name error: {e}")
-    except (
-        ValueError,
-        AttributeError,
-        TypeError,
-        KeyError,
-    ) as e:  # Added TypeError, KeyError
+    except (ValueError, AttributeError, TypeError, KeyError) as e:
         print(f"FATAL ERROR during pre-run checks: {e}")
     except Exception as e:
         print(f"FATAL ERROR during GameState pre-check: {e}")
         traceback.print_exc()
-
-    # If any check fails and raises an exception that's caught here, exit.
-    sys.exit(1)  # Exit if checks fail
+    sys.exit(1)

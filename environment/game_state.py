@@ -30,6 +30,11 @@ class GameState:
         self.game_over = False
         self._last_action_valid = True
         self.rewards = RewardConfig
+        # --- NEW: Attributes for interactive play ---
+        self.demo_selected_shape_idx: int = 0
+        self.demo_target_row: int = self.env_config.ROWS // 2
+        self.demo_target_col: int = self.env_config.COLS // 2
+        # --- END NEW ---
 
     def reset(self) -> StateType:  # Return new StateType
         self.grid = Grid(self.env_config)
@@ -42,6 +47,11 @@ class GameState:
         self.game_over = False
         self._last_action_valid = True
         self.last_time = time.time()
+        # --- NEW: Reset demo state ---
+        self.demo_selected_shape_idx = 0
+        self.demo_target_row = self.env_config.ROWS // 2
+        self.demo_target_col = self.env_config.COLS // 2
+        # --- END NEW ---
         return self.get_state()
 
     def valid_actions(self) -> List[int]:
@@ -155,7 +165,6 @@ class GameState:
         # Check if the chosen action 'a' is actually valid *now*
         # This prevents issues if the agent selects an action that became invalid
         # between the time valid_actions() was called and step() is executed.
-        # However, in a typical RL loop, the agent gets valid actions just before selecting.
         # We rely on the agent masking correctly. If an invalid action is passed,
         # we penalize it.
 
@@ -191,7 +200,7 @@ class GameState:
         'grid' (numpy array [C, H, W]) and 'shapes' (numpy array [N_SLOTS, FEAT_PER_SHAPE]).
         """
         # 1. Grid Features
-        grid_state = self.grid.get_feature_matrix()  # Shape: [3, H, W]
+        grid_state = self.grid.get_feature_matrix()  # Shape: [C, H, W] C=2 now
 
         # 2. Shape Features
         shape_features_per = self.env_config.SHAPE_FEATURES_PER_SHAPE
@@ -241,3 +250,53 @@ class GameState:
 
     def get_shapes(self) -> List[Shape]:
         return [s for s in self.shapes if s is not None]
+
+    # --- NEW: Methods for Interactive Control ---
+    def cycle_shape(self, direction: int):
+        """Cycles the selected shape index (direction +1 or -1)."""
+        if self.game_over or self.freeze_time > 0:
+            return
+        num_slots = self.env_config.NUM_SHAPE_SLOTS
+        if num_slots <= 0:
+            return
+
+        current_idx = self.demo_selected_shape_idx
+        for _ in range(num_slots):  # Try all slots
+            current_idx = (current_idx + direction + num_slots) % num_slots
+            if self.shapes[current_idx] is not None:
+                self.demo_selected_shape_idx = current_idx
+                return  # Found a non-empty slot
+
+    def move_target(self, dr: int, dc: int):
+        """Moves the target placement coordinate."""
+        if self.game_over or self.freeze_time > 0:
+            return
+        self.demo_target_row = np.clip(self.demo_target_row + dr, 0, self.grid.rows - 1)
+        self.demo_target_col = np.clip(self.demo_target_col + dc, 0, self.grid.cols - 1)
+
+    def get_action_for_current_selection(self) -> Optional[int]:
+        """Converts the current demo selection (shape, row, col) into an action index."""
+        if self.game_over or self.freeze_time > 0:
+            return None
+        s_idx = self.demo_selected_shape_idx
+        shp = self.shapes[s_idx] if 0 <= s_idx < len(self.shapes) else None
+        if shp is None:
+            return None  # No shape in selected slot
+
+        rr, cc = self.demo_target_row, self.demo_target_col
+
+        # Check if the placement at the target is valid *now*
+        if self.grid.can_place(shp, rr, cc):
+            locations_per_shape = self.grid.rows * self.grid.cols
+            action_index = s_idx * locations_per_shape + (rr * self.grid.cols + cc)
+            return action_index
+        else:
+            return None  # Invalid placement at target
+
+    def get_current_selection_info(self) -> Tuple[Optional[Shape], int, int]:
+        """Returns the currently selected shape, target row, and target col."""
+        s_idx = self.demo_selected_shape_idx
+        shp = self.shapes[s_idx] if 0 <= s_idx < len(self.shapes) else None
+        return shp, self.demo_target_row, self.demo_target_col
+
+    # --- END NEW ---
