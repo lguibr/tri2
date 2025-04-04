@@ -15,7 +15,7 @@ from config import (
 from config.general import TOTAL_TRAINING_STEPS
 from ui.plotter import Plotter
 
-# Tooltips specific to this panel
+# Tooltips specific to this panel (Keep definition here for locality)
 TOOLTIP_TEXTS = {
     "Status": "Current state: Paused, Buffering, Training, Confirm Cleanup, Cleaning, or Error.",
     "Global Steps": "Total environment steps taken / Total planned steps.",
@@ -33,9 +33,7 @@ TOOLTIP_TEXTS = {
     "Best RL Score Info": "Best RL Score achieved: Current Value (Previous Value) - Steps Ago",
     "Best Game Score Info": "Best Game Score achieved: Current Value (Previous Value) - Steps Ago",
     "Best Loss Info": "Best (Lowest) Loss achieved: Current Value (Previous Value) - Steps Ago",
-    # --- MODIFIED Tooltips ---
     "Play Demo Button": "Click to enter interactive play mode. Gameplay fills the replay buffer.",
-    # --- END MODIFIED ---
 }
 
 
@@ -45,7 +43,7 @@ class LeftPanelRenderer:
         self.vis_config = vis_config
         self.plotter = plotter
         self.fonts = self._init_fonts()
-        self.stat_rects: Dict[str, pygame.Rect] = {}
+        self.stat_rects: Dict[str, pygame.Rect] = {}  # Rects for tooltip hit detection
 
     def _init_fonts(self):
         """Loads necessary fonts, attempting to load DejaVuSans for notifications."""
@@ -57,20 +55,21 @@ class LeftPanelRenderer:
         notification_size = 19
         notification_label_size = 16
 
+        # Try loading DejaVuSans for better unicode/symbol support if needed later
+        # For now, SysFont is generally sufficient. Keep fallback logic.
         notification_font_path = os.path.join("fonts", "DejaVuSans.ttf")
         try:
+            # Attempt loading specific font first
             fonts["notification"] = pygame.font.Font(
                 notification_font_path, notification_size
             )
-            print(f"Loaded notification font: {notification_font_path}")
-        except pygame.error as e:
-            print(
-                f"Warning: Could not load '{notification_font_path}': {e}. Falling back to SysFont."
-            )
+            # print(f"Loaded notification font: {notification_font_path}") # Optional Log
+        except (pygame.error, FileNotFoundError) as e:
+            # print(f"Warning: Could not load '{notification_font_path}': {e}. Falling back...") # Optional Log
             try:
                 fonts["notification"] = pygame.font.SysFont(None, notification_size)
             except Exception:
-                print("Warning: SysFont fallback failed. Using default font.")
+                # print("Warning: SysFont fallback failed. Using default font.") # Optional Log
                 fonts["notification"] = pygame.font.Font(None, notification_size)
 
         try:
@@ -87,10 +86,12 @@ class LeftPanelRenderer:
             fonts["status"] = pygame.font.Font(None, status_font_size)
             fonts["logdir"] = pygame.font.Font(None, logdir_font_size)
             fonts["plot_placeholder"] = pygame.font.Font(None, plot_placeholder_size)
+            # Fallback for notification_label if SysFont failed
             fonts["notification_label"] = fonts.get(
                 "notification", pygame.font.Font(None, notification_label_size)
             )
 
+        # Final check for missing fonts
         for key, size in [
             ("ui", default_font_size),
             ("status", status_font_size),
@@ -106,18 +107,6 @@ class LeftPanelRenderer:
                 fonts[key] = pygame.font.Font(None, size)
         return fonts
 
-    def _format_steps_ago(self, current_step: int, best_step: int) -> str:
-        """Formats the difference in steps into a readable string (k steps, M steps)."""
-        if best_step <= 0 or current_step <= best_step:
-            return "Now"
-        diff = current_step - best_step
-        if diff < 1000:
-            return f"{diff} steps ago"  # Add "steps"
-        elif diff < 1_000_000:
-            return f"{diff / 1000:.1f}k steps ago"  # Add "steps"
-        else:
-            return f"{diff / 1_000_000:.1f}M steps ago"  # Add "steps"
-
     def render(
         self,
         is_training: bool,
@@ -126,13 +115,14 @@ class LeftPanelRenderer:
         buffer_capacity: int,
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
-        app_state: str,  # NEW: Pass app state
+        app_state: str,
     ):
-        """Renders the entire left panel."""
+        """Renders the entire left panel by calling sub-render methods."""
         current_width, current_height = self.screen.get_size()
         lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
         lp_rect = pygame.Rect(0, 0, lp_width, current_height)
 
+        # Background based on status
         status_color_map = {
             "Paused": (30, 30, 30),
             "Buffering": (30, 40, 30),
@@ -140,101 +130,132 @@ class LeftPanelRenderer:
             "Confirm Cleanup": (50, 20, 20),
             "Cleaning": (60, 30, 30),
             "Error": (60, 0, 0),
-            "Playing Demo": (30, 30, 40),  # Add color for demo
+            "Playing Demo": (30, 30, 40),
             "Initializing": (40, 40, 40),
         }
         bg_color = status_color_map.get(status, (30, 30, 30))
         pygame.draw.rect(self.screen, bg_color, lp_rect)
 
-        self.stat_rects.clear()
+        self.stat_rects.clear()  # Reset rects for tooltips each frame
 
-        # 1. Buttons
-        train_btn_rect = pygame.Rect(10, 10, 100, 40)
-        cleanup_btn_rect = pygame.Rect(train_btn_rect.right + 10, 10, 160, 40)
-        # --- NEW: Demo Button ---
-        demo_btn_rect = pygame.Rect(cleanup_btn_rect.right + 10, 10, 120, 40)
-        # --- END NEW ---
+        # --- Render sections sequentially ---
+        current_y = 10  # Starting Y position
 
-        # Only draw Train/Cleanup/Demo if in MainMenu
+        # 1. Buttons and Status (Layout depends on app_state)
+        notification_area_rect, current_y = self._render_buttons_and_status(
+            current_y, lp_width, app_state, is_training, status
+        )
+
+        # 2. Notification Area (if applicable)
+        if notification_area_rect:
+            self._render_notification_area(notification_area_rect, stats_summary)
+            # Adjust current_y to be below the notifications if they were rendered
+            current_y = max(current_y, notification_area_rect.bottom + 10)
+
+        # 3. Info Text Block
+        current_y = self._render_info_text(
+            current_y, stats_summary, buffer_capacity, lp_width
+        )
+
+        # 4. TensorBoard Status
+        current_y = self._render_tb_status(
+            current_y + 10, tensorboard_log_dir, lp_width
+        )
+
+        # 5. Plot Area
+        self._render_plot_area(
+            current_y + 15, lp_width, current_height, plot_data, status
+        )
+
+    def _render_buttons_and_status(
+        self,
+        y_start: int,
+        panel_width: int,
+        app_state: str,
+        is_training: bool,
+        status: str,
+    ) -> Tuple[Optional[pygame.Rect], int]:
+        """Renders the top buttons (if in MainMenu) and the status line.
+        Returns the Rect for the notification area (or None) and the next Y coordinate.
+        """
+        notification_rect = None
+        next_y = y_start
+
         if app_state == "MainMenu":
+            # Define button rects
+            train_btn_rect = pygame.Rect(10, y_start, 100, 40)
+            cleanup_btn_rect = pygame.Rect(train_btn_rect.right + 10, y_start, 160, 40)
+            demo_btn_rect = pygame.Rect(cleanup_btn_rect.right + 10, y_start, 120, 40)
+
+            # Draw buttons
             self._draw_button(
                 train_btn_rect,
                 "Pause" if is_training and status == "Training" else "Train",
                 (70, 70, 70),
             )
             self._draw_button(cleanup_btn_rect, "Cleanup This Run", (100, 40, 40))
-            # --- NEW: Draw Demo Button ---
             self._draw_button(demo_btn_rect, "Play Demo", (40, 100, 40))
-            # --- END NEW ---
+
+            # Register button rects for tooltips
             self.stat_rects["Train Button"] = train_btn_rect
             self.stat_rects["Cleanup Button"] = cleanup_btn_rect
-            self.stat_rects["Play Demo Button"] = demo_btn_rect  # NEW
-            current_y_start_offset = train_btn_rect.bottom + 10
-        else:
-            current_y_start_offset = 10  # Start lower if no buttons
+            self.stat_rects["Play Demo Button"] = demo_btn_rect
 
-        # --- MODIFIED: Adjust notification area position ---
-        # Decide where to put notifications based on whether buttons are shown
-        if app_state == "MainMenu":
-            notification_area_x = demo_btn_rect.right + 15  # Position after demo button
-            notification_area_y = train_btn_rect.top
-            notification_area_width = lp_width - notification_area_x - 10
-        else:  # No buttons shown, disable notifications panel in demo/other states
-            notification_area_width = 0
+            # Calculate notification area position (to the right of buttons)
+            notification_x = demo_btn_rect.right + 15
+            notification_w = panel_width - notification_x - 10
+            if notification_w > 50:
+                line_h = self.fonts["notification"].get_linesize()
+                notification_h = line_h * 3 + 12  # Height for 3 lines of notifications
+                notification_rect = pygame.Rect(
+                    notification_x, y_start, notification_w, notification_h
+                )
 
-        # 2. Status Text (Show always, adjust text based on state)
+            next_y = train_btn_rect.bottom + 10  # Next element starts below buttons
+
+        # Render Status Text (Always)
         status_text = f"Status: {status}"
         if app_state == "Playing":
             status_text = "Status: Playing Demo"
-        elif app_state != "MainMenu":  # E.g. Initializing
-            status_text = f"Status: {app_state}"
+        elif app_state != "MainMenu":
+            status_text = f"Status: {app_state}"  # e.g., Initializing
 
         status_surf = self.fonts["status"].render(status_text, True, VisConfig.YELLOW)
-        status_rect = status_surf.get_rect(topleft=(10, current_y_start_offset))
+        # Position status text below buttons if they exist, otherwise at the top
+        status_rect_top = next_y if app_state == "MainMenu" else y_start
+        status_rect = status_surf.get_rect(topleft=(10, status_rect_top))
         self.screen.blit(status_surf, status_rect)
-        self.stat_rects["Status"] = status_rect  # Tooltip still works if in main menu
-        current_y = status_rect.bottom + 5
+        if app_state == "MainMenu":  # Only add tooltip for status in main menu
+            self.stat_rects["Status"] = status_rect
 
-        # 3. Notification Area (Only if in MainMenu and space allows)
-        if app_state == "MainMenu" and notification_area_width > 50:
-            notification_line_height = self.fonts["notification"].get_linesize()
-            notification_area_height = notification_line_height * 3 + 12
-            notification_area_rect = pygame.Rect(
-                notification_area_x,
-                notification_area_y,
-                notification_area_width,
-                notification_area_height,
-            )
-            self._render_notification_area(notification_area_rect, stats_summary)
-            current_y = max(current_y, notification_area_rect.bottom + 10)
-        elif app_state == "MainMenu":  # Not enough width for notifications
-            # If buttons were shown, align below them
-            current_y = max(current_y, train_btn_rect.bottom + 10)
-        # else: current_y remains as set after status text for other states
+        # Determine the starting Y for the *next* block (below status and potentially buttons)
+        final_next_y = status_rect.bottom + 5
 
-        # 4. Info Text Block (Show always)
-        last_text_y = self._render_info_text_reduced(
-            current_y, stats_summary, buffer_capacity, lp_width
-        )
-
-        # 5. TensorBoard Status (Show always)
-        last_text_y = self._render_tb_status(last_text_y + 10, tensorboard_log_dir)
-
-        # 6. Plot Area (Show always, but data might only update in MainMenu)
-        self._render_plot_area(
-            last_text_y + 15, lp_width, current_height, plot_data, status
-        )
+        return notification_rect, final_next_y
 
     def _draw_button(self, rect: pygame.Rect, text: str, color: Tuple[int, int, int]):
+        """Helper to draw a single button."""
         pygame.draw.rect(self.screen, color, rect, border_radius=5)
         lbl_surf = self.fonts["ui"].render(text, True, VisConfig.WHITE)
         self.screen.blit(lbl_surf, lbl_surf.get_rect(center=rect.center))
+
+    def _format_steps_ago(self, current_step: int, best_step: int) -> str:
+        """Formats the difference in steps into a readable string (k steps, M steps)."""
+        if best_step <= 0 or current_step <= best_step:
+            return "Now"
+        diff = current_step - best_step
+        if diff < 1000:
+            return f"{diff} steps ago"
+        elif diff < 1_000_000:
+            return f"{diff / 1000:.1f}k steps ago"
+        else:
+            return f"{diff / 1_000_000:.1f}M steps ago"
 
     def _render_notification_area(self, area_rect: pygame.Rect, stats: Dict[str, Any]):
         """Renders the latest best score/loss messages with details."""
         pygame.draw.rect(self.screen, (45, 45, 45), area_rect, border_radius=3)
         pygame.draw.rect(self.screen, VisConfig.LIGHTG, area_rect, 1, border_radius=3)
-        self.stat_rects["Notification Area"] = area_rect
+        self.stat_rects["Notification Area"] = area_rect  # Tooltip for the whole area
 
         padding = 5
         line_height = self.fonts["notification"].get_linesize()
@@ -243,10 +264,11 @@ class LeftPanelRenderer:
         label_color = VisConfig.LIGHTG
         value_color = VisConfig.WHITE
         prev_color = VisConfig.GRAY
-        time_color = (180, 180, 100)
+        time_color = (180, 180, 100)  # Yellowish for time
 
         current_step = stats.get("global_step", 0)
 
+        # --- Helper function to render a single notification line ---
         def render_line(
             y_pos, label, current_val, prev_val, best_step, val_format, tooltip_key
         ):
@@ -259,52 +281,48 @@ class LeftPanelRenderer:
             self.screen.blit(label_surf, label_rect)
             current_x = label_rect.right + 4
 
-            # Current Value
-            current_val_str = (
-                val_format.format(current_val)
-                if isinstance(current_val, (int, float))
-                and current_val > -float("inf")
-                and current_val < float("inf")
-                else "N/A"
-            )
+            # Current Value (handle inf/-inf)
+            current_val_str = "N/A"
+            if isinstance(current_val, (int, float)) and abs(current_val) != float(
+                "inf"
+            ):
+                current_val_str = val_format.format(current_val)
             val_surf = value_font.render(current_val_str, True, value_color)
             val_rect = val_surf.get_rect(topleft=(current_x, y_pos))
             self.screen.blit(val_surf, val_rect)
             current_x = val_rect.right + 4
 
-            # Previous Value
-            prev_val_str = (
-                f"({val_format.format(prev_val)})"
-                if isinstance(prev_val, (int, float))
-                and prev_val > -float("inf")
-                and prev_val < float("inf")
-                else "(N/A)"
-            )
+            # Previous Value (handle inf/-inf)
+            prev_val_str = "(N/A)"
+            if isinstance(prev_val, (int, float)) and abs(prev_val) != float("inf"):
+                prev_val_str = f"({val_format.format(prev_val)})"
             prev_surf = label_font.render(prev_val_str, True, prev_color)
-            prev_rect = prev_surf.get_rect(topleft=(current_x, y_pos + 1))
+            prev_rect = prev_surf.get_rect(
+                topleft=(current_x, y_pos + 1)
+            )  # Slightly offset
             self.screen.blit(prev_surf, prev_rect)
             current_x = prev_rect.right + 6
 
-            # Steps Ago (using updated formatting)
+            # Steps Ago
             steps_ago_str = self._format_steps_ago(current_step, best_step)
             time_surf = label_font.render(steps_ago_str, True, time_color)
-            time_rect = time_surf.get_rect(topleft=(current_x, y_pos + 1))
+            time_rect = time_surf.get_rect(
+                topleft=(current_x, y_pos + 1)
+            )  # Slightly offset
+
             # Clip rendering to the notification area width
             available_width = area_rect.right - time_rect.left - padding
-            if time_rect.width > available_width:
-                time_rect.width = max(0, available_width)  # Ensure non-negative width
-            # Blit only the visible part
-            self.screen.blit(
-                time_surf,
-                time_rect,
-                area=pygame.Rect(0, 0, time_rect.width, time_rect.height),
-            )
+            clip_rect = pygame.Rect(0, 0, max(0, available_width), time_rect.height)
+            if time_rect.width > available_width > 0:
+                self.screen.blit(time_surf, time_rect, area=clip_rect)
+            elif available_width > 0:  # Only blit if space available
+                self.screen.blit(time_surf, time_rect)
 
-            combined_line_rect = (
-                label_rect.union(val_rect).union(prev_rect).union(time_rect)
-            )
-            # Clip the rect used for tooltips to the notification area
-            self.stat_rects[tooltip_key] = combined_line_rect.clip(area_rect)
+            # Create combined rect for tooltip hover detection (clipped to area)
+            combined_rect = label_rect.union(val_rect).union(prev_rect).union(time_rect)
+            self.stat_rects[tooltip_key] = combined_rect.clip(area_rect)
+
+        # --- End render_line helper ---
 
         y = area_rect.top + padding
         render_line(
@@ -337,7 +355,7 @@ class LeftPanelRenderer:
             "Best Loss Info",
         )
 
-    def _render_info_text_reduced(
+    def _render_info_text(
         self, y_start: int, stats: Dict[str, Any], capacity: int, panel_width: int
     ) -> int:
         """Renders the main block of statistics text."""
@@ -346,6 +364,7 @@ class LeftPanelRenderer:
         buffer_perc = (buffer_size / max(1, capacity) * 100) if capacity > 0 else 0.0
         global_step = stats.get("global_step", 0)
 
+        # Define lines to render
         info_lines = [
             (
                 "Global Steps",
@@ -367,42 +386,55 @@ class LeftPanelRenderer:
         ]
 
         last_y = y_start
-        current_stat_rects = {}
+        x_pos_key = 10
+        x_pos_val_offset = 5  # Space between key and value
+
         for idx, (key, value_str) in enumerate(info_lines):
+            current_y = y_start + idx * line_height
             try:
+                # Render Key
                 key_surf = self.fonts["ui"].render(f"{key}:", True, VisConfig.LIGHTG)
-                key_rect = key_surf.get_rect(topleft=(10, y_start + idx * line_height))
+                key_rect = key_surf.get_rect(topleft=(x_pos_key, current_y))
+                self.screen.blit(key_surf, key_rect)
+
+                # Render Value
                 value_surf = self.fonts["ui"].render(
                     f"{value_str}", True, VisConfig.WHITE
                 )
                 value_rect = value_surf.get_rect(
-                    topleft=(key_rect.right + 5, key_rect.top)
+                    topleft=(key_rect.right + x_pos_val_offset, current_y)
                 )
-                # Clip value rect to panel width if necessary
-                if value_rect.right > panel_width - 10:
-                    value_rect.width = max(0, panel_width - 10 - value_rect.left)
 
+                # Clip value rendering if it exceeds panel width
+                clip_width = max(
+                    0, panel_width - value_rect.left - 10
+                )  # 10px right margin
+                if value_rect.width > clip_width:
+                    self.screen.blit(
+                        value_surf,
+                        value_rect,
+                        area=pygame.Rect(0, 0, clip_width, value_rect.height),
+                    )
+                else:
+                    self.screen.blit(value_surf, value_rect)
+
+                # Register combined rect for tooltip
                 combined_rect = key_rect.union(value_rect)
-                # Ensure the combined rect for tooltip doesn't exceed panel width
-                if combined_rect.right > panel_width - 10:
-                    combined_rect.width = panel_width - 10 - combined_rect.left
-
-                self.screen.blit(key_surf, key_rect)
-                self.screen.blit(
-                    value_surf,
-                    value_rect,
-                    area=pygame.Rect(0, 0, value_rect.width, value_rect.height),
-                )  # Use area clipping
-                current_stat_rects[key] = combined_rect
+                combined_rect.width = min(
+                    combined_rect.width, panel_width - x_pos_key - 10
+                )  # Clip tooltip rect too
+                self.stat_rects[key] = combined_rect
                 last_y = combined_rect.bottom
+
             except Exception as e:
                 print(f"Error rendering stat line '{key}': {e}")
-                last_y += line_height
+                last_y = current_y + line_height  # Advance Y even on error
 
-        self.stat_rects.update(current_stat_rects)
-        return last_y
+        return last_y  # Return Y position below the last rendered item
 
-    def _render_tb_status(self, y_start: int, log_dir: Optional[str]) -> int:
+    def _render_tb_status(
+        self, y_start: int, log_dir: Optional[str], panel_width: int
+    ) -> int:
         """Renders the TensorBoard status line and log directory."""
         tb_active = (
             TensorBoardConfig.LOG_HISTOGRAMS
@@ -415,25 +447,21 @@ class LeftPanelRenderer:
         tb_surf = self.fonts["ui"].render(tb_text, True, tb_color)
         tb_rect = tb_surf.get_rect(topleft=(10, y_start))
         self.screen.blit(tb_surf, tb_rect)
+        self.stat_rects["TensorBoard Status"] = tb_rect  # Initial rect for tooltip
 
         last_y = tb_rect.bottom
-        combined_tb_rect = tb_rect
 
         if log_dir:
             try:
-                # Try to get relative path, fallback to basename
-                panel_char_width = (
-                    self.vis_config.LEFT_PANEL_WIDTH
-                    // self.fonts["logdir"].size("A")[0]
+                # Attempt to shorten log directory path for display
+                panel_char_width = max(
+                    10, panel_width // self.fonts["logdir"].size("A")[0]
                 )
-                panel_char_width = max(10, panel_char_width)  # Ensure minimum width
-
                 try:
                     rel_log_dir = os.path.relpath(log_dir)
-                except ValueError:  # Happens if on different drives on Windows
+                except ValueError:  # Handle different drives on Windows
                     rel_log_dir = log_dir
 
-                # Shorten path if too long
                 if len(rel_log_dir) > panel_char_width:
                     parts = log_dir.replace("\\", "/").split("/")
                     if len(parts) >= 2:
@@ -448,7 +476,7 @@ class LeftPanelRenderer:
                             "..." + os.path.basename(log_dir)[-(panel_char_width - 3) :]
                         )
 
-            except Exception:  # Catch any other errors during path manipulation
+            except Exception:  # Fallback on any path manipulation error
                 rel_log_dir = os.path.basename(log_dir)
 
             dir_surf = self.fonts["logdir"].render(
@@ -456,26 +484,25 @@ class LeftPanelRenderer:
             )
             dir_rect = dir_surf.get_rect(topleft=(10, tb_rect.bottom + 2))
 
-            # Clip dir rect rendering
-            panel_width = (
-                self.screen.get_rect().width if self.screen else 800
-            )  # Fallback width
-            lp_width = min(panel_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
-            if dir_rect.right > lp_width - 10:
-                dir_rect.width = max(0, lp_width - 10 - dir_rect.left)
+            # Clip rendering if needed
+            clip_width = max(0, panel_width - dir_rect.left - 10)
+            if dir_rect.width > clip_width:
+                self.screen.blit(
+                    dir_surf,
+                    dir_rect,
+                    area=pygame.Rect(0, 0, clip_width, dir_rect.height),
+                )
+            else:
+                self.screen.blit(dir_surf, dir_rect)
 
-            self.screen.blit(
-                dir_surf,
-                dir_rect,
-                area=pygame.Rect(0, 0, dir_rect.width, dir_rect.height),
-            )
+            # Update tooltip rect to include the log dir line
             combined_tb_rect = tb_rect.union(dir_rect)
-            # Ensure tooltip rect doesn't exceed panel width
-            if combined_tb_rect.right > lp_width - 10:
-                combined_tb_rect.width = lp_width - 10 - combined_tb_rect.left
-            last_y = dir_rect.bottom  # Use dir_rect bottom for positioning next element
+            combined_tb_rect.width = min(
+                combined_tb_rect.width, panel_width - 10 - combined_tb_rect.left
+            )
+            self.stat_rects["TensorBoard Status"] = combined_tb_rect
+            last_y = dir_rect.bottom
 
-        self.stat_rects["TensorBoard Status"] = combined_tb_rect
         return last_y
 
     def _render_plot_area(
@@ -486,15 +513,15 @@ class LeftPanelRenderer:
         plot_data: Dict[str, Deque],
         status: str,
     ):
-        """Renders the Matplotlib plot area."""
-        plot_area_height = screen_height - y_start - 10
-        plot_area_width = panel_width - 20
+        """Renders the Matplotlib plot area using the Plotter."""
+        plot_area_height = screen_height - y_start - 10  # Bottom margin
+        plot_area_width = panel_width - 20  # Left/right margins
 
         if plot_area_width <= 50 or plot_area_height <= 50:
-            # Optionally draw a small rect indicating the area exists but is too small
-            # pygame.draw.rect(self.screen, (20, 20, 20), pygame.Rect(10, y_start, plot_area_width, plot_area_height), 1)
+            # Area too small to render plot, maybe show a placeholder
             return
 
+        # Get the plot surface (cached or newly generated)
         plot_surface = self.plotter.get_cached_or_updated_plot(
             plot_data, plot_area_width, plot_area_height
         )
@@ -503,10 +530,11 @@ class LeftPanelRenderer:
         if plot_surface:
             self.screen.blit(plot_surface, plot_area_rect.topleft)
         else:
+            # Render placeholder if plot couldn't be generated
             pygame.draw.rect(self.screen, (40, 40, 40), plot_area_rect, 1)
             placeholder_text = "Waiting for data..."
             if status == "Buffering":
-                placeholder_text = "Buffering... Waiting for data..."
+                placeholder_text = "Buffering... Waiting for plot data..."
             elif status == "Error":
                 placeholder_text = "Plotting disabled due to error."
             elif not plot_data or not any(plot_data.values()):
@@ -517,7 +545,7 @@ class LeftPanelRenderer:
             )
             placeholder_rect = placeholder_surf.get_rect(center=plot_area_rect.center)
 
-            # Clip the placeholder text rendering to fit within the plot area rect
+            # Clip placeholder text rendering to fit within the plot area
             blit_pos = (
                 max(plot_area_rect.left, placeholder_rect.left),
                 max(plot_area_rect.top, placeholder_rect.top),
