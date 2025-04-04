@@ -1,0 +1,211 @@
+# File: stats/aggregator.py
+import time
+from collections import deque
+from typing import Deque, Dict, Any, Optional
+import numpy as np
+from config import StatsConfig
+
+
+class StatsAggregator:
+    """
+    Handles aggregation and storage of training statistics using deques.
+    Calculates rolling averages and tracks best values. Does not perform logging.
+    """
+
+    def __init__(
+        self,
+        avg_window: int = StatsConfig.STATS_AVG_WINDOW,
+        plot_window: int = StatsConfig.PLOT_DATA_WINDOW,
+    ):
+        if avg_window <= 0:
+            avg_window = 100
+        if plot_window <= 0:
+            plot_window = 10000  # Ensure a minimum plot window
+
+        self.avg_window = avg_window
+        self.plot_window = plot_window
+
+        # Data Deques (using plot_window for history needed for plots)
+        self.losses: Deque[float] = deque(maxlen=plot_window)
+        self.grad_norms: Deque[float] = deque(maxlen=plot_window)
+        self.avg_max_qs: Deque[float] = deque(maxlen=plot_window)
+        self.episode_scores: Deque[float] = deque(maxlen=plot_window)
+        self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
+        self.game_scores: Deque[int] = deque(maxlen=plot_window)
+        self.episode_lines_cleared: Deque[int] = deque(maxlen=plot_window)
+        self.sps_values: Deque[float] = deque(maxlen=plot_window)
+        self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
+        self.beta_values: Deque[float] = deque(maxlen=plot_window)
+        self.best_rl_score_history: Deque[float] = deque(maxlen=plot_window)
+        self.best_game_score_history: Deque[int] = deque(maxlen=plot_window)
+        self.lr_values: Deque[float] = deque(maxlen=plot_window)
+        self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
+
+        # Current State / Best Values
+        self.total_episodes = 0
+        self.total_lines_cleared = 0
+        self.current_epsilon: float = 0.0
+        self.current_beta: float = 0.0
+        self.current_buffer_size: int = 0
+        self.current_global_step: int = 0
+        self.current_sps: float = 0.0
+        self.current_lr: float = 0.0
+
+        self.best_score: float = -float("inf")
+        self.previous_best_score: float = -float("inf")
+        self.best_score_step: int = 0
+
+        self.best_game_score: float = -float("inf")
+        self.previous_best_game_score: float = -float("inf")
+        self.best_game_score_step: int = 0
+
+        self.best_loss: float = float("inf")
+        self.previous_best_loss: float = float("inf")
+        self.best_loss_step: int = 0
+
+        print(
+            f"[StatsAggregator] Initialized. Avg Window: {self.avg_window}, Plot Window: {self.plot_window}"
+        )
+
+    def record_episode(
+        self,
+        episode_score: float,
+        episode_length: int,
+        episode_num: int,
+        global_step: Optional[int] = None,
+        game_score: Optional[int] = None,
+        lines_cleared: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Records episode data and updates best values. Returns update info."""
+        current_step = (
+            global_step if global_step is not None else self.current_global_step
+        )
+        update_info = {"new_best_rl": False, "new_best_game": False}
+
+        self.episode_scores.append(episode_score)
+        self.episode_lengths.append(episode_length)
+        if game_score is not None:
+            self.game_scores.append(game_score)
+        if lines_cleared is not None:
+            self.episode_lines_cleared.append(lines_cleared)
+            self.total_lines_cleared += lines_cleared
+        self.total_episodes = episode_num
+
+        if episode_score > self.best_score:
+            self.previous_best_score = self.best_score
+            self.best_score = episode_score
+            self.best_score_step = current_step
+            update_info["new_best_rl"] = True
+
+        if game_score is not None and game_score > self.best_game_score:
+            self.previous_best_game_score = self.best_game_score
+            self.best_game_score = float(game_score)
+            self.best_game_score_step = current_step
+            update_info["new_best_game"] = True
+
+        current_best_rl = self.best_score if self.best_score > -float("inf") else 0.0
+        current_best_game = (
+            int(self.best_game_score) if self.best_game_score > -float("inf") else 0
+        )
+        self.best_rl_score_history.append(current_best_rl)
+        self.best_game_score_history.append(current_best_game)
+
+        return update_info
+
+    def record_step(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Records step data and updates best loss. Returns update info."""
+        g_step = step_data.get("global_step", self.current_global_step)
+        if g_step > self.current_global_step:
+            self.current_global_step = g_step
+
+        update_info = {"new_best_loss": False}
+
+        if "loss" in step_data and step_data["loss"] is not None and g_step > 0:
+            current_loss = step_data["loss"]
+            self.losses.append(current_loss)
+            if current_loss < self.best_loss:
+                self.previous_best_loss = self.best_loss
+                self.best_loss = current_loss
+                self.best_loss_step = g_step
+                update_info["new_best_loss"] = True
+
+        if "grad_norm" in step_data and step_data["grad_norm"] is not None:
+            self.grad_norms.append(step_data["grad_norm"])
+        if "avg_max_q" in step_data and step_data["avg_max_q"] is not None:
+            self.avg_max_qs.append(step_data["avg_max_q"])
+        if "beta" in step_data and step_data["beta"] is not None:
+            self.current_beta = step_data["beta"]
+            self.beta_values.append(self.current_beta)
+        if "buffer_size" in step_data and step_data["buffer_size"] is not None:
+            self.current_buffer_size = step_data["buffer_size"]
+            self.buffer_sizes.append(self.current_buffer_size)
+        if "lr" in step_data and step_data["lr"] is not None:
+            self.current_lr = step_data["lr"]
+            self.lr_values.append(self.current_lr)
+        if "epsilon" in step_data and step_data["epsilon"] is not None:
+            self.current_epsilon = step_data["epsilon"]
+            self.epsilon_values.append(self.current_epsilon)
+        if "step_time" in step_data and step_data["step_time"] > 1e-6:
+            num_steps = step_data.get("num_steps_processed", 1)
+            sps = num_steps / step_data["step_time"]
+            self.sps_values.append(sps)
+            self.current_sps = sps
+
+        return update_info
+
+    def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
+        """Calculates and returns a dictionary of summary statistics."""
+        if current_global_step is None:
+            current_global_step = self.current_global_step
+
+        def safe_mean(q: Deque, default=0.0) -> float:
+            # Calculate mean over the *averaging* window, not the plot window
+            window_data = list(q)[-self.avg_window :]
+            return float(np.mean(window_data)) if window_data else default
+
+        summary = {
+            "avg_score_window": safe_mean(self.episode_scores),
+            "avg_length_window": safe_mean(self.episode_lengths),
+            "avg_loss_window": safe_mean(self.losses),
+            "avg_max_q_window": safe_mean(self.avg_max_qs),
+            "avg_game_score_window": safe_mean(self.game_scores),
+            "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
+            "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
+            "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
+            "total_episodes": self.total_episodes,
+            "beta": self.current_beta,
+            "buffer_size": self.current_buffer_size,
+            "steps_per_second": self.current_sps,
+            "global_step": current_global_step,
+            "current_lr": self.current_lr,
+            "best_score": self.best_score,
+            "previous_best_score": self.previous_best_score,
+            "best_score_step": self.best_score_step,
+            "best_game_score": self.best_game_score,
+            "previous_best_game_score": self.previous_best_game_score,
+            "best_game_score_step": self.best_game_score_step,
+            "best_loss": self.best_loss,
+            "previous_best_loss": self.previous_best_loss,
+            "best_loss_step": self.best_loss_step,
+            "num_ep_scores": len(self.episode_scores),
+            "num_losses": len(self.losses),
+        }
+        return summary
+
+    def get_plot_data(self) -> Dict[str, Deque]:
+        """Returns copies of deques (up to plot_window size) for UI plotting."""
+        return {
+            "episode_scores": self.episode_scores.copy(),
+            "episode_lengths": self.episode_lengths.copy(),
+            "losses": self.losses.copy(),
+            "avg_max_qs": self.avg_max_qs.copy(),
+            "game_scores": self.game_scores.copy(),
+            "episode_lines_cleared": self.episode_lines_cleared.copy(),
+            "sps_values": self.sps_values.copy(),
+            "buffer_sizes": self.buffer_sizes.copy(),
+            "beta_values": self.beta_values.copy(),
+            "best_rl_score_history": self.best_rl_score_history.copy(),
+            "best_game_score_history": self.best_game_score_history.copy(),
+            "lr_values": self.lr_values.copy(),
+            "epsilon_values": self.epsilon_values.copy(),
+        }

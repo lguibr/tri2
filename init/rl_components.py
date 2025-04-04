@@ -1,3 +1,4 @@
+# File: init/rl_components.py
 import sys
 import traceback
 import numpy as np
@@ -30,28 +31,28 @@ from agent.dqn_agent import DQNAgent
 from agent.replay_buffer.base_buffer import ReplayBufferBase
 from agent.replay_buffer.buffer_utils import create_replay_buffer
 from training.trainer import Trainer
+
+# --- MODIFIED IMPORTS ---
 from stats.stats_recorder import StatsRecorderBase
+from stats.aggregator import StatsAggregator
+from stats.simple_stats_recorder import SimpleStatsRecorder
 from stats.tensorboard_logger import TensorBoardStatsRecorder
+
+# --- END MODIFIED ---
 
 
 def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
     print(f"Initializing {num_envs} game environments...")
     try:
-        envs = [
-            GameState() for _ in range(num_envs)
-        ]  # GameState uses its internal EnvConfig instance now
-        s_test_dict = envs[0].reset()  # Returns dict
+        envs = [GameState() for _ in range(num_envs)]
+        s_test_dict = envs[0].reset()
 
         if not isinstance(s_test_dict, dict):
             raise TypeError("Env reset did not return a dictionary state.")
-
-        # --- MODIFIED: Check grid component shape (2 channels) ---
         if "grid" not in s_test_dict:
             raise KeyError("State dict missing 'grid'")
         grid_state = s_test_dict["grid"]
-        expected_grid_shape = (
-            env_config.GRID_STATE_SHAPE
-        )  # Get expected shape (2, H, W) from instance
+        expected_grid_shape = env_config.GRID_STATE_SHAPE
         if (
             not isinstance(grid_state, np.ndarray)
             or grid_state.shape != expected_grid_shape
@@ -60,9 +61,7 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
                 f"Initial grid state shape mismatch! Env:{grid_state.shape}, Cfg:{expected_grid_shape}"
             )
         print(f"Initial grid state shape check PASSED: {grid_state.shape}")
-        # --- END MODIFIED ---
 
-        # Check shapes component (unchanged)
         if "shapes" not in s_test_dict:
             raise KeyError("State dict missing 'shapes'")
         shape_state = s_test_dict["shapes"]
@@ -102,35 +101,46 @@ def initialize_agent_buffer(
     buffer_config: BufferConfig,
 ) -> Tuple[DQNAgent, ReplayBufferBase]:
     print("Initializing Agent and Buffer...")
-    # Pass EnvConfig instance to DQNAgent
     agent = DQNAgent(config=model_config, dqn_config=dqn_config, env_config=env_config)
     buffer = create_replay_buffer(config=buffer_config, dqn_config=dqn_config)
     print("Agent and Buffer initialized.")
     return agent, buffer
 
 
+# --- MODIFIED: initialize_stats_recorder ---
 def initialize_stats_recorder(
     stats_config: StatsConfig,
     tb_config: TensorBoardConfig,
     config_dict: Dict[str, Any],
     agent: Optional[DQNAgent],
-    env_config: EnvConfig,  # Expecting instance
+    env_config: EnvConfig,
 ) -> StatsRecorderBase:
-    """Creates the TensorBoard recorder, logs graph (on CPU) and hparams."""
-    print(f"Initializing Stats Recorder (TensorBoard)...")
-    avg_window = stats_config.STATS_AVG_WINDOW
-    console_log_freq = stats_config.CONSOLE_LOG_FREQ
+    """
+    Creates the StatsAggregator, SimpleStatsRecorder, and TensorBoardStatsRecorder.
+    Returns the final TensorBoardStatsRecorder instance.
+    """
+    print(f"Initializing Statistics Components...")
 
+    # 1. Create the Aggregator
+    stats_aggregator = StatsAggregator(
+        avg_window=stats_config.STATS_AVG_WINDOW,
+        plot_window=stats_config.PLOT_DATA_WINDOW,
+    )
+
+    # 2. Create the Console Logger (uses the aggregator)
+    console_recorder = SimpleStatsRecorder(
+        aggregator=stats_aggregator,
+        console_log_interval=stats_config.CONSOLE_LOG_FREQ,
+    )
+
+    # 3. Prepare for TensorBoard Logger (Graph, HParams)
     dummy_grid_cpu = None
     dummy_shapes_cpu = None
     model_for_graph_cpu = None
-
     if agent and agent.online_net:
         try:
-            # --- MODIFIED: Create dummy grid with 2 channels ---
-            expected_grid_shape = env_config.GRID_STATE_SHAPE  # Get shape (2, H, W)
+            expected_grid_shape = env_config.GRID_STATE_SHAPE
             dummy_grid_np = np.zeros(expected_grid_shape, dtype=np.float32)
-            # --- END MODIFIED ---
             dummy_shapes_np = np.zeros(
                 (env_config.NUM_SHAPE_SLOTS, env_config.SHAPE_FEATURES_PER_SHAPE),
                 dtype=np.float32,
@@ -138,33 +148,24 @@ def initialize_stats_recorder(
             dummy_grid_cpu = torch.tensor(dummy_grid_np, device="cpu").unsqueeze(0)
             dummy_shapes_cpu = torch.tensor(dummy_shapes_np, device="cpu").unsqueeze(0)
 
-            if not hasattr(agent, "dqn_config"):
-                raise AttributeError("DQNAgent missing 'dqn_config'")
-            if not hasattr(agent.online_net, "config"):
-                raise AttributeError("Agent's online_net missing 'config'")
+            if not hasattr(agent, "dqn_config") or not hasattr(
+                agent.online_net, "config"
+            ):
+                raise AttributeError(
+                    "Agent or network missing required config attributes."
+                )
 
-            # Recreate model on CPU for graph logging
             model_for_graph_cpu = type(agent.online_net)(
-                env_config=env_config,  # Pass instance
-                action_dim=env_config.ACTION_DIM,  # Access property value
+                env_config=env_config,
+                action_dim=env_config.ACTION_DIM,
                 model_config=agent.online_net.config,
                 dqn_config=agent.dqn_config,
                 dueling=agent.online_net.dueling,
                 use_noisy=agent.online_net.use_noisy,
             ).to("cpu")
-
             model_for_graph_cpu.load_state_dict(agent.online_net.state_dict())
             model_for_graph_cpu.eval()
-            print(
-                "[Stats Init] Prepared model copy and dummy input on CPU for graph logging."
-            )
-        except AttributeError as ae:
-            print(
-                f"Warning: Attribute error preparing model/input for graph logging: {ae}. Check AgentNetwork init/attributes."
-            )
-            dummy_grid_cpu = None
-            dummy_shapes_cpu = None
-            model_for_graph_cpu = None
+            print("[Stats Init] Prepared model copy and dummy input on CPU for graph.")
         except Exception as e:
             print(f"Warning: Failed to prepare model/input for graph logging: {e}")
             traceback.print_exc()
@@ -172,6 +173,7 @@ def initialize_stats_recorder(
             dummy_shapes_cpu = None
             model_for_graph_cpu = None
 
+    # 4. Create the TensorBoard Logger (uses aggregator and console logger)
     print(f"Using TensorBoard Logger (Log Dir: {tb_config.LOG_DIR})")
     try:
         dummy_input_tuple = (
@@ -179,35 +181,42 @@ def initialize_stats_recorder(
             if dummy_grid_cpu is not None and dummy_shapes_cpu is not None
             else None
         )
-        stats_recorder = TensorBoardStatsRecorder(
+        tb_recorder = TensorBoardStatsRecorder(
+            aggregator=stats_aggregator,
+            console_recorder=console_recorder,
             log_dir=tb_config.LOG_DIR,
             hparam_dict=config_dict,
             model_for_graph=model_for_graph_cpu,
-            dummy_input_for_graph=dummy_input_tuple,  # Pass tuple
-            console_log_interval=console_log_freq,
-            avg_window=avg_window,
-            histogram_log_interval=tb_config.HISTOGRAM_LOG_FREQ,
-            image_log_interval=tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1,
+            dummy_input_for_graph=dummy_input_tuple,
+            histogram_log_interval=(
+                tb_config.HISTOGRAM_LOG_FREQ if tb_config.LOG_HISTOGRAMS else -1
+            ),
+            image_log_interval=(
+                tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1
+            ),
             shape_q_log_interval=(
                 tb_config.SHAPE_Q_LOG_FREQ
                 if tb_config.LOG_SHAPE_PLACEMENT_Q_VALUES
                 else -1
-            ),  # Pass new freq
+            ),
         )
-        print("Stats Recorder initialized.")
-        return stats_recorder
+        print("Statistics Components initialized successfully.")
+        return tb_recorder  # Return the main recorder instance
     except Exception as e:
         print(f"FATAL: Error initializing TensorBoardStatsRecorder: {e}. Exiting.")
         traceback.print_exc()
         raise e
 
 
+# --- END MODIFIED ---
+
+
 def initialize_trainer(
     envs: List[GameState],
     agent: DQNAgent,
     buffer: ReplayBufferBase,
-    stats_recorder: StatsRecorderBase,
-    env_config: EnvConfig,  # Expecting instance
+    stats_recorder: StatsRecorderBase,  # This is now the TB recorder instance
+    env_config: EnvConfig,
     dqn_config: DQNConfig,
     train_config: TrainConfig,
     buffer_config: BufferConfig,
@@ -219,7 +228,7 @@ def initialize_trainer(
         agent=agent,
         buffer=buffer,
         stats_recorder=stats_recorder,
-        env_config=env_config,  # Pass instance
+        env_config=env_config,
         dqn_config=dqn_config,
         train_config=train_config,
         buffer_config=buffer_config,

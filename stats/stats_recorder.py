@@ -2,9 +2,9 @@
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Deque, List, Dict, Any, Optional, Union  # Added Union
+from typing import Deque, List, Dict, Any, Optional, Union
 import numpy as np
-import torch  # Added torch for Tensor type hints
+import torch
 
 
 class StatsRecorderBase(ABC):
@@ -13,7 +13,7 @@ class StatsRecorderBase(ABC):
     @abstractmethod
     def record_episode(
         self,
-        episode_score: float,  # RL Score
+        episode_score: float,
         episode_length: int,
         episode_num: int,
         global_step: Optional[int] = None,
@@ -25,10 +25,9 @@ class StatsRecorderBase(ABC):
 
     @abstractmethod
     def record_step(self, step_data: Dict[str, Any]):
-        """Record stats from a training or environment step (e.g., loss, rewards)."""
+        """Record stats from a training or environment step."""
         pass
 
-    # --- New Abstract Methods ---
     @abstractmethod
     def record_histogram(
         self,
@@ -53,24 +52,27 @@ class StatsRecorderBase(ABC):
 
     @abstractmethod
     def record_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[torch.Tensor] = None
+        self, model: torch.nn.Module, input_to_model: Optional[Any] = None
     ):
         """Record the model graph."""
         pass
 
-    # --- End New ---
-
     @abstractmethod
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        """Return a dictionary containing summary statistics (usually averaged)."""
+        """Return a dictionary containing summary statistics."""
+        pass
+
+    @abstractmethod
+    def get_plot_data(self) -> Dict[str, Deque]:
+        """Return copies of data deques for plotting."""
         pass
 
     @abstractmethod
     def log_summary(self, global_step: int):
-        """Trigger the logging action (e.g., print to console, write to TensorBoard)."""
+        """Trigger the logging action (e.g., print to console)."""
         pass
 
     @abstractmethod
     def close(self):
-        """Perform any necessary cleanup (e.g., close files/writers)."""
+        """Perform any necessary cleanup."""
         pass

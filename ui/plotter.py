@@ -1,5 +1,4 @@
 # File: ui/plotter.py
-# (No significant changes needed, this file was already focused)
 import pygame
 import numpy as np
 from typing import Dict, Optional, Deque, List, Union, Tuple
@@ -9,7 +8,6 @@ import time
 import warnings
 from io import BytesIO
 
-# Ensure Matplotlib uses Agg backend for non-interactive plotting
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -20,12 +18,12 @@ try:
     plt.style.use("dark_background")
     plt.rcParams.update(
         {
-            "font.size": 9,
-            "axes.labelsize": 9,
-            "axes.titlesize": 10,
-            "xtick.labelsize": 8,
-            "ytick.labelsize": 8,
-            "legend.fontsize": 7,
+            "font.size": 8,  # Slightly smaller default font
+            "axes.labelsize": 8,
+            "axes.titlesize": 9,  # Slightly smaller title
+            "xtick.labelsize": 7,  # Smaller ticks
+            "ytick.labelsize": 7,
+            "legend.fontsize": 6,  # Smaller legend
             "figure.facecolor": "#262626",
             "axes.facecolor": "#303030",
             "axes.edgecolor": "#707070",
@@ -45,36 +43,30 @@ except Exception as e:
 def normalize_color_for_matplotlib(
     color_tuple_0_255: Tuple[int, int, int],
 ) -> Tuple[float, float, float]:
-    """Converts a 0-255 RGB tuple to a 0.0-1.0 RGB tuple for Matplotlib."""
     if isinstance(color_tuple_0_255, tuple) and len(color_tuple_0_255) == 3:
         return tuple(c / 255.0 for c in color_tuple_0_255)
     else:
         print(f"Warning: Invalid color tuple {color_tuple_0_255}, returning black.")
-        return (0.0, 0.0, 0.0)  # Return black on error
+        return (0.0, 0.0, 0.0)
 
 
 class Plotter:
-    """Handles creating Pygame surfaces from Matplotlib plots of training data."""
-
     def __init__(self):
-        self.plot_surface: Optional[pygame.Surface] = None  # Cached plot surface
+        self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        self.plot_update_interval: float = 1.0  # Seconds between plot redraws
-        self.rolling_window_size = (
-            StatsConfig.STATS_AVG_WINDOW
-        )  # Window for rolling avg line
-        self.default_line_width = 1.5
-        self.avg_line_width = 2.0
+        self.plot_update_interval: float = 1.0
+        self.rolling_window_size = StatsConfig.STATS_AVG_WINDOW
+        self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW  # Max points to plot
+        self.default_line_width = 1.0  # Thinner default line
+        self.avg_line_width = 1.5  # Thinner avg line
         self.avg_line_alpha = 0.7
 
     def create_plot_surface(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Creates a Pygame surface containing Matplotlib plots (3x3 layout)."""
         if target_width <= 10 or target_height <= 10 or not plot_data:
-            return None  # Cannot render if area is too small or no data
+            return None
 
-        # Extract data lists from the dictionary, handle missing keys gracefully
         data_lists = {
             key: list(plot_data.get(key, deque()))
             for key in [
@@ -90,35 +82,34 @@ class Plotter:
             ]
         }
 
-        # Check if there's *any* data to plot
         if not any(data_lists.values()):
             return None
 
         fig = None
         try:
-            # Ignore UserWarnings from Matplotlib (e.g., about tight_layout)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=UserWarning)
 
-                dpi = 85  # Adjust DPI based on desired resolution vs performance
+                # --- MODIFIED: Slightly higher DPI ---
+                dpi = 90
                 fig_width_in = target_width / dpi
                 fig_height_in = target_height / dpi
 
                 fig, axes = plt.subplots(
                     3, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
-                # Adjust spacing to prevent labels/titles overlapping
+                # --- MODIFIED: Tighter subplot adjustments ---
                 fig.subplots_adjust(
-                    hspace=0.65,
-                    wspace=0.4,
-                    left=0.12,
-                    right=0.97,
-                    bottom=0.15,
-                    top=0.92,
+                    hspace=0.55,  # Reduced vertical space
+                    wspace=0.35,  # Reduced horizontal space
+                    left=0.10,  # Reduced left margin
+                    right=0.98,  # Reduced right margin
+                    bottom=0.12,  # Reduced bottom margin
+                    top=0.95,  # Reduced top margin
                 )
+                # --- END MODIFIED ---
                 axes_flat = axes.flatten()
 
-                # Define colors using VisConfig and normalize for Matplotlib
                 colors = {
                     "rl_score": normalize_color_for_matplotlib(
                         VisConfig.GOOGLE_COLORS[0]
@@ -129,22 +120,18 @@ class Plotter:
                     "loss": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[3]),
                     "len": normalize_color_for_matplotlib(VisConfig.BLUE),
                     "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
-                    "best_game": normalize_color_for_matplotlib(
-                        (255, 165, 0)
-                    ),  # Orange
-                    "lr": normalize_color_for_matplotlib((255, 0, 255)),  # Magenta
+                    "best_game": normalize_color_for_matplotlib((255, 165, 0)),
+                    "lr": normalize_color_for_matplotlib((255, 0, 255)),
                     "buffer": normalize_color_for_matplotlib(VisConfig.RED),
-                    "beta": normalize_color_for_matplotlib(
-                        (100, 100, 255)
-                    ),  # Light Blue
+                    "beta": normalize_color_for_matplotlib((100, 100, 255)),
                     "avg": normalize_color_for_matplotlib(VisConfig.YELLOW),
                     "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
                 }
 
-                # X-axis label reflects the visible window size
-                plot_window_label = f"Plot Window (~{self.rolling_window_size} points)"
+                # --- MODIFIED: X-axis label reflects plot window ---
+                plot_window_label = f"Latest {min(self.plot_data_window, max(len(d) for d in data_lists.values() if d))} Points"
+                # --- END MODIFIED ---
 
-                # --- Plot each metric ---
                 self._plot_data_list(
                     axes_flat[0],
                     data_lists["episode_scores"],
@@ -205,7 +192,6 @@ class Plotter:
                     y_log_scale=True,
                 )
 
-                # Convert buffer size to fill percentage
                 buffer_fill_percent = [
                     (s / max(1, BufferConfig.REPLAY_BUFFER_SIZE) * 100)
                     for s in data_lists["buffer_sizes"]
@@ -219,7 +205,6 @@ class Plotter:
                     xlabel=plot_window_label,
                 )
 
-                # Plot PER Beta only if PER is enabled
                 if BufferConfig.USE_PER:
                     self._plot_data_list(
                         axes_flat[8],
@@ -230,7 +215,6 @@ class Plotter:
                         xlabel=plot_window_label,
                     )
                 else:
-                    # Show placeholder if PER is disabled
                     axes_flat[8].text(
                         0.5,
                         0.5,
@@ -244,13 +228,9 @@ class Plotter:
                     axes_flat[8].set_yticks([])
                     axes_flat[8].set_xticks([])
 
-                # General plot styling
                 for ax in axes_flat:
-                    ax.tick_params(
-                        axis="x", rotation=0
-                    )  # Ensure x-axis labels are horizontal
+                    ax.tick_params(axis="x", rotation=0)
 
-                # --- Convert Matplotlib plot to Pygame surface ---
                 buf = BytesIO()
                 fig.savefig(
                     buf,
@@ -262,7 +242,6 @@ class Plotter:
                 plot_img_surface = pygame.image.load(buf).convert()
                 buf.close()
 
-                # Scale surface smoothly if generated size doesn't match target (can happen with DPI/figsize)
                 if (
                     plot_img_surface.get_size() != (target_width, target_height)
                     and target_width > 0
@@ -281,7 +260,6 @@ class Plotter:
             traceback.print_exc()
             return None
         finally:
-            # Ensure Matplotlib figure is closed to free memory
             if fig is not None:
                 plt.close(fig)
 
@@ -297,18 +275,18 @@ class Plotter:
         placeholder_text: Optional[str] = None,
         y_log_scale: bool = False,
     ):
-        """Helper function to plot a single list of data onto a Matplotlib axis."""
         n_points = len(data)
         latest_val_str = ""
-        window_size = self.rolling_window_size  # Window for rolling average
+        avg_window = self.rolling_window_size  # Window for rolling average line
 
-        # Calculate latest value/average to display in title
         if data:
             current_val = data[-1]
-            if n_points >= window_size and avg_color is not None:
-                try:  # Handle potential errors if data contains non-numerics briefly
-                    latest_avg = np.mean(data[-window_size:])
-                    latest_val_str = f" (Now: {current_val:.3g}, Avg: {latest_avg:.3g})"
+            if n_points >= avg_window and avg_color is not None:
+                try:
+                    latest_avg = np.mean(data[-avg_window:])
+                    latest_val_str = (
+                        f" (Now: {current_val:.3g}, Avg{avg_window}: {latest_avg:.3g})"
+                    )
                 except Exception:
                     latest_val_str = f" (Now: {current_val:.3g})"
             else:
@@ -317,7 +295,6 @@ class Plotter:
             f"{label}{latest_val_str}", fontsize=plt.rcParams["axes.titlesize"]
         )
 
-        # Handle empty data case
         placeholder_text_color = normalize_color_for_matplotlib(VisConfig.GRAY)
         if n_points == 0:
             if show_placeholder:
@@ -339,7 +316,6 @@ class Plotter:
             return
 
         try:
-            # Plot raw data points
             x_coords = np.arange(n_points)
             ax.plot(
                 x_coords,
@@ -349,23 +325,19 @@ class Plotter:
                 label=f"{label} (Raw)",
             )
 
-            # Plot rolling average if applicable
-            if avg_color is not None and n_points >= window_size:
-                # Use convolution for efficient rolling average calculation
-                weights = np.ones(window_size) / window_size
+            if avg_color is not None and n_points >= avg_window:
+                weights = np.ones(avg_window) / avg_window
                 rolling_avg = np.convolve(data, weights, mode="valid")
-                # Adjust x-coordinates for the rolling average plot
-                avg_x_coords = np.arange(window_size - 1, n_points)
+                avg_x_coords = np.arange(avg_window - 1, n_points)
                 ax.plot(
                     avg_x_coords,
                     rolling_avg,
                     color=avg_color,
                     linewidth=self.avg_line_width,
                     alpha=self.avg_line_alpha,
-                    label=f"{label} (Avg {window_size})",
+                    label=f"{label} (Avg {avg_window})",
                 )
 
-            # --- Styling ---
             ax.tick_params(axis="both", which="major")
             if xlabel:
                 ax.set_xlabel(xlabel)
@@ -375,37 +347,45 @@ class Plotter:
                 alpha=plt.rcParams["grid.alpha"],
             )
 
-            # Set Y limits dynamically based on data range
             min_val = np.min(data)
             max_val = np.max(data)
-            # Add padding to Y limits, ensuring some padding even if min=max
             padding = (
                 (max_val - min_val) * 0.1
                 if max_val > min_val
                 else max(abs(max_val * 0.1), 1.0)
             )
-            padding = max(padding, 1e-6)  # Ensure padding is non-zero
+            padding = max(padding, 1e-6)
             ax.set_ylim(min_val - padding, max_val + padding)
 
-            # Apply log scale if requested and data is positive
-            if y_log_scale and min_val > 1e-9:  # Use small epsilon for > 0 check
+            if y_log_scale and min_val > 1e-9:
                 ax.set_yscale("log")
-                # Adjust lower y-limit for log scale to avoid issues near zero
                 ax.set_ylim(bottom=max(min_val * 0.9, 1e-9))
             else:
-                ax.set_yscale("linear")  # Ensure linear scale otherwise
+                ax.set_yscale("linear")
 
-            # Set X limits dynamically
             if n_points > 1:
                 ax.set_xlim(-0.02 * n_points, n_points - 1 + 0.02 * n_points)
             elif n_points == 1:
-                ax.set_xlim(-0.5, 0.5)  # Handle single point case
+                ax.set_xlim(-0.5, 0.5)
 
-            # Adjust number of x-axis ticks for readability
-            if n_points > 10:
+            # --- MODIFIED: Adjust x-ticks based on number of points ---
+            if n_points > 1000:
                 ax.xaxis.set_major_locator(
                     plt.MaxNLocator(integer=True, nbins=4)
-                )  # Limit tick count
+                )  # Fewer ticks for many points
+
+                # Optionally format as 'k' or 'M'
+                def format_func(value, tick_number):
+                    if value >= 1_000_000:
+                        return f"{value/1_000_000:.1f}M"
+                    if value >= 1_000:
+                        return f"{value/1_000:.0f}k"
+                    return f"{int(value)}"
+
+                ax.xaxis.set_major_formatter(plt.FuncFormatter(format_func))
+            elif n_points > 10:
+                ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
+            # --- END MODIFIED ---
 
         except Exception as plot_err:
             print(f"ERROR during _plot_data_list for '{label}': {plot_err}")
@@ -426,12 +406,9 @@ class Plotter:
     def get_cached_or_updated_plot(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Returns the cached plot surface or generates a new one if the interval has passed,
-        size changed, or data just arrived."""
         current_time = time.time()
-        has_data = any(plot_data.values())  # Check if any deque has data
+        has_data = any(plot_data.values())
 
-        # Conditions for updating the plot
         needs_update_time = (
             current_time - self.last_plot_update_time > self.plot_update_interval
         )
@@ -439,10 +416,8 @@ class Plotter:
             target_width,
             target_height,
         )
-        first_data_received = (
-            has_data and self.plot_surface is None
-        )  # Update when first data comes in
-        can_create_plot = target_width > 50 and target_height > 50  # Basic size check
+        first_data_received = has_data and self.plot_surface is None
+        can_create_plot = target_width > 50 and target_height > 50
 
         if can_create_plot and (
             needs_update_time or size_changed or first_data_received
@@ -450,7 +425,6 @@ class Plotter:
             new_plot_surface = self.create_plot_surface(
                 plot_data, target_width, target_height
             )
-            # Only update cache if plot generation was successful
             if new_plot_surface:
                 self.plot_surface = new_plot_surface
                 self.last_plot_update_time = current_time

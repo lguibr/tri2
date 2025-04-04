@@ -1,85 +1,35 @@
 # File: stats/simple_stats_recorder.py
 import time
 from collections import deque
-from typing import Deque, Dict, Any, Optional, Union, List, Tuple, Callable
+from typing import Deque, Dict, Any, Optional, Union, List
 import numpy as np
 import torch
 from .stats_recorder import StatsRecorderBase
-from config import EnvConfig, StatsConfig  # Removed EnvConfig import, not needed here
-import warnings
+from .aggregator import StatsAggregator
+from config import StatsConfig
 
 
 class SimpleStatsRecorder(StatsRecorderBase):
     """
-    Records stats in memory using deques for rolling averages.
+    Logs aggregated statistics to the console periodically.
+    Delegates data storage and aggregation to a StatsAggregator instance.
     Provides no-op implementations for histogram, image, hparam, graph logging.
-    Primarily used internally by TensorBoardStatsRecorder for UI/console display,
-    or can be used standalone for simple console logging.
     """
 
     def __init__(
         self,
-        console_log_interval: int = 50_000,
-        avg_window: int = StatsConfig.STATS_AVG_WINDOW,
+        aggregator: StatsAggregator,
+        console_log_interval: int = StatsConfig.CONSOLE_LOG_FREQ,
     ):
-        if avg_window <= 0:
-            avg_window = 100
+        self.aggregator = aggregator
         self.console_log_interval = (
             max(1, console_log_interval) if console_log_interval > 0 else -1
         )
-        self.avg_window = avg_window
-
-        # Data Deques
-        step_reward_window = max(avg_window * 10, 1000)
-        self.step_rewards: Deque[float] = deque(
-            maxlen=step_reward_window
-        )  # Keep for potential detailed reward analysis
-        self.losses: Deque[float] = deque(maxlen=avg_window)
-        self.grad_norms: Deque[float] = deque(maxlen=avg_window)
-        self.avg_max_qs: Deque[float] = deque(maxlen=avg_window)
-        self.episode_scores: Deque[float] = deque(maxlen=avg_window)
-        self.episode_lengths: Deque[int] = deque(maxlen=avg_window)
-        self.game_scores: Deque[int] = deque(maxlen=avg_window)
-        self.episode_lines_cleared: Deque[int] = deque(maxlen=avg_window)
-        self.sps_values: Deque[float] = deque(maxlen=avg_window)
-        self.buffer_sizes: Deque[int] = deque(maxlen=avg_window)
-        self.beta_values: Deque[float] = deque(maxlen=avg_window)
-        self.best_rl_score_history: Deque[float] = deque(maxlen=avg_window)
-        self.best_game_score_history: Deque[int] = deque(maxlen=avg_window)
-        self.lr_values: Deque[float] = deque(maxlen=avg_window)
-        self.epsilon_values: Deque[float] = deque(
-            maxlen=avg_window
-        )  # Keep even if using Noisy
-
-        # Current State / Best Values
-        self.total_episodes = 0
-        self.total_lines_cleared = 0
-        self.current_epsilon: float = 0.0
-        self.current_beta: float = 0.0
-        self.current_buffer_size: int = 0
-        self.current_global_step: int = 0
-        self.current_sps: float = 0.0
-        self.current_lr: float = 0.0
-
-        # --- ENHANCED Best Tracking ---
-        self.best_score: float = -float("inf")
-        self.previous_best_score: float = -float("inf")
-        self.best_score_step: int = 0
-
-        self.best_game_score: float = -float("inf")  # Use float for consistent init
-        self.previous_best_game_score: float = -float("inf")
-        self.best_game_score_step: int = 0
-
-        self.best_loss: float = float("inf")
-        self.previous_best_loss: float = float("inf")
-        self.best_loss_step: int = 0
-        # --- END ENHANCED ---
-
         self.last_log_time: float = time.time()
         self.last_log_step: int = 0
         self.start_time: float = time.time()
         print(
-            f"[SimpleStatsRecorder] Initialized. Avg Window: {self.avg_window}, Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'}"
+            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'}"
         )
 
     def record_episode(
@@ -91,151 +41,54 @@ class SimpleStatsRecorder(StatsRecorderBase):
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
     ):
-        current_step = (
-            global_step if global_step is not None else self.current_global_step
+        """Passes episode data to the aggregator and checks for console logging."""
+        update_info = self.aggregator.record_episode(
+            episode_score,
+            episode_length,
+            episode_num,
+            global_step,
+            game_score,
+            lines_cleared,
         )
-
-        self.episode_scores.append(episode_score)
-        self.episode_lengths.append(episode_length)
-        if game_score is not None:
-            self.game_scores.append(game_score)
-        if lines_cleared is not None:
-            self.episode_lines_cleared.append(lines_cleared)
-            self.total_lines_cleared += lines_cleared
-        self.total_episodes = episode_num
+        current_step = (
+            global_step
+            if global_step is not None
+            else self.aggregator.current_global_step
+        )
         step_info = f"at Step ~{current_step/1e6:.1f}M"
 
-        # --- ENHANCED Best Score Tracking ---
-        if episode_score > self.best_score:
-            self.previous_best_score = self.best_score
-            self.best_score = episode_score
-            self.best_score_step = current_step
+        if update_info.get("new_best_rl"):
             prev_str = (
-                f"{self.previous_best_score:.2f}"
-                if self.previous_best_score > -float("inf")
+                f"{self.aggregator.previous_best_score:.2f}"
+                if self.aggregator.previous_best_score > -float("inf")
                 else "N/A"
             )
             print(
-                f"\n--- 🏆 New Best RL: {self.best_score:.2f} {step_info} (Prev: {prev_str}) ---"
+                f"\n--- 🏆 New Best RL: {self.aggregator.best_score:.2f} {step_info} (Prev: {prev_str}) ---"
             )
-
-        if game_score is not None and game_score > self.best_game_score:
-            self.previous_best_game_score = self.best_game_score
-            self.best_game_score = float(game_score)  # Store as float
-            self.best_game_score_step = current_step
+        if update_info.get("new_best_game"):
             prev_str = (
-                f"{self.previous_best_game_score:.0f}"
-                if self.previous_best_game_score > -float("inf")
+                f"{self.aggregator.previous_best_game_score:.0f}"
+                if self.aggregator.previous_best_game_score > -float("inf")
                 else "N/A"
             )
             print(
-                f"--- 🎮 New Best Game: {self.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
+                f"--- 🎮 New Best Game: {self.aggregator.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
             )
-        # --- END ENHANCED ---
-
-        # Update history deques for plotting best scores over time
-        current_best_rl = self.best_score if self.best_score > -float("inf") else 0.0
-        current_best_game = (
-            int(self.best_game_score) if self.best_game_score > -float("inf") else 0
-        )
-        self.best_rl_score_history.append(current_best_rl)
-        self.best_game_score_history.append(current_best_game)
 
     def record_step(self, step_data: Dict[str, Any]):
-        g_step = step_data.get("global_step", self.current_global_step)
-        if g_step > self.current_global_step:
-            self.current_global_step = g_step
-
-        if "loss" in step_data and step_data["loss"] is not None and g_step > 0:
-            current_loss = step_data["loss"]
-            self.losses.append(current_loss)
-            # --- ENHANCED Best Loss Tracking ---
-            if current_loss < self.best_loss:
-                self.previous_best_loss = self.best_loss
-                self.best_loss = current_loss
-                self.best_loss_step = g_step
-                # Optional: Print new best loss to console
-                # prev_str = f"{self.previous_best_loss:.4f}" if self.previous_best_loss < float("inf") else "N/A"
-                # print(f"--- ✨ New Best Loss: {self.best_loss:.4f} at Step ~{g_step/1e6:.1f}M (Prev: {prev_str}) ---")
-            # --- END ENHANCED ---
-
-        if (
-            "grad_norm" in step_data
-            and step_data["grad_norm"] is not None
-            and g_step > 0
-        ):
-            self.grad_norms.append(step_data["grad_norm"])
-        # Removed step_reward tracking, focus on episode rewards
-        # if "step_reward" in step_data and step_data["step_reward"] is not None:
-        #     self.step_rewards.append(step_data["step_reward"])
-        if (
-            "avg_max_q" in step_data
-            and step_data["avg_max_q"] is not None
-            and g_step > 0
-        ):
-            self.avg_max_qs.append(step_data["avg_max_q"])
-        if "beta" in step_data and step_data["beta"] is not None:
-            self.current_beta = step_data["beta"]
-            self.beta_values.append(self.current_beta)
-        if "buffer_size" in step_data and step_data["buffer_size"] is not None:
-            self.current_buffer_size = step_data["buffer_size"]
-            self.buffer_sizes.append(self.current_buffer_size)
-        if "lr" in step_data and step_data["lr"] is not None:
-            self.current_lr = step_data["lr"]
-            self.lr_values.append(self.current_lr)
-        if "epsilon" in step_data and step_data["epsilon"] is not None:
-            self.current_epsilon = step_data["epsilon"]
-            self.epsilon_values.append(self.current_epsilon)
-
-        if "step_time" in step_data and step_data["step_time"] > 1e-6:
-            num_steps_in_call = step_data.get("num_steps_processed", 1)
-            sps = num_steps_in_call / step_data["step_time"]
-            self.sps_values.append(sps)
-            self.current_sps = sps  # Update current SPS immediately
-
+        """Passes step data to the aggregator and triggers console logging."""
+        _ = self.aggregator.record_step(step_data)
+        g_step = step_data.get("global_step", self.aggregator.current_global_step)
         self.log_summary(g_step)
 
-    def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
-        if current_global_step is None:
-            current_global_step = self.current_global_step
+    def get_summary(self, current_global_step: int) -> Dict[str, Any]:
+        """Retrieves summary statistics from the aggregator."""
+        return self.aggregator.get_summary(current_global_step)
 
-        # Use np.mean with checks for empty deques
-        def safe_mean(q: Deque, default=0.0) -> float:
-            return float(np.mean(q)) if q else default
-
-        summary = {
-            # Averages
-            "avg_score_window": safe_mean(self.episode_scores),
-            "avg_length_window": safe_mean(self.episode_lengths),
-            "avg_loss_window": safe_mean(self.losses),
-            "avg_max_q_window": safe_mean(self.avg_max_qs),
-            "avg_game_score_window": safe_mean(self.game_scores),
-            "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
-            "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
-            "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
-            # Current / Total
-            "total_episodes": self.total_episodes,
-            "beta": self.current_beta,
-            "buffer_size": self.current_buffer_size,
-            "steps_per_second": self.current_sps,  # Use the latest calculated SPS
-            "global_step": current_global_step,
-            "current_lr": self.current_lr,
-            # --- ENHANCED Best Tracking ---
-            "best_score": self.best_score,
-            "previous_best_score": self.previous_best_score,
-            "best_score_step": self.best_score_step,
-            "best_game_score": self.best_game_score,
-            "previous_best_game_score": self.previous_best_game_score,
-            "best_game_score_step": self.best_game_score_step,
-            "best_loss": self.best_loss,
-            "previous_best_loss": self.previous_best_loss,
-            "best_loss_step": self.best_loss_step,
-            # --- END ENHANCED ---
-            # Counts (for debugging/UI)
-            "num_ep_scores": len(self.episode_scores),
-            "num_losses": len(self.losses),
-        }
-        return summary
+    def get_plot_data(self) -> Dict[str, Deque]:
+        """Retrieves plot data deques from the aggregator."""
+        return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
         """Logs summary statistics to the console periodically."""
@@ -261,17 +114,14 @@ class SimpleStatsRecorder(StatsRecorderBase):
         )
 
         log_str = (
-            f"[{runtime_hrs:.1f}h|Stats] Step: {global_step/1e6:<6.2f}M | "
+            f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
             f"Ep: {summary['total_episodes']:<7} | SPS: {summary['steps_per_second']:<5.0f} | "
             f"RLScore(Avg): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
             f"Loss(Avg): {summary['avg_loss_window']:.4f} (Best: {best_loss_val}) | "
             f"LR: {summary['current_lr']:.1e} | "
             f"Buf: {summary['buffer_size']/1e6:.2f}M"
         )
-        # Add PER Beta if used
-        if (
-            summary["beta"] > 0 and summary["beta"] < 1.0
-        ):  # Crude check if PER is active
+        if summary["beta"] > 0 and summary["beta"] < 1.0:
             log_str += f" | Beta: {summary['beta']:.3f}"
 
         print(log_str)
@@ -279,26 +129,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time = time.time()
         self.last_log_step = global_step
 
-    def get_plot_data(self) -> Dict[str, Deque]:
-        """Returns copies of deques needed for UI plotting."""
-        # Ensure all expected keys exist, even if empty
-        return {
-            "episode_scores": self.episode_scores.copy(),
-            "episode_lengths": self.episode_lengths.copy(),
-            "losses": self.losses.copy(),
-            "avg_max_qs": self.avg_max_qs.copy(),
-            "game_scores": self.game_scores.copy(),
-            "episode_lines_cleared": self.episode_lines_cleared.copy(),
-            "sps_values": self.sps_values.copy(),
-            "buffer_sizes": self.buffer_sizes.copy(),
-            "beta_values": self.beta_values.copy(),
-            "best_rl_score_history": self.best_rl_score_history.copy(),
-            "best_game_score_history": self.best_game_score_history.copy(),
-            "lr_values": self.lr_values.copy(),
-            "epsilon_values": self.epsilon_values.copy(),
-        }
-
-    # --- No-op methods ---
+    # --- No-op methods for non-console logging ---
     def record_histogram(
         self,
         tag: str,
@@ -316,7 +147,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         pass
 
     def record_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[torch.Tensor] = None
+        self, model: torch.nn.Module, input_to_model: Optional[Any] = None
     ):
         pass
 
