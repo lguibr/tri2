@@ -37,7 +37,7 @@ class UIRenderer:
                 None, self.demo_config.HELP_FONT_SIZE
             )
         except Exception as e:
-            print(f"Warning: SysFont error for demo fonts: {e}. Using default.") # LOG
+            print(f"Warning: SysFont error for demo fonts: {e}. Using default.")  # LOG
             self.demo_hud_font = pygame.font.Font(None, self.demo_config.HUD_FONT_SIZE)
             self.demo_help_font = pygame.font.Font(
                 None, self.demo_config.HELP_FONT_SIZE
@@ -68,7 +68,7 @@ class UIRenderer:
         envs: List[GameState],
         num_envs: int,
         env_config: EnvConfig,
-        cleanup_confirmation_active: bool, # *** Receive the flag ***
+        cleanup_confirmation_active: bool,  # *** Receive the flag ***
         cleanup_message: str,
         last_cleanup_message_time: float,
         tensorboard_log_dir: Optional[str],
@@ -103,7 +103,7 @@ class UIRenderer:
                 else:
                     print(
                         "Error: Attempting to render demo mode without demo_env."
-                    ) # LOG
+                    )  # LOG
                     self.screen.fill(VisConfig.BLACK)
                     err_font = pygame.font.SysFont(None, 50)
                     err_surf = err_font.render("Demo Env Error!", True, VisConfig.RED)
@@ -113,7 +113,7 @@ class UIRenderer:
                     )
             elif app_state == "Initializing":
                 # Render initializing screen (might show "Cleaning" status)
-                self._render_initializing_screen(status) # Pass status
+                self._render_initializing_screen(status)  # Pass status
             elif app_state == "Error":
                 self._render_error_screen(status)
 
@@ -126,21 +126,21 @@ class UIRenderer:
                 # print(
                 #     "[UIRenderer::render_all] Condition met, calling render_cleanup_confirmation."
                 # ) # LOG
-                self.overlays.render_cleanup_confirmation() # Draw the overlay
+                self.overlays.render_cleanup_confirmation()  # Draw the overlay
 
             # *** KEY CHANGE: Single flip at the end ***
             pygame.display.flip()
 
         except pygame.error as e:
             if "video system not initialized" in str(e):
-                print("Error: Pygame video system not initialized.") # LOG
+                print("Error: Pygame video system not initialized.")  # LOG
             elif "Invalid subsurface rectangle" in str(e):
-                print(f"Warning: Invalid subsurface rectangle: {e}") # LOG
+                print(f"Warning: Invalid subsurface rectangle: {e}")  # LOG
             else:
-                print(f"Pygame rendering error: {e}") # LOG
+                print(f"Pygame rendering error: {e}")  # LOG
                 traceback.print_exc()
         except Exception as e:
-            print(f"Unexpected critical rendering error in render_all: {e}") # LOG
+            print(f"Unexpected critical rendering error in render_all: {e}")  # LOG
             traceback.print_exc()
 
     def _render_main_menu(
@@ -152,7 +152,7 @@ class UIRenderer:
         envs: List[GameState],
         num_envs: int,
         env_config: EnvConfig,
-        cleanup_confirmation_active: bool, # Receive flag
+        cleanup_confirmation_active: bool,  # Receive flag
         cleanup_message: str,
         last_cleanup_message_time: float,
         tensorboard_log_dir: Optional[str],
@@ -269,16 +269,12 @@ class UIRenderer:
                         )
                         self._render_demo_shape_previews(preview_area_surf, demo_env)
             except ValueError as e:
-                print(f"Error subsurface demo game ({clipped_game_rect}): {e}") # LOG
-                pygame.draw.rect(
-                    self.screen, VisConfig.RED, clipped_game_rect, 1
-                )
+                print(f"Error subsurface demo game ({clipped_game_rect}): {e}")  # LOG
+                pygame.draw.rect(self.screen, VisConfig.RED, clipped_game_rect, 1)
             except Exception as render_e:
-                print(f"Error rendering demo game area: {render_e}") # LOG
+                print(f"Error rendering demo game area: {render_e}")  # LOG
                 traceback.print_exc()
-                pygame.draw.rect(
-                    self.screen, VisConfig.RED, clipped_game_rect, 1
-                )
+                pygame.draw.rect(self.screen, VisConfig.RED, clipped_game_rect, 1)
         else:
             self._render_too_small_message(game_rect, game_w, game_h)
 
@@ -290,7 +286,7 @@ class UIRenderer:
             score_rect = score_surf.get_rect(midtop=(sw // 2, hud_y))
             self.screen.blit(score_surf, score_rect)
         except Exception as e:
-            print(f"HUD render error: {e}") # LOG
+            print(f"HUD render error: {e}")  # LOG
 
         # Help Text
         try:
@@ -300,7 +296,7 @@ class UIRenderer:
             help_rect = help_surf.get_rect(centerx=sw // 2, bottom=sh - 10)
             self.screen.blit(help_surf, help_rect)
         except Exception as e:
-            print(f"Help render error: {e}") # LOG
+            print(f"Help render error: {e}")  # LOG
 
         # *** KEY CHANGE: DO NOT FLIP DISPLAY HERE ***
         # pygame.display.flip() # REMOVED
@@ -421,15 +417,11 @@ class UIRenderer:
                             shape_render_surf, shp, int(cell_size)
                         )
                 except ValueError as sub_err:
-                    print(f"Error subsurface shape preview {i}: {sub_err}") # LOG
-                    pygame.draw.rect(
-                        surf, VisConfig.RED, clipped_preview_rect, 1
-                    )
+                    print(f"Error subsurface shape preview {i}: {sub_err}")  # LOG
+                    pygame.draw.rect(surf, VisConfig.RED, clipped_preview_rect, 1)
                 except Exception as e:
-                    print(f"Error rendering demo shape preview {i}: {e}") # LOG
-                    pygame.draw.rect(
-                        surf, VisConfig.RED, clipped_preview_rect, 1
-                    )
+                    print(f"Error rendering demo shape preview {i}: {e}")  # LOG
+                    pygame.draw.rect(surf, VisConfig.RED, clipped_preview_rect, 1)
             current_preview_y += preview_h + preview_padding
 
     def _render_too_small_message(self, area_rect: pygame.Rect, w: int, h: int):
@@ -439,10 +431,12 @@ class UIRenderer:
             target_rect = err_surf.get_rect(center=self.screen.get_rect().center)
             self.screen.blit(err_surf, target_rect)
         except Exception as e:
-            print(f"Error rendering 'too small' message: {e}") # LOG
+            print(f"Error rendering 'too small' message: {e}")  # LOG
 
     # --- MODIFIED: Accept status message ---
-    def _render_initializing_screen(self, status_message: str = "Initializing RL Components..."):
+    def _render_initializing_screen(
+        self, status_message: str = "Initializing RL Components..."
+    ):
         """Renders the initializing screen with a status message."""
         try:
             self.screen.fill(VisConfig.BLACK)
@@ -454,7 +448,8 @@ class UIRenderer:
             # *** KEY CHANGE: DO NOT FLIP DISPLAY HERE ***
             # pygame.display.flip() # REMOVED
         except Exception as e:
-            print(f"Error rendering initializing screen: {e}") # LOG
+            print(f"Error rendering initializing screen: {e}")  # LOG
+
     # --- END MODIFIED ---
 
     def _render_error_screen(self, status_message: str):
@@ -485,4 +480,4 @@ class UIRenderer:
             # *** KEY CHANGE: DO NOT FLIP DISPLAY HERE ***
             # pygame.display.flip() # REMOVED
         except Exception as e:
-            print(f"Error rendering error screen: {e}") # LOG
+            print(f"Error rendering error screen: {e}")  # LOG
