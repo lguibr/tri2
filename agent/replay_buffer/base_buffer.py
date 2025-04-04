@@ -1,13 +1,9 @@
+# File: agent/replay_buffer/base_buffer.py
+# (No changes needed)
 from abc import ABC, abstractmethod
 from typing import Any, Optional, Tuple, Dict
 import numpy as np
-from utils.types import (
-    Transition,
-    StateType,
-    ActionType,
-    NumpyBatch,
-    NumpyNStepBatch,
-)
+from utils.types import StateType, ActionType
 
 
 class ReplayBufferBase(ABC):

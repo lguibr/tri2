@@ -1,7 +1,6 @@
-# File: requirements.txt
 pygame>=2.1.0
 numpy>=1.20.0
-torch>=1.10.0 # Adjust version as needed, consider torchvision/torchaudio if using CUDA
-# psutil # Optional: for memory logging in older versions (currently removed)
-# <<< NEW >>> Added for buffer saving (if using pickle)
+torch>=1.10.0
+tensorboard
 cloudpickle
+torchvision 
