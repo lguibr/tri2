@@ -25,12 +25,12 @@ class OverlayRenderer:
 
     def render_cleanup_confirmation(self):
         """Renders the confirmation dialog for cleanup."""
-        print(
-            "[OverlayRenderer::render_cleanup_confirmation] Rendering overlay."
-        )  # LOG
+        # print(
+        #     "[OverlayRenderer::render_cleanup_confirmation] Rendering overlay."
+        # ) # LOG (Can be spammy)
         try:  # Add try-except here too
             current_width, current_height = self.screen.get_size()
-            # Semi-transparent overlay
+            # Semi-transparent overlay background
             overlay_surface = pygame.Surface(
                 (current_width, current_height), pygame.SRCALPHA
             )
@@ -64,7 +64,7 @@ class OverlayRenderer:
             )
             self.screen.blit(prompt_l3, prompt_l3.get_rect(center=(center_x, center_y)))
 
-            # Buttons
+            # Buttons (Recalculate rects based on current screen size)
             confirm_yes_rect = pygame.Rect(center_x - 110, center_y + 30, 100, 40)
             confirm_no_rect = pygame.Rect(center_x + 10, center_y + 30, 100, 40)
 
@@ -82,7 +82,9 @@ class OverlayRenderer:
                 yes_text, yes_text.get_rect(center=confirm_yes_rect.center)
             )
             self.screen.blit(no_text, no_text.get_rect(center=confirm_no_rect.center))
-            # Don't call pygame.display.flip() here, it's handled elsewhere
+
+            # *** KEY CHANGE: DO NOT call pygame.display.flip() here ***
+            # It's handled by the main render loop after this is drawn.
 
         except pygame.error as pg_err:
             print(f"Pygame Error in render_cleanup_confirmation: {pg_err}")  # LOG

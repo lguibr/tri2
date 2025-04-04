@@ -38,6 +38,7 @@ class InputHandler:
         self.exit_demo_mode_cb = exit_demo_mode_cb
         self.handle_demo_input_cb = handle_demo_input_cb
 
+    # *** KEY CHANGE: Accept cleanup_confirmation_active flag ***
     def handle_input(self, app_state: str, cleanup_confirmation_active: bool) -> bool:
         try:
             mouse_pos = pygame.mouse.get_pos()
@@ -46,15 +47,16 @@ class InputHandler:
 
         sw, sh = self.screen.get_size()
 
-        # Define button rects (consider moving)
+        # Define button rects (consider moving to renderer or config if they change)
         train_btn_rect = pygame.Rect(10, 10, 100, 40)
         cleanup_btn_rect = pygame.Rect(train_btn_rect.right + 10, 10, 160, 40)
         demo_btn_rect = pygame.Rect(cleanup_btn_rect.right + 10, 10, 120, 40)
+        # Confirmation button rects (relative to center)
         confirm_yes_rect = pygame.Rect(sw // 2 - 110, sh // 2 + 30, 100, 40)
         confirm_no_rect = pygame.Rect(sw // 2 + 10, sh // 2 + 30, 100, 40)
 
-        # Check tooltip hover
-        if hasattr(self.renderer, "check_hover"):
+        # Check tooltip hover (only if overlay is not active)
+        if not cleanup_confirmation_active and hasattr(self.renderer, "check_hover"):
             self.renderer.check_hover(mouse_pos, app_state)
 
         for event in pygame.event.get():
@@ -68,6 +70,7 @@ class InputHandler:
                     self.screen = pygame.display.set_mode(
                         (new_w, new_h), pygame.RESIZABLE
                     )
+                    # Update screen references in other components
                     if hasattr(self.renderer, "screen"):
                         self.renderer.screen = self.screen
                     if hasattr(self.renderer, "left_panel") and hasattr(
@@ -86,6 +89,7 @@ class InputHandler:
                         self.renderer.tooltips, "screen"
                     ):
                         self.renderer.tooltips.screen = self.screen
+                    # Force redraw elements that depend on size (like plots)
                     if hasattr(self.renderer, "force_redraw"):
                         self.renderer.force_redraw()
                     print(f"Window resized: {new_w}x{new_h}")  # LOG
@@ -94,7 +98,7 @@ class InputHandler:
 
             # --- State-Dependent Input Handling ---
 
-            # 1. Cleanup Confirmation Overlay (takes precedence)
+            # *** KEY CHANGE: 1. Cleanup Confirmation Overlay (takes precedence) ***
             if cleanup_confirmation_active:
                 # print("[InputHandler] Handling input during cleanup confirmation.") # DEBUG LOG
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
@@ -107,9 +111,10 @@ class InputHandler:
                     elif confirm_no_rect.collidepoint(mouse_pos):
                         print("[InputHandler] Cleanup cancelled via NO click.")  # LOG
                         self.cancel_cleanup_cb()
-                continue  # Skip other inputs
+                # *** KEY CHANGE: Skip all other input processing if overlay is active ***
+                continue
 
-            # 2. Playing State Input
+            # 2. Playing State Input (Only if overlay is NOT active)
             elif app_state == "Playing":
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
@@ -118,7 +123,7 @@ class InputHandler:
                     else:
                         self.handle_demo_input_cb(event)
 
-            # 3. Main Menu State Input
+            # 3. Main Menu State Input (Only if overlay is NOT active)
             elif app_state == "MainMenu":
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
@@ -129,15 +134,15 @@ class InputHandler:
                         self.toggle_training_cb()
 
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    print(
-                        f"[InputHandler] Left click detected at {mouse_pos} in MainMenu"
-                    )  # LOG
+                    # print(
+                    #     f"[InputHandler] Left click detected at {mouse_pos} in MainMenu"
+                    # ) # LOG (Spammy)
                     if train_btn_rect.collidepoint(mouse_pos):
                         print("[InputHandler] Train button clicked.")  # LOG
                         self.toggle_training_cb()
                     elif cleanup_btn_rect.collidepoint(mouse_pos):
                         print("[InputHandler] Cleanup button clicked.")  # LOG
-                        self.request_cleanup_cb()  # <--- Check if this callback is called
+                        self.request_cleanup_cb()  # Request confirmation
                     elif demo_btn_rect.collidepoint(mouse_pos):
                         print("[InputHandler] Demo button clicked.")  # LOG
                         self.start_demo_mode_cb()
@@ -145,10 +150,10 @@ class InputHandler:
                         # print("[InputHandler] Clicked outside known buttons.") # LOG (Optional)
                         pass
 
-            # 4. Error State Input
+            # 4. Error State Input (Only if overlay is NOT active)
             elif app_state == "Error":
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     print("[InputHandler] Exiting app from Error state via ESC.")  # LOG
                     return self.exit_app_cb()
 
-        return True
+        return True  # Continue running unless exit_app_cb returns False

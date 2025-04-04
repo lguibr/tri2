@@ -37,7 +37,7 @@ class UIRenderer:
                 None, self.demo_config.HELP_FONT_SIZE
             )
         except Exception as e:
-            print(f"Warning: SysFont error for demo fonts: {e}. Using default.")  # LOG
+            print(f"Warning: SysFont error for demo fonts: {e}. Using default.") # LOG
             self.demo_hud_font = pygame.font.Font(None, self.demo_config.HUD_FONT_SIZE)
             self.demo_help_font = pygame.font.Font(
                 None, self.demo_config.HELP_FONT_SIZE
@@ -68,7 +68,7 @@ class UIRenderer:
         envs: List[GameState],
         num_envs: int,
         env_config: EnvConfig,
-        cleanup_confirmation_active: bool,  # Receive the flag
+        cleanup_confirmation_active: bool, # *** Receive the flag ***
         cleanup_message: str,
         last_cleanup_message_time: float,
         tensorboard_log_dir: Optional[str],
@@ -80,7 +80,7 @@ class UIRenderer:
         # print(f"[UIRenderer::render_all] Received cleanup_confirmation_active = {cleanup_confirmation_active}, app_state = {app_state}") # LOG (Can be spammy)
 
         try:
-            # Render main content based on state
+            # *** KEY CHANGE: Render main content FIRST, without flipping ***
             if app_state == "MainMenu":
                 self._render_main_menu(
                     is_training,
@@ -90,6 +90,7 @@ class UIRenderer:
                     envs,
                     num_envs,
                     env_config,
+                    # Pass flag to main menu render to potentially hide elements behind overlay
                     cleanup_confirmation_active,
                     cleanup_message,
                     last_cleanup_message_time,
@@ -102,7 +103,7 @@ class UIRenderer:
                 else:
                     print(
                         "Error: Attempting to render demo mode without demo_env."
-                    )  # LOG
+                    ) # LOG
                     self.screen.fill(VisConfig.BLACK)
                     err_font = pygame.font.SysFont(None, 50)
                     err_surf = err_font.render("Demo Env Error!", True, VisConfig.RED)
@@ -110,40 +111,37 @@ class UIRenderer:
                         err_surf,
                         err_surf.get_rect(center=self.screen.get_rect().center),
                     )
-                    pygame.display.flip()
             elif app_state == "Initializing":
-                self._render_initializing_screen()
+                # Render initializing screen (might show "Cleaning" status)
+                self._render_initializing_screen(status) # Pass status
             elif app_state == "Error":
                 self._render_error_screen(status)
 
-            # --- Check condition for drawing cleanup overlay ---
+            # *** KEY CHANGE: Check condition for drawing cleanup overlay AFTER main content ***
             # This should draw ON TOP of the state-specific rendering above
             overlay_condition_met = cleanup_confirmation_active and app_state != "Error"
             # print(f"[UIRenderer::render_all] Checking overlay condition: cleanup_active={cleanup_confirmation_active}, app_state='{app_state}', condition_met={overlay_condition_met}") # LOG
 
             if overlay_condition_met:
-                print(
-                    "[UIRenderer::render_all] Condition met, calling render_cleanup_confirmation."
-                )  # LOG
-                self.overlays.render_cleanup_confirmation()  # <--- Check if this is called
+                # print(
+                #     "[UIRenderer::render_all] Condition met, calling render_cleanup_confirmation."
+                # ) # LOG
+                self.overlays.render_cleanup_confirmation() # Draw the overlay
 
-            # Flip should happen *after* potential overlay drawing if not handled state-specifically
-            # If _render_main_menu handles flip, this might double-flip or hide overlay briefly.
-            # Let's let _render_main_menu handle its own flip, and add one here for other states.
-            if app_state != "MainMenu":
-                pygame.display.flip()
+            # *** KEY CHANGE: Single flip at the end ***
+            pygame.display.flip()
 
         except pygame.error as e:
             if "video system not initialized" in str(e):
-                print("Error: Pygame video system not initialized.")  # LOG
+                print("Error: Pygame video system not initialized.") # LOG
             elif "Invalid subsurface rectangle" in str(e):
-                print(f"Warning: Invalid subsurface rectangle: {e}")  # LOG
+                print(f"Warning: Invalid subsurface rectangle: {e}") # LOG
             else:
-                print(f"Pygame rendering error: {e}")
-                traceback.print_exc()  # LOG
+                print(f"Pygame rendering error: {e}") # LOG
+                traceback.print_exc()
         except Exception as e:
-            print(f"Unexpected critical rendering error in render_all: {e}")
-            traceback.print_exc()  # LOG
+            print(f"Unexpected critical rendering error in render_all: {e}") # LOG
+            traceback.print_exc()
 
     def _render_main_menu(
         self,
@@ -154,13 +152,13 @@ class UIRenderer:
         envs: List[GameState],
         num_envs: int,
         env_config: EnvConfig,
-        cleanup_confirmation_active: bool,  # Receive flag
+        cleanup_confirmation_active: bool, # Receive flag
         cleanup_message: str,
         last_cleanup_message_time: float,
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
     ):
-        """Renders the main training dashboard view."""
+        """Renders the main training dashboard view. Does NOT flip display."""
         self.screen.fill(VisConfig.BLACK)  # Clear screen
 
         # 1. Render Main Panels
@@ -175,25 +173,24 @@ class UIRenderer:
         )
         self.game_area.render(envs, num_envs, env_config)
 
-        # 2. Render Status Message (if not showing confirmation)
+        # 2. Render Status Message (only if confirmation is NOT active)
         if not cleanup_confirmation_active:
             self.overlays.render_status_message(
                 cleanup_message, last_cleanup_message_time
             )
 
-        # 3. Render Tooltip (if not showing confirmation)
+        # 3. Render Tooltip (only if confirmation is NOT active)
         if not cleanup_confirmation_active:
             self.tooltips.update_rects_and_texts(
                 self.left_panel.get_stat_rects(), self.left_panel.get_tooltip_texts()
             )
             self.tooltips.render_tooltip()
 
-        # 4. Flip display *after* all main menu elements are drawn
-        # Note: Cleanup overlay will be drawn *after* this flip in render_all if active.
-        pygame.display.flip()
+        # *** KEY CHANGE: DO NOT FLIP DISPLAY HERE ***
+        # pygame.display.flip() # REMOVED
 
     def _render_demo_mode(self, demo_env: GameState, env_config: EnvConfig):
-        """Renders the single-player interactive demo mode."""
+        """Renders the single-player interactive demo mode. Does NOT flip display."""
         self.screen.fill(self.demo_config.BACKGROUND_COLOR)
         sw, sh = self.screen.get_size()
         padding = 30
@@ -203,7 +200,7 @@ class UIRenderer:
 
         if max_game_h <= 0 or max_game_w <= 0:
             self._render_too_small_message(self.screen.get_rect(), sw, sh)
-            pygame.display.flip()
+            # pygame.display.flip() # REMOVED
             return
 
         aspect_ratio = (env_config.COLS * 0.75 + 0.25) / max(1, env_config.ROWS)
@@ -272,16 +269,16 @@ class UIRenderer:
                         )
                         self._render_demo_shape_previews(preview_area_surf, demo_env)
             except ValueError as e:
-                print(f"Error subsurface demo game ({clipped_game_rect}): {e}")
+                print(f"Error subsurface demo game ({clipped_game_rect}): {e}") # LOG
                 pygame.draw.rect(
                     self.screen, VisConfig.RED, clipped_game_rect, 1
-                )  # LOG
+                )
             except Exception as render_e:
-                print(f"Error rendering demo game area: {render_e}")
+                print(f"Error rendering demo game area: {render_e}") # LOG
                 traceback.print_exc()
                 pygame.draw.rect(
                     self.screen, VisConfig.RED, clipped_game_rect, 1
-                )  # LOG
+                )
         else:
             self._render_too_small_message(game_rect, game_w, game_h)
 
@@ -293,7 +290,7 @@ class UIRenderer:
             score_rect = score_surf.get_rect(midtop=(sw // 2, hud_y))
             self.screen.blit(score_surf, score_rect)
         except Exception as e:
-            print(f"HUD render error: {e}")  # LOG
+            print(f"HUD render error: {e}") # LOG
 
         # Help Text
         try:
@@ -303,11 +300,12 @@ class UIRenderer:
             help_rect = help_surf.get_rect(centerx=sw // 2, bottom=sh - 10)
             self.screen.blit(help_surf, help_rect)
         except Exception as e:
-            print(f"Help render error: {e}")  # LOG
+            print(f"Help render error: {e}") # LOG
 
-        # Don't flip here, let render_all handle it
+        # *** KEY CHANGE: DO NOT FLIP DISPLAY HERE ***
+        # pygame.display.flip() # REMOVED
 
-    # --- Helper methods (_calculate_demo_triangle_size, _render_placement_preview, _render_demo_shape_previews, _render_too_small_message, _render_initializing_screen, _render_error_screen) remain unchanged ---
+    # --- Helper methods (_calculate_demo_triangle_size, _render_placement_preview, _render_demo_shape_previews, _render_too_small_message) remain unchanged ---
     def _calculate_demo_triangle_size(self, surf_w, surf_h, env_config):
         padding = self.vis_config.ENV_GRID_PADDING
         drawable_w = max(1, surf_w - 2 * padding)
@@ -423,15 +421,15 @@ class UIRenderer:
                             shape_render_surf, shp, int(cell_size)
                         )
                 except ValueError as sub_err:
-                    print(f"Error subsurface shape preview {i}: {sub_err}")
+                    print(f"Error subsurface shape preview {i}: {sub_err}") # LOG
                     pygame.draw.rect(
                         surf, VisConfig.RED, clipped_preview_rect, 1
-                    )  # LOG
+                    )
                 except Exception as e:
-                    print(f"Error rendering demo shape preview {i}: {e}")
+                    print(f"Error rendering demo shape preview {i}: {e}") # LOG
                     pygame.draw.rect(
                         surf, VisConfig.RED, clipped_preview_rect, 1
-                    )  # LOG
+                    )
             current_preview_y += preview_h + preview_padding
 
     def _render_too_small_message(self, area_rect: pygame.Rect, w: int, h: int):
@@ -441,22 +439,26 @@ class UIRenderer:
             target_rect = err_surf.get_rect(center=self.screen.get_rect().center)
             self.screen.blit(err_surf, target_rect)
         except Exception as e:
-            print(f"Error rendering 'too small' message: {e}")  # LOG
+            print(f"Error rendering 'too small' message: {e}") # LOG
 
-    def _render_initializing_screen(self):
+    # --- MODIFIED: Accept status message ---
+    def _render_initializing_screen(self, status_message: str = "Initializing RL Components..."):
+        """Renders the initializing screen with a status message."""
         try:
             self.screen.fill(VisConfig.BLACK)
             font = pygame.font.SysFont(None, 50)
-            text_surf = font.render(
-                "Initializing RL Components...", True, VisConfig.WHITE
-            )
+            # Use the passed status message
+            text_surf = font.render(status_message, True, VisConfig.WHITE)
             text_rect = text_surf.get_rect(center=self.screen.get_rect().center)
             self.screen.blit(text_surf, text_rect)
-            pygame.display.flip()
+            # *** KEY CHANGE: DO NOT FLIP DISPLAY HERE ***
+            # pygame.display.flip() # REMOVED
         except Exception as e:
-            print(f"Error rendering initializing screen: {e}")  # LOG
+            print(f"Error rendering initializing screen: {e}") # LOG
+    # --- END MODIFIED ---
 
     def _render_error_screen(self, status_message: str):
+        """Renders the error screen. Does NOT flip display."""
         try:
             self.screen.fill((40, 0, 0))
             font_title = pygame.font.SysFont(None, 70)
@@ -480,6 +482,7 @@ class UIRenderer:
             self.screen.blit(title_surf, title_rect)
             self.screen.blit(msg_surf, msg_rect)
             self.screen.blit(exit_surf, exit_rect)
-            pygame.display.flip()
+            # *** KEY CHANGE: DO NOT FLIP DISPLAY HERE ***
+            # pygame.display.flip() # REMOVED
         except Exception as e:
-            print(f"Error rendering error screen: {e}")  # LOG
+            print(f"Error rendering error screen: {e}") # LOG
