@@ -28,9 +28,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time: float = time.time()
         self.last_log_step: int = 0
         self.start_time: float = time.time()
-        # --- MODIFIED: Get the window size used for summary ---
         self.summary_avg_window = self.aggregator.summary_avg_window
-        # --- END MODIFIED ---
         print(
             f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'}"
         )
@@ -80,10 +78,35 @@ class SimpleStatsRecorder(StatsRecorderBase):
             print(
                 f"--- 🎮 New Best Game: {self.aggregator.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
             )
+        # --- MODIFIED: Check for new best loss ---
+        if update_info.get("new_best_loss"):
+            prev_str = (
+                f"{self.aggregator.previous_best_value_loss:.4f}"
+                if self.aggregator.previous_best_value_loss < float("inf")
+                else "N/A"
+            )
+            print(
+                f"---📉 New Best Loss: {self.aggregator.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
+            )
+        # --- END MODIFIED ---
 
     def record_step(self, step_data: Dict[str, Any]):
-        _ = self.aggregator.record_step(step_data)
+        update_info = self.aggregator.record_step(step_data)
         g_step = step_data.get("global_step", self.aggregator.current_global_step)
+
+        # --- MODIFIED: Check for new best loss after recording step data ---
+        if update_info.get("new_best_loss"):
+            prev_str = (
+                f"{self.aggregator.previous_best_value_loss:.4f}"
+                if self.aggregator.previous_best_value_loss < float("inf")
+                else "N/A"
+            )
+            step_info = f"at Step ~{g_step/1e6:.1f}M"
+            print(
+                f"---📉 New Best Loss: {self.aggregator.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
+            )
+        # --- END MODIFIED ---
+
         self.log_summary(g_step)
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
@@ -114,19 +137,31 @@ class SimpleStatsRecorder(StatsRecorderBase):
             else "N/A"
         )
 
-        # --- MODIFIED: Indicate the window size used for averages ---
+        # --- MODIFIED: Use 'value_loss' key instead of 'avg_loss_window' ---
         avg_window_size = summary.get("summary_avg_window_size", "?")
         log_str = (
             f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
             f"Ep: {summary['total_episodes']:<7} | SPS: {summary['steps_per_second']:<5.0f} | "
             f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
-            f"Loss(Avg{avg_window_size}): {summary['avg_loss_window']:.4f} (Best: {best_loss_val}) | "
-            f"LR: {summary['current_lr']:.1e} | "
-            f"Buf: {summary['buffer_size']/1e6:.2f}M"
+            f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "
+            f"LR: {summary['current_lr']:.1e}"
         )
         # --- END MODIFIED ---
-        if summary["beta"] > 0 and summary["beta"] < 1.0:
-            log_str += f" | Beta: {summary['beta']:.3f}"
+
+        # Conditionally add epsilon if present and non-default
+        epsilon = summary.get("epsilon")
+        if epsilon is not None and epsilon < 1.0:
+            log_str += f" | Eps: {epsilon:.3f}"
+
+        # Conditionally add beta if present and non-default
+        beta = summary.get("beta")
+        if beta is not None and beta > 0.0 and beta < 1.0:
+            log_str += f" | Beta: {beta:.3f}"
+
+        # Add Buffer Size if relevant (e.g., for experience replay methods)
+        buffer_size = summary.get("buffer_size")
+        if buffer_size is not None and buffer_size > 0:
+            log_str += f" | Buf: {buffer_size/1e6:.2f}M"
 
         print(log_str)
 

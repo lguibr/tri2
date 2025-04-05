@@ -1,4 +1,3 @@
-# File: ui/panels/left_panel_components/__init__.py
 from .button_status_renderer import ButtonStatusRenderer
 from .notification_renderer import NotificationRenderer
 from .info_text_renderer import InfoTextRenderer

@@ -3,9 +3,9 @@ import pygame
 from typing import Dict, Any, Tuple
 from config import (
     VisConfig,
-    BufferConfig,
     StatsConfig,
-    DQNConfig,
+    PPOConfig,
+    RNNConfig,
     DEVICE,
     TOTAL_TRAINING_STEPS,
 )
@@ -22,7 +22,6 @@ class InfoTextRenderer:
         self,
         y_start: int,
         stats_summary: Dict[str, Any],
-        buffer_capacity: int,
         panel_width: int,
     ) -> Tuple[int, Dict[str, pygame.Rect]]:
         """Renders the info text block. Returns next_y and stat_rects."""
@@ -32,14 +31,9 @@ class InfoTextRenderer:
             return y_start + 100, stat_rects
 
         line_height = ui_font.get_linesize()
-        buffer_size = stats_summary.get("buffer_size", 0)
-        buffer_perc = (
-            (buffer_size / max(1, buffer_capacity) * 100)
-            if buffer_capacity > 0
-            else 0.0
-        )
         global_step = stats_summary.get("global_step", 0)
 
+        # --- MODIFIED: Use specific PPO metric keys ---
         info_lines = [
             (
                 "Global Steps",
@@ -50,22 +44,23 @@ class InfoTextRenderer:
                 "Steps/Sec (Current)",
                 f"{stats_summary.get('steps_per_second', 0.0):.1f}",
             ),
-            ("Buffer Fill", f"{buffer_perc:.1f}% ({buffer_size/1e6:.2f}M)"),
             (
-                "PER Beta",
-                (
-                    f"{stats_summary.get('beta', 0.0):.3f}"
-                    if BufferConfig.USE_PER
-                    else "N/A"
-                ),
-            ),
+                "Policy Loss",
+                f"{stats_summary.get('policy_loss', 0.0):.4f}",
+            ),  # Use 'policy_loss'
+            (
+                "Value Loss",
+                f"{stats_summary.get('value_loss', 0.0):.4f}",
+            ),  # Use 'value_loss'
+            ("Entropy", f"{stats_summary.get('entropy', 0.0):.4f}"),  # Use 'entropy'
             ("Learning Rate", f"{stats_summary.get('current_lr', 0.0):.1e}"),
             ("Device", f"{DEVICE.type.upper()}"),
             (
                 "Network",
-                f"Duel={DQNConfig.USE_DUELING}, Noisy={DQNConfig.USE_NOISY_NETS}, C51={DQNConfig.USE_DISTRIBUTIONAL}",
+                f"Actor-Critic (CNN+MLP->LSTM:{RNNConfig.USE_RNN})",
             ),
         ]
+        # --- END MODIFIED ---
 
         last_y = y_start
         x_pos_key, x_pos_val_offset = 10, 5

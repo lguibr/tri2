@@ -5,17 +5,14 @@ import torch.nn.functional as F
 import numpy as np
 import math
 
-from config import ModelConfig, EnvConfig, DQNConfig, DEVICE
+from config import ModelConfig, EnvConfig, PPOConfig, RNNConfig, DEVICE
 from typing import Tuple, List, Type, Optional
 
-from .noisy_layer import NoisyLinear
 
-
-class AgentNetwork(nn.Module):
+class ActorCriticNetwork(nn.Module):
     """
-    Agent Network: CNN+MLP -> Fusion -> Dueling Heads -> Optional Distributional Output.
-    Accepts separate grid and shape tensors as input.
-    Uses NoisyLinear layers in output heads if configured.
+    Actor-Critic Network: CNN+MLP -> Fusion -> Optional LSTM -> Actor/Critic Heads.
+    Handles both single step (eval) and sequence (RNN training) inputs.
     """
 
     def __init__(
@@ -23,36 +20,29 @@ class AgentNetwork(nn.Module):
         env_config: EnvConfig,
         action_dim: int,
         model_config: ModelConfig.Network,
-        dqn_config: DQNConfig,
-        dueling: bool,
-        use_noisy: bool,  # This flag controls NoisyLinear usage
+        rnn_config: RNNConfig,
     ):
         super().__init__()
-        self.dueling = dueling
         self.action_dim = action_dim
         self.env_config = env_config
         self.config = model_config
-        self.use_noisy = use_noisy  # Store the flag
-        self.use_distributional = dqn_config.USE_DISTRIBUTIONAL
-        self.num_atoms = dqn_config.NUM_ATOMS
-        self.device = DEVICE
+        self.rnn_config = rnn_config
+        self.device = DEVICE  # Store target device
 
-        print(f"[AgentNetwork] Target device set to: {self.device}")
-        print(
-            f"[AgentNetwork] Distributional C51: {self.use_distributional} ({self.num_atoms} atoms)"
-        )
+        print(f"[ActorCriticNetwork] Target device set to: {self.device}")
+        print(f"[ActorCriticNetwork] Using RNN: {self.rnn_config.USE_RNN}")
 
         self.grid_c, self.grid_h, self.grid_w = self.env_config.GRID_STATE_SHAPE
         self.shape_feat_dim = self.env_config.SHAPE_STATE_DIM
         self.num_shape_slots = self.env_config.NUM_SHAPE_SLOTS
         self.shape_feat_per_slot = self.env_config.SHAPE_FEATURES_PER_SHAPE
 
-        print(f"[AgentNetwork] Initializing (Noisy Heads: {self.use_noisy}):")
+        print(f"[ActorCriticNetwork] Initializing:")
         print(f"  Input Grid Shape: [B, {self.grid_c}, {self.grid_h}, {self.grid_w}]")
-        print(
-            f"  Input Shape Features Dim: {self.shape_feat_dim} ({self.num_shape_slots} slots x {self.shape_feat_per_slot} features)"
-        )
+        print(f"  Input Shape Features Dim: {self.shape_feat_dim}")
 
+        # --- Build network components ---
+        # Note: Layers are implicitly moved to self.device during initialization below
         self.conv_base, conv_out_h, conv_out_w, conv_out_c = self._build_cnn_branch()
         self.conv_out_size = self._get_conv_out_size(
             (self.grid_c, self.grid_h, self.grid_w)
@@ -67,40 +57,63 @@ class AgentNetwork(nn.Module):
         combined_features_dim = self.conv_out_size + self.shape_mlp_out_dim
         print(f"  Combined Features Dim: {combined_features_dim}")
 
-        # --- Modify Fusion MLP if needed (keeping it simple for now) ---
-        # If Noisy Nets are used, potentially the last fusion layer could also be noisy.
-        # Keeping fusion MLP with standard Linear layers unless specifically requested otherwise.
-        self.fusion_mlp, self.head_input_dim = self._build_fusion_mlp_branch(
+        self.fusion_mlp, self.fusion_output_dim = self._build_fusion_mlp_branch(
             combined_features_dim
         )
-        print(f"  Fusion MLP Output Dim (Input to Heads): {self.head_input_dim}")
+        print(f"  Fusion MLP Output Dim: {self.fusion_output_dim}")
 
-        # --- Build heads using NoisyLinear conditionally ---
-        self._build_output_heads()
-        head_type = NoisyLinear if self.use_noisy else nn.Linear  # Determine head type
-        output_type = "Distributional" if self.use_distributional else "Q-Value"
-        print(
-            f"  Using {'Dueling' if self.dueling else 'Single'} Heads ({head_type.__name__}), Output: {output_type} [{self.action_dim * (self.num_atoms if self.use_distributional else 1)} units]"
-        )
-
-        if hasattr(self.conv_base, "0") and hasattr(self.conv_base[0], "weight"):
-            print(
-                f"[AgentNetwork] Final check - conv_base device: {next(self.conv_base.parameters()).device}"
-            )
+        self.lstm_layer = None
+        self.lstm_hidden_size = 0
+        if self.rnn_config.USE_RNN:
+            self.lstm_hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
+            # LSTM layer will be explicitly moved to device
+            self.lstm_layer = nn.LSTM(
+                input_size=self.fusion_output_dim,
+                hidden_size=self.lstm_hidden_size,
+                num_layers=self.rnn_config.LSTM_NUM_LAYERS,
+                batch_first=True,  # Expect [Batch, Seq, Feature]
+            ).to(self.device)
+            print(f"  LSTM Layer Added (Hidden Size: {self.lstm_hidden_size})")
+            head_input_dim = self.lstm_hidden_size
         else:
-            print(
-                "[AgentNetwork] Final check - conv_base seems empty or has no weights."
-            )
+            head_input_dim = self.fusion_output_dim
+
+        # Heads will be explicitly moved to device
+        self.actor_head = nn.Linear(head_input_dim, self.action_dim).to(self.device)
+        self.critic_head = nn.Linear(head_input_dim, 1).to(self.device)
+        print(f"  Actor Head Output Dim: {self.action_dim}")
+        print(f"  Critic Head Output Dim: 1")
+
+        self._init_head_weights()
+
+    def _init_head_weights(self):
+        """Initialize actor and critic head weights."""
+        print("  Initializing Actor/Critic heads using Xavier Uniform.")
+        # Orthogonal initialization is often preferred for policy/value heads
+        # gain_actor = np.sqrt(2)
+        # gain_critic = 1.0
+        # nn.init.orthogonal_(self.actor_head.weight, gain=gain_actor)
+        # nn.init.constant_(self.actor_head.bias, 0)
+        # nn.init.orthogonal_(self.critic_head.weight, gain=gain_critic)
+        # nn.init.constant_(self.critic_head.bias, 0)
+
+        # Using Xavier for consistency with user's likely previous setup
+        actor_gain = nn.init.calculate_gain("linear")
+        critic_gain = nn.init.calculate_gain("linear")
+        nn.init.xavier_uniform_(
+            self.actor_head.weight, gain=0.01
+        )  # Small gain for policy output
+        nn.init.constant_(self.actor_head.bias, 0)
+        nn.init.xavier_uniform_(self.critic_head.weight, gain=critic_gain)
+        nn.init.constant_(self.critic_head.bias, 0)
 
     def _build_cnn_branch(self) -> Tuple[nn.Sequential, int, int, int]:
         conv_layers: List[nn.Module] = []
         current_channels = self.grid_c
         h, w = self.grid_h, self.grid_w
         cfg = self.config
-        print(
-            f"  Building CNN (Input Channels: {current_channels}) on device: {self.device}"
-        )
         for i, out_channels in enumerate(cfg.CONV_CHANNELS):
+            # Move layer to device upon creation
             conv_layer = nn.Conv2d(
                 current_channels,
                 out_channels,
@@ -116,31 +129,23 @@ class AgentNetwork(nn.Module):
             current_channels = out_channels
             h = (h + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
             w = (w + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
-
-        cnn_module = nn.Sequential(*conv_layers)
-        if len(cnn_module) > 0 and hasattr(cnn_module[0], "weight"):
-            print(f"    CNN Layer 0 device after build: {cnn_module[0].weight.device}")
-        return cnn_module, h, w, current_channels
+        return nn.Sequential(*conv_layers), h, w, current_channels
 
     def _get_conv_out_size(self, shape: Tuple[int, int, int]) -> int:
-        self.conv_base.to(self.device)
+        # self.conv_base is already on self.device
         with torch.no_grad():
             dummy_input = torch.zeros(1, *shape, device=self.device)
-            self.conv_base.eval()
-            try:
-                output = self.conv_base(dummy_input)
-                out_size = int(np.prod(output.size()[1:]))
-            except Exception as e:
-                print(f"Error calculating conv output size: {e}")
-                print(f"Input shape to CNN: {dummy_input.shape}")
-                out_size = 1
-            return out_size
+            self.conv_base.eval()  # Set to eval mode for size calculation
+            output = self.conv_base(dummy_input)
+            self.conv_base.train()  # Set back to train mode
+            return int(np.prod(output.size()[1:]))
 
     def _build_shape_mlp_branch(self) -> Tuple[nn.Sequential, int]:
         shape_mlp_layers: List[nn.Module] = []
         current_dim = self.env_config.SHAPE_STATE_DIM
         cfg = self.config
         for hidden_dim in cfg.SHAPE_FEATURE_MLP_DIMS:
+            # Move layer to device upon creation
             lin_layer = nn.Linear(current_dim, hidden_dim).to(self.device)
             shape_mlp_layers.append(lin_layer)
             shape_mlp_layers.append(cfg.SHAPE_MLP_ACTIVATION())
@@ -151,9 +156,9 @@ class AgentNetwork(nn.Module):
         fusion_layers: List[nn.Module] = []
         current_fusion_dim = input_dim
         cfg = self.config
-        fusion_linear_layer_class = nn.Linear  # Keep fusion linear for now
         for i, hidden_dim in enumerate(cfg.COMBINED_FC_DIMS):
-            linear_layer = fusion_linear_layer_class(
+            # Move layer to device upon creation
+            linear_layer = nn.Linear(
                 current_fusion_dim, hidden_dim, bias=not cfg.USE_BATCHNORM_FC
             ).to(self.device)
             fusion_layers.append(linear_layer)
@@ -165,88 +170,91 @@ class AgentNetwork(nn.Module):
             current_fusion_dim = hidden_dim
         return nn.Sequential(*fusion_layers), current_fusion_dim
 
-    def _build_output_heads(self):
-        # Use NoisyLinear if self.use_noisy is True
-        head_linear_layer_class = NoisyLinear if self.use_noisy else nn.Linear
-        output_units_per_stream = (
-            self.action_dim * self.num_atoms
-            if self.use_distributional
-            else self.action_dim
-        )
-        value_units = self.num_atoms if self.use_distributional else 1
-
-        if self.dueling:
-            self.value_head = head_linear_layer_class(
-                self.head_input_dim, value_units
-            ).to(self.device)
-            self.advantage_head = head_linear_layer_class(
-                self.head_input_dim, output_units_per_stream
-            ).to(self.device)
-        else:
-            self.output_head = head_linear_layer_class(
-                self.head_input_dim, output_units_per_stream
-            ).to(self.device)
-
     def forward(
-        self, grid_tensor: torch.Tensor, shape_tensor: torch.Tensor
-    ) -> torch.Tensor:
+        self,
+        grid_tensor: torch.Tensor,  # Shape [N, C, H, W] or [B, T, C, H, W]
+        shape_tensor: torch.Tensor,  # Shape [N, F] or [B, T, F]
+        hidden_state: Optional[
+            Tuple[torch.Tensor, torch.Tensor]
+        ] = None,  # Shape [L, B, H]
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+
+        # Ensure input tensors are on the same device as the model
         model_device = next(self.parameters()).device
-        if grid_tensor.device != model_device:
-            grid_tensor = grid_tensor.to(model_device)
-        if shape_tensor.device != model_device:
-            shape_tensor = shape_tensor.to(model_device)
-
-        expected_grid_shape = (self.grid_c, self.grid_h, self.grid_w)
-        if grid_tensor.ndim != 4 or grid_tensor.shape[1:] != expected_grid_shape:
-            raise ValueError(
-                f"AgentNetwork forward: Invalid grid_tensor shape {grid_tensor.shape}. Expected [B, {self.grid_c}, {self.grid_h}, {self.grid_w}]."
+        grid_tensor = grid_tensor.to(model_device)
+        shape_tensor = shape_tensor.to(model_device)
+        if hidden_state:
+            hidden_state = (
+                hidden_state[0].to(model_device),
+                hidden_state[1].to(model_device),
             )
 
-        batch_size = grid_tensor.size(0)
-        expected_shape_flat_dim = self.num_shape_slots * self.shape_feat_per_slot
-        if shape_tensor.ndim == 3 and shape_tensor.shape[1:] == (
-            self.num_shape_slots,
-            self.shape_feat_per_slot,
-        ):
-            shape_tensor_flat = shape_tensor.view(batch_size, -1)
-        elif (
-            shape_tensor.ndim == 2 and shape_tensor.shape[1] == expected_shape_flat_dim
-        ):
-            shape_tensor_flat = shape_tensor
-        else:
-            raise ValueError(
-                f"AgentNetwork forward: Invalid shape_tensor shape {shape_tensor.shape}. Expected [B, {self.num_shape_slots}, {self.shape_feat_per_slot}] or [B, {expected_shape_flat_dim}]."
-            )
+        # Detect if input is sequence based on RNN config and dimensions
+        is_sequence = self.rnn_config.USE_RNN and grid_tensor.ndim == 5
+        initial_batch_size = grid_tensor.shape[0]
+        seq_len = grid_tensor.shape[1] if is_sequence else 1
 
-        conv_output = self.conv_base(grid_tensor)
-        conv_output_flat = conv_output.view(batch_size, -1)
-        shape_output = self.shape_mlp(shape_tensor_flat)
+        # --- Reshape for Feature Extraction ---
+        # Flatten batch and time dimensions: [B, T, ...] -> [N = B*T, ...]
+        num_samples = initial_batch_size * seq_len
+        # --- USE RESHAPE INSTEAD OF VIEW ---
+        grid_input_flat = grid_tensor.reshape(
+            num_samples, *self.env_config.GRID_STATE_SHAPE
+        )
+        shape_input_flat = shape_tensor.reshape(
+            num_samples, self.env_config.SHAPE_STATE_DIM
+        )
+        # --- END MODIFICATION ---
+
+        # --- Feature Extraction ---
+        conv_output = self.conv_base(grid_input_flat)
+        conv_output_flat = conv_output.view(
+            num_samples, -1
+        )  # Use view here is fine for flattening
+        shape_output = self.shape_mlp(shape_input_flat)
         combined_features = torch.cat((conv_output_flat, shape_output), dim=1)
-        fused_output = self.fusion_mlp(combined_features)
+        fused_output = self.fusion_mlp(
+            combined_features
+        )  # Shape [N, fusion_output_dim]
 
-        if self.dueling:
-            value = self.value_head(fused_output)
-            advantage = self.advantage_head(fused_output)
-            if self.use_distributional:
-                value = value.view(batch_size, 1, self.num_atoms)
-                advantage = advantage.view(batch_size, self.action_dim, self.num_atoms)
-                adv_mean = advantage.mean(dim=1, keepdim=True)
-                dist_logits = value + (advantage - adv_mean)
-            else:
-                adv_mean = advantage.mean(dim=1, keepdim=True)
-                dist_logits = value + (advantage - adv_mean)
+        # --- Optional RNN ---
+        next_hidden_state = hidden_state
+        if self.rnn_config.USE_RNN and self.lstm_layer is not None:
+            # Reshape for LSTM: [N, Feat] -> [B, T, Feat]
+            lstm_input = fused_output.view(
+                initial_batch_size, seq_len, self.fusion_output_dim
+            )
+            # LSTM forward pass
+            lstm_output, next_hidden_state = self.lstm_layer(lstm_input, hidden_state)
+            # Flatten LSTM output for heads: [B, T, lstm_hidden] -> [N, lstm_hidden]
+            head_input = lstm_output.contiguous().view(num_samples, -1)
         else:
-            dist_logits = self.output_head(fused_output)
-            if self.use_distributional:
-                dist_logits = dist_logits.view(
-                    batch_size, self.action_dim, self.num_atoms
-                )
+            # If no RNN, fusion output goes directly to heads
+            head_input = fused_output
 
-        return dist_logits
+        # --- Actor and Critic Heads ---
+        policy_logits = self.actor_head(head_input)  # Shape [N, action_dim]
+        value = self.critic_head(head_input)  # Shape [N, 1]
 
-    def reset_noise(self):
-        """Resets noise in all NoisyLinear layers within the network."""
-        if self.use_noisy:
-            for module in self.modules():
-                if isinstance(module, NoisyLinear):
-                    module.reset_noise()
+        # --- Reshape Output if Input was Sequence ---
+        if is_sequence:
+            policy_logits = policy_logits.view(
+                initial_batch_size, seq_len, -1
+            )  # [B, T, A]
+            value = value.view(initial_batch_size, seq_len, -1)  # [B, T, 1]
+
+        return policy_logits, value, next_hidden_state
+
+    def get_initial_hidden_state(
+        self, batch_size: int
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        if not self.rnn_config.USE_RNN or self.lstm_layer is None:
+            return None
+        # Get the device from a layer parameter
+        model_device = next(self.parameters()).device
+        num_layers = self.rnn_config.LSTM_NUM_LAYERS
+        hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
+        # Create initial hidden states directly on the model's device
+        h_0 = torch.zeros(num_layers, batch_size, hidden_size, device=model_device)
+        c_0 = torch.zeros(num_layers, batch_size, hidden_size, device=model_device)
+        return (h_0, c_0)

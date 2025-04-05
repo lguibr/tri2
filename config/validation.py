@@ -2,9 +2,9 @@
 import os, torch
 from .core import (
     EnvConfig,
-    DQNConfig,
+    PPOConfig,
+    RNNConfig,
     TrainConfig,
-    BufferConfig,
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
@@ -15,7 +15,6 @@ from .general import (
     RUN_ID,
     DEVICE,
     MODEL_SAVE_PATH,
-    BUFFER_SAVE_PATH,
     RUN_CHECKPOINT_DIR,
     RUN_LOG_DIR,
     TOTAL_TRAINING_STEPS,
@@ -24,6 +23,8 @@ from .general import (
 
 def print_config_info_and_validate():
     env_config_instance = EnvConfig()
+    ppo_config_instance = PPOConfig()
+    rnn_config_instance = RNNConfig()
 
     print("-" * 70)
     print(f"RUN ID: {RUN_ID}")
@@ -32,43 +33,48 @@ def print_config_info_and_validate():
     print(f"Device: {DEVICE}")
     print(
         f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
-        f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}, "
-        f"ShapeQs={'ON' if TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES else 'OFF'}"
+        f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
     )
-    if env_config_instance.GRID_FEATURES_PER_CELL != 2:
-        print(
-            f"Warning: Network expects {EnvConfig.GRID_FEATURES_PER_CELL} features per cell (Occupied, Is_Up)."
-            f" Config has: {env_config_instance.GRID_FEATURES_PER_CELL}"
-        )
+
     if TrainConfig.LOAD_CHECKPOINT_PATH:
         print(
             "*" * 70
-            + f"\n*** Warning: LOAD CHECKPOINT from: {TrainConfig.LOAD_CHECKPOINT_PATH} ***\n*** Ensure ckpt matches current Model/DQN Config (distributional, noisy, dueling, scheduler). ***\n"
-            + "*" * 70
+            + f"\n*** Warning: LOAD CHECKPOINT from: {TrainConfig.LOAD_CHECKPOINT_PATH} ***\n"
+            "*** Ensure ckpt matches current Model/PPO/RNN Config. ***\n" + "*" * 70
         )
     else:
         print("--- Starting training from scratch (no checkpoint specified). ---")
-    if TrainConfig.LOAD_BUFFER_PATH:
-        print(
-            "*" * 70
-            + f"\n*** Warning: LOAD BUFFER from: {TrainConfig.LOAD_BUFFER_PATH} ***\n*** Ensure buffer matches current Buffer Config (PER, N-Step). ***\n"
-            + "*" * 70
-        )
-    else:
-        print("--- Starting with an empty replay buffer (no buffer specified). ---")
-    print(f"--- Using Noisy Nets: {DQNConfig.USE_NOISY_NETS} ---")
+
+    print(f"--- Using PPO Algorithm ---")
+    print(f"    Rollout Steps: {ppo_config_instance.NUM_STEPS_PER_ROLLOUT}")
+    print(f"    PPO Epochs: {ppo_config_instance.PPO_EPOCHS}")
     print(
-        f"--- Using Distributional (C51): {DQNConfig.USE_DISTRIBUTIONAL} (Atoms: {DQNConfig.NUM_ATOMS}, Vmin: {DQNConfig.V_MIN}, Vmax: {DQNConfig.V_MAX}) ---"
+        f"    Minibatches: {ppo_config_instance.NUM_MINIBATCHES} (Size: {ppo_config_instance.MINIBATCH_SIZE})"
+    )
+    print(f"    Clip Param: {ppo_config_instance.CLIP_PARAM}")
+    print(f"    GAE Lambda: {ppo_config_instance.GAE_LAMBDA}")
+    print(
+        f"    Value Coef: {ppo_config_instance.VALUE_LOSS_COEF}, Entropy Coef: {ppo_config_instance.ENTROPY_COEF}"
     )
     print(
-        f"--- Using LR Scheduler: {DQNConfig.USE_LR_SCHEDULER}"
+        f"--- Using RNN: {rnn_config_instance.USE_RNN}"
         + (
-            f" (CosineAnnealingLR, T_max={DQNConfig.LR_SCHEDULER_T_MAX/1e6:.1f}M steps, eta_min={DQNConfig.LR_SCHEDULER_ETA_MIN:.1e})"
-            if DQNConfig.USE_LR_SCHEDULER
+            f" (LSTM Hidden: {rnn_config_instance.LSTM_HIDDEN_SIZE}, Layers: {rnn_config_instance.LSTM_NUM_LAYERS})"
+            if rnn_config_instance.USE_RNN
             else ""
         )
         + " ---"
     )
+    print(
+        f"--- Using LR Scheduler: {ppo_config_instance.USE_LR_SCHEDULER}"
+        + (
+            f" (Linear Decay to {ppo_config_instance.LR_SCHEDULER_END_FRACTION * 100}%)"
+            if ppo_config_instance.USE_LR_SCHEDULER
+            else ""
+        )
+        + " ---"
+    )
+
     print(
         f"Config: Env=(R={env_config_instance.ROWS}, C={env_config_instance.COLS}), "
         f"GridState={env_config_instance.GRID_STATE_SHAPE}, "
@@ -78,21 +84,15 @@ def print_config_info_and_validate():
     cnn_str = str(ModelConfig.Network.CONV_CHANNELS).replace(" ", "")
     mlp_str = str(ModelConfig.Network.COMBINED_FC_DIMS).replace(" ", "")
     shape_mlp_cfg_str = str(ModelConfig.Network.SHAPE_FEATURE_MLP_DIMS).replace(" ", "")
-    print(
-        f"Network: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}, Dueling={DQNConfig.USE_DUELING}"
-    )
+    print(f"Network: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}")
 
     print(
-        f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M, BUFFER={BufferConfig.REPLAY_BUFFER_SIZE/1e6:.1f}M, BATCH={TrainConfig.BATCH_SIZE}, LEARN_START={TrainConfig.LEARN_START_STEP/1e3:.1f}k"
+        f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M"
     )
     print(
-        f"Buffer: PER={BufferConfig.USE_PER}, N-Step={BufferConfig.N_STEP if BufferConfig.USE_N_STEP else 'N/A'}"
+        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (rollouts)"
     )
-    # --- MODIFIED: Print list of window sizes ---
-    print(
-        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ}"
-    )
-    # --- END MODIFIED ---
+
     if env_config_instance.NUM_ENVS >= 1024:
         print(
             "*" * 70

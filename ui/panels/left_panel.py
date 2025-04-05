@@ -6,9 +6,9 @@ from typing import Dict, Any, Optional, Deque, Tuple
 
 from config import (
     VisConfig,
-    BufferConfig,
     StatsConfig,
-    DQNConfig,
+    PPOConfig,
+    RNNConfig,  # Added
     DEVICE,
     TensorBoardConfig,
 )
@@ -23,28 +23,26 @@ from .left_panel_components import (
     PlotAreaRenderer,
 )
 
-# --- MODIFIED: Update tooltip text ---
 TOOLTIP_TEXTS = {
-    "Status": "Current state: Paused, Buffering, Training, Confirm Cleanup, Cleaning, or Error.",
+    "Status": "Current state: Ready, Training, Confirm Cleanup, Cleaning, or Error.",
     "Global Steps": "Total environment steps taken / Total planned steps.",
     "Total Episodes": "Total completed episodes across all environments.",
-    # Removed specific window size mention
-    "Steps/Sec (Current)": "Current avg Steps/Sec. See plot for history and different averaging windows.",
-    "Buffer Fill": f"Current replay buffer fill % ({BufferConfig.REPLAY_BUFFER_SIZE / 1e6:.1f}M cap). See plot.",
-    "PER Beta": f"Current PER IS exponent ({BufferConfig.PER_BETA_START:.1f}->1.0). See plot.",
+    "Steps/Sec (Current)": "Current avg Steps/Sec (Collection + Update). See plot for history.",
     "Learning Rate": "Current learning rate. See plot for history/schedule.",
-    "Train Button": "Click to Start/Pause training (or press 'P').",
-    "Cleanup Button": "Click to DELETE agent ckpt & buffer for CURRENT run ONLY, then re-init.",
-    "Play Demo Button": "Click to enter interactive play mode. Gameplay fills the replay buffer.",
+    "Run Button": "Click to Start/Stop training run (or press 'P').",  # Renamed
+    "Cleanup Button": "Click to DELETE agent ckpt for CURRENT run ONLY, then re-init.",
+    "Play Demo Button": "Click to enter interactive play mode.",
     "Device": f"Computation device detected ({DEVICE.type.upper()}).",
-    "Network": f"CNN+MLP Fusion. Dueling={DQNConfig.USE_DUELING}, Noisy={DQNConfig.USE_NOISY_NETS}, C51={DQNConfig.USE_DISTRIBUTIONAL}",
+    "Network": f"Actor-Critic (CNN+MLP Fusion -> Optional LSTM:{RNNConfig.USE_RNN})",  # Updated
     "TensorBoard Status": "Indicates TB logging status and log directory.",
-    "Notification Area": "Displays the latest best achievements (RL Score, Game Score, Loss).",
+    "Notification Area": "Displays the latest best achievements (RL Score, Game Score, Value Loss).",
     "Best RL Score Info": "Best RL Score achieved: Current Value (Previous Value) - Steps Ago",
     "Best Game Score Info": "Best Game Score achieved: Current Value (Previous Value) - Steps Ago",
-    "Best Loss Info": "Best (Lowest) Loss achieved: Current Value (Previous Value) - Steps Ago",
+    "Best Loss Info": "Best (Lowest) Value Loss achieved: Current Value (Previous Value) - Steps Ago",
+    "Policy Loss": "Average loss for the policy network during the last update.",
+    "Value Loss": "Average loss for the value network during the last update.",
+    "Entropy": "Average policy entropy during the last update (encourages exploration).",
 }
-# --- END MODIFIED ---
 
 
 class LeftPanelRenderer:
@@ -86,10 +84,9 @@ class LeftPanelRenderer:
 
     def render(
         self,
-        is_training: bool,
+        is_running: bool,  # Renamed from is_training
         status: str,
         stats_summary: Dict[str, Any],
-        buffer_capacity: int,
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         app_state: str,
@@ -99,9 +96,8 @@ class LeftPanelRenderer:
         lp_rect = pygame.Rect(0, 0, lp_width, current_height)
 
         status_color_map = {
-            "Paused": (30, 30, 30),
-            "Buffering": (30, 40, 30),
-            "Training": (40, 30, 30),
+            "Ready": (30, 30, 30),
+            "Training": (30, 40, 30),
             "Confirm Cleanup": (50, 20, 20),
             "Cleaning": (60, 30, 30),
             "Error": (60, 0, 0),
@@ -116,7 +112,7 @@ class LeftPanelRenderer:
         notification_area_rect = None
 
         next_y, rects_bs, notification_area_rect = self.button_status_renderer.render(
-            current_y, lp_width, app_state, is_training, status
+            current_y, lp_width, app_state, is_running, status
         )
         self.stat_rects.update(rects_bs)
         current_y = next_y
@@ -128,7 +124,7 @@ class LeftPanelRenderer:
             self.stat_rects.update(rects_notif)
 
         next_y, rects_info = self.info_text_renderer.render(
-            current_y, stats_summary, buffer_capacity, lp_width
+            current_y, stats_summary, lp_width
         )
         self.stat_rects.update(rects_info)
         current_y = next_y

@@ -6,12 +6,12 @@ from typing import Tuple, Dict, Any
 from config import (
     VisConfig,
     EnvConfig,
-    DQNConfig,
+    RewardConfig,
+    PPOConfig,
+    RNNConfig,
     TrainConfig,
-    BufferConfig,
     ModelConfig,
     StatsConfig,
-    RewardConfig,
     TensorBoardConfig,
     DemoConfig,
     RUN_CHECKPOINT_DIR,
@@ -31,7 +31,7 @@ def initialize_pygame(
     screen = pygame.display.set_mode(
         (vis_config.SCREEN_WIDTH, vis_config.SCREEN_HEIGHT), pygame.RESIZABLE
     )
-    pygame.display.set_caption("TriCrack DQN")
+    pygame.display.set_caption("TriCrack PPO")
     clock = pygame.time.Clock()
     print("Pygame initialized.")
     return screen, clock
@@ -46,8 +46,6 @@ def initialize_directories():
 
 def load_and_validate_configs() -> Dict[str, Any]:
     """Loads all config classes and returns the combined config dictionary."""
-    # Instantiating config classes implicitly loads defaults
-    # The get_config_dict function retrieves their values
     config_dict = get_config_dict()
     print_config_info_and_validate()
     return config_dict

@@ -15,6 +15,7 @@ StateType = Dict[str, np.ndarray]
 class GameState:
     def __init__(self):
         self.env_config = EnvConfig()
+        self.rewards = RewardConfig()  # Load reward config
         self.grid = Grid(self.env_config)
         self.shapes: List[Optional[Shape]] = [
             Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)
@@ -31,7 +32,6 @@ class GameState:
         self.cleared_triangles_coords: List[Tuple[int, int]] = []
         self.game_over = False
         self._last_action_valid = True
-        self.rewards = RewardConfig()
         self.demo_selected_shape_idx: int = 0
         self.demo_target_row: int = self.env_config.ROWS // 2
         self.demo_target_col: int = self.env_config.COLS // 2
@@ -132,16 +132,14 @@ class GameState:
         self.game_over = True
         if self.freeze_time <= 0:
             self.freeze_time = 1.0
-        # --- MODIFIED: Increase flash duration ---
         self.game_over_flash_time = 0.6
-        # --- END MODIFIED ---
         return self.rewards.PENALTY_GAME_OVER
 
     def _handle_valid_placement(
         self, shp: Shape, s_idx: int, rr: int, cc: int
     ) -> float:
         self._last_action_valid = True
-        reward = self.rewards.REWARD_ALIVE_STEP
+        reward = self.rewards.REWARD_PLACE_PER_TRI * len(shp.triangles)
 
         self.grid.place(shp, rr, cc)
         self.shapes[s_idx] = None
@@ -181,8 +179,17 @@ class GameState:
             self.line_clear_highlight_time = 0.5
             self.cleared_triangles_coords = cleared_coords
 
-        num_holes = self.grid.count_holes()
-        reward += num_holes * self.rewards.PENALTY_HOLE_PER_HOLE
+        # Add penalties after placement and potential clears
+        max_height = self.grid.get_max_height()
+        reward += max_height * self.rewards.PENALTY_MAX_HEIGHT_FACTOR
+
+        bumpiness = self.grid.get_bumpiness()
+        reward += bumpiness * self.rewards.PENALTY_BUMPINESS_FACTOR
+
+        # Hole penalty is applied implicitly via height/bumpiness to some extent,
+        # but can be kept for explicit discouragement.
+        # num_holes = self.grid.count_holes()
+        # reward += num_holes * self.rewards.PENALTY_HOLE_PER_HOLE
 
         if all(x is None for x in self.shapes):
             self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]

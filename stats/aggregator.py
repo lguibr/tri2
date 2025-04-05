@@ -31,7 +31,9 @@ class StatsAggregator:
 
         self.summary_avg_window = self.avg_windows[0]
 
-        self.losses: Deque[float] = deque(maxlen=plot_window)
+        self.policy_losses: Deque[float] = deque(maxlen=plot_window)
+        self.value_losses: Deque[float] = deque(maxlen=plot_window)
+        self.entropies: Deque[float] = deque(maxlen=plot_window)
         self.grad_norms: Deque[float] = deque(maxlen=plot_window)
         self.avg_max_qs: Deque[float] = deque(maxlen=plot_window)
         self.episode_scores: Deque[float] = deque(maxlen=plot_window)
@@ -63,9 +65,9 @@ class StatsAggregator:
         self.previous_best_game_score: float = -float("inf")
         self.best_game_score_step: int = 0
 
-        self.best_loss: float = float("inf")
-        self.previous_best_loss: float = float("inf")
-        self.best_loss_step: int = 0
+        self.best_value_loss: float = float("inf")
+        self.previous_best_value_loss: float = float("inf")
+        self.best_value_loss_step: int = 0
 
         print(
             f"[StatsAggregator] Initialized. Avg Windows: {self.avg_windows}, Plot Window: {self.plot_window}"
@@ -84,6 +86,10 @@ class StatsAggregator:
             global_step if global_step is not None else self.current_global_step
         )
         update_info = {"new_best_rl": False, "new_best_game": False}
+
+        # --- DEBUG LOGGING ---
+        # print(f"[StatsAggregator Debug] Appending Ep {episode_num}: RLScore={episode_score:.2f}, Len={episode_length}, GameScore={game_score}")
+        # --- END DEBUG LOGGING ---
 
         self.episode_scores.append(episode_score)
         self.episode_lengths.append(episode_length)
@@ -106,9 +112,7 @@ class StatsAggregator:
             self.best_game_score_step = current_step
             update_info["new_best_game"] = True
 
-        # --- MODIFIED: Append actual best_score, even if negative ---
         self.best_rl_score_history.append(self.best_score)
-        # --- END MODIFIED ---
         current_best_game = (
             int(self.best_game_score) if self.best_game_score > -float("inf") else 0
         )
@@ -123,14 +127,29 @@ class StatsAggregator:
 
         update_info = {"new_best_loss": False}
 
-        if "loss" in step_data and step_data["loss"] is not None and g_step > 0:
-            current_loss = step_data["loss"]
-            self.losses.append(current_loss)
-            if current_loss < self.best_loss:
-                self.previous_best_loss = self.best_loss
-                self.best_loss = current_loss
-                self.best_loss_step = g_step
+        if "policy_loss" in step_data and step_data["policy_loss"] is not None:
+            # --- DEBUG LOGGING ---
+            # print(f"[StatsAggregator Debug] Appending Policy Loss: {step_data['policy_loss']:.4f} at Step {g_step}")
+            # --- END DEBUG LOGGING ---
+            self.policy_losses.append(step_data["policy_loss"])
+
+        if "value_loss" in step_data and step_data["value_loss"] is not None:
+            current_value_loss = step_data["value_loss"]
+            # --- DEBUG LOGGING ---
+            # print(f"[StatsAggregator Debug] Appending Value Loss: {current_value_loss:.4f} at Step {g_step}")
+            # --- END DEBUG LOGGING ---
+            self.value_losses.append(current_value_loss)
+            if current_value_loss < self.best_value_loss and g_step > 0:
+                self.previous_best_value_loss = self.best_value_loss
+                self.best_value_loss = current_value_loss
+                self.best_value_loss_step = g_step
                 update_info["new_best_loss"] = True
+
+        if "entropy" in step_data and step_data["entropy"] is not None:
+            # --- DEBUG LOGGING ---
+            # print(f"[StatsAggregator Debug] Appending Entropy: {step_data['entropy']:.4f} at Step {g_step}")
+            # --- END DEBUG LOGGING ---
+            self.entropies.append(step_data["entropy"])
 
         if "grad_norm" in step_data and step_data["grad_norm"] is not None:
             self.grad_norms.append(step_data["grad_norm"])
@@ -170,7 +189,9 @@ class StatsAggregator:
         summary = {
             "avg_score_window": safe_mean(self.episode_scores),
             "avg_length_window": safe_mean(self.episode_lengths),
-            "avg_loss_window": safe_mean(self.losses),
+            "policy_loss": safe_mean(self.policy_losses),
+            "value_loss": safe_mean(self.value_losses),
+            "entropy": safe_mean(self.entropies),
             "avg_max_q_window": safe_mean(self.avg_max_qs),
             "avg_game_score_window": safe_mean(self.game_scores),
             "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
@@ -188,20 +209,27 @@ class StatsAggregator:
             "best_game_score": self.best_game_score,
             "previous_best_game_score": self.previous_best_game_score,
             "best_game_score_step": self.best_game_score_step,
-            "best_loss": self.best_loss,
-            "previous_best_loss": self.previous_best_loss,
-            "best_loss_step": self.best_loss_step,
+            "best_loss": self.best_value_loss,
+            "previous_best_loss": self.previous_best_value_loss,
+            "best_loss_step": self.best_value_loss_step,
             "num_ep_scores": len(self.episode_scores),
-            "num_losses": len(self.losses),
+            "num_losses": len(self.value_losses),
             "summary_avg_window_size": summary_window,
         }
         return summary
 
     def get_plot_data(self) -> Dict[str, Deque]:
+        # --- DEBUG LOGGING ---
+        # print(f"[StatsAggregator Debug] get_plot_data lengths: "
+        #       f"RLScore={len(self.episode_scores)}, GameScore={len(self.game_scores)}, EpLen={len(self.episode_lengths)}, "
+        #       f"PLoss={len(self.policy_losses)}, VLoss={len(self.value_losses)}, Ent={len(self.entropies)}")
+        # --- END DEBUG LOGGING ---
         return {
             "episode_scores": self.episode_scores.copy(),
             "episode_lengths": self.episode_lengths.copy(),
-            "losses": self.losses.copy(),
+            "policy_loss": self.policy_losses.copy(),
+            "value_loss": self.value_losses.copy(),
+            "entropy": self.entropies.copy(),
             "avg_max_qs": self.avg_max_qs.copy(),
             "game_scores": self.game_scores.copy(),
             "episode_lines_cleared": self.episode_lines_cleared.copy(),

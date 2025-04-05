@@ -1,10 +1,12 @@
 # File: training/__init__.py
 from .trainer import Trainer
-from .experience_collector import ExperienceCollector
+from .rollout_collector import RolloutCollector
+from .rollout_storage import RolloutStorage
 from .checkpoint_manager import CheckpointManager
 
 __all__ = [
     "Trainer",
-    "ExperienceCollector",
+    "RolloutCollector",
+    "RolloutStorage",
     "CheckpointManager",
 ]

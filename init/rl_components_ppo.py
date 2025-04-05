@@ -1,37 +1,32 @@
-# File: init/rl_components.py
+# File: init/rl_components_ppo.py
 import sys
 import traceback
 import numpy as np
 import torch
 from typing import List, Tuple, Optional, Dict, Any, Callable
 
-# Import configurations
 from config import (
     EnvConfig,
-    DQNConfig,
+    PPOConfig,
+    RNNConfig,
     TrainConfig,
-    BufferConfig,
     ModelConfig,
     StatsConfig,
     RewardConfig,
     TensorBoardConfig,
     DEVICE,
-    BUFFER_SAVE_PATH,
     MODEL_SAVE_PATH,
     get_config_dict,
 )
 
-# Import core components
 try:
     from environment.game_state import GameState, StateType
 except ImportError as e:
     print(f"Error importing environment: {e}")
     sys.exit(1)
-from agent.dqn_agent import DQNAgent
-from agent.replay_buffer.base_buffer import ReplayBufferBase
-from agent.replay_buffer.buffer_utils import create_replay_buffer
-from training.trainer import Trainer
 
+from agent.ppo_agent import PPOAgent
+from training.trainer import Trainer
 from stats.stats_recorder import StatsRecorderBase
 from stats.aggregator import StatsAggregator
 from stats.simple_stats_recorder import SimpleStatsRecorder
@@ -39,9 +34,11 @@ from stats.tensorboard_logger import TensorBoardStatsRecorder
 
 
 def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
+    """Initializes the specified number of game environments."""
     print(f"Initializing {num_envs} game environments...")
     try:
         envs = [GameState() for _ in range(num_envs)]
+        # Basic validation on the first environment
         s_test_dict = envs[0].reset()
 
         if not isinstance(s_test_dict, dict):
@@ -75,6 +72,7 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
             )
         print(f"Initial shape state shape check PASSED: {shape_state.shape}")
 
+        # Test step with a valid action if available
         valid_acts_init = envs[0].valid_actions()
         if valid_acts_init:
             _, _ = envs[0].step(valid_acts_init[0])
@@ -91,104 +89,113 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
         raise e
 
 
-def initialize_agent_buffer(
+def initialize_agent(
     model_config: ModelConfig,
-    dqn_config: DQNConfig,
+    ppo_config: PPOConfig,
+    rnn_config: RNNConfig,
     env_config: EnvConfig,
-    buffer_config: BufferConfig,
-) -> Tuple[DQNAgent, ReplayBufferBase]:
-    print("Initializing Agent and Buffer...")
-    agent = DQNAgent(
-        config=model_config,
-        dqn_config=dqn_config,
+) -> PPOAgent:
+    """Initializes the PPO Agent."""
+    print("Initializing PPO Agent...")
+    agent = PPOAgent(
+        model_config=model_config,
+        ppo_config=ppo_config,
+        rnn_config=rnn_config,
         env_config=env_config,
-        buffer_config=buffer_config,
     )
-    buffer = create_replay_buffer(config=buffer_config, dqn_config=dqn_config)
-    print("Agent and Initial Buffer structure initialized.")
-    return agent, buffer
+    print("PPO Agent initialized.")
+    return agent
 
 
+# --- MODIFIED: Added is_reinit flag ---
 def initialize_stats_recorder(
     stats_config: StatsConfig,
     tb_config: TensorBoardConfig,
     config_dict: Dict[str, Any],
-    agent: Optional[DQNAgent],
+    agent: Optional[PPOAgent],
     env_config: EnvConfig,
+    rnn_config: RNNConfig,
+    is_reinit: bool = False,  # Added flag
 ) -> StatsRecorderBase:
-    print(f"Initializing Statistics Components...")
-    # --- MODIFIED: Use avg_windows keyword argument ---
+    """Initializes the statistics recording components."""
+    print(f"Initializing Statistics Components... Re-init: {is_reinit}")
     stats_aggregator = StatsAggregator(
-        avg_windows=stats_config.STATS_AVG_WINDOW,  # Changed from avg_window
+        avg_windows=stats_config.STATS_AVG_WINDOW,
         plot_window=stats_config.PLOT_DATA_WINDOW,
     )
-    # --- END MODIFIED ---
     console_recorder = SimpleStatsRecorder(
         aggregator=stats_aggregator,
         console_log_interval=stats_config.CONSOLE_LOG_FREQ,
     )
 
-    dummy_grid_cpu, dummy_shapes_cpu, model_for_graph_cpu = None, None, None
-    if agent and agent.online_net:
+    model_for_graph_cpu = None
+    dummy_input_tuple = None
+
+    # --- MODIFIED: Only prepare graph model/input on initial setup ---
+    if not is_reinit and agent and agent.network:
+        print("[Stats Init] Preparing model copy and dummy input for graph...")
         try:
+            # Prepare dummy input on CPU
             expected_grid_shape = env_config.GRID_STATE_SHAPE
             dummy_grid_np = np.zeros(expected_grid_shape, dtype=np.float32)
-            dummy_shapes_np = np.zeros(
-                (env_config.NUM_SHAPE_SLOTS, env_config.SHAPE_FEATURES_PER_SHAPE),
-                dtype=np.float32,
+            dummy_shapes_np = np.zeros(env_config.SHAPE_STATE_DIM, dtype=np.float32)
+            # Add batch and sequence dimensions if RNN is used (B=1, T=1)
+            batch_dim = 1
+            seq_dim = 1 if rnn_config.USE_RNN else 0
+            grid_dims = ([batch_dim, seq_dim] if seq_dim else [batch_dim]) + list(
+                expected_grid_shape
             )
-            dummy_grid_cpu = torch.tensor(dummy_grid_np, device="cpu").unsqueeze(0)
-            dummy_shapes_cpu = torch.tensor(dummy_shapes_np, device="cpu").unsqueeze(0)
+            shape_dims = ([batch_dim, seq_dim] if seq_dim else [batch_dim]) + [
+                env_config.SHAPE_STATE_DIM
+            ]
 
-            if not hasattr(agent, "dqn_config") or not hasattr(
-                agent.online_net, "config"
-            ):
-                raise AttributeError(
-                    "Agent or network missing required config attributes."
-                )
+            dummy_grid_cpu = torch.tensor(dummy_grid_np).reshape(grid_dims).to("cpu")
+            dummy_shapes_cpu = (
+                torch.tensor(dummy_shapes_np).reshape(shape_dims).to("cpu")
+            )
 
-            model_for_graph_cpu = type(agent.online_net)(
+            # Create a copy of the network on CPU for graph tracing
+            # Ensure the network type is correctly inferred or passed
+            model_for_graph_cpu = type(agent.network)(
                 env_config=env_config,
                 action_dim=env_config.ACTION_DIM,
-                model_config=agent.online_net.config,
-                dqn_config=agent.dqn_config,
-                dueling=agent.online_net.dueling,
-                use_noisy=agent.online_net.use_noisy,
+                model_config=agent.network.config,  # Access config from the agent's network instance
+                rnn_config=rnn_config,
             ).to("cpu")
 
-            model_for_graph_cpu.load_state_dict(agent.online_net.state_dict())
+            model_for_graph_cpu.load_state_dict(agent.network.state_dict())
             model_for_graph_cpu.eval()
+
+            # Prepare dummy input tuple (grid, shapes) - hidden state is optional for graph
+            dummy_input_tuple = (dummy_grid_cpu, dummy_shapes_cpu)
+
             print("[Stats Init] Prepared model copy and dummy input on CPU for graph.")
         except Exception as e:
             print(f"Warning: Failed to prepare model/input for graph logging: {e}")
             traceback.print_exc()
-            dummy_grid_cpu, dummy_shapes_cpu, model_for_graph_cpu = None, None, None
+            model_for_graph_cpu, dummy_input_tuple = None, None
+    elif is_reinit:
+        print("[Stats Init] Skipping graph model preparation during re-initialization.")
+    # --- END MODIFIED ---
 
     print(f"Using TensorBoard Logger (Log Dir: {tb_config.LOG_DIR})")
     try:
-        dummy_input_tuple = (
-            (dummy_grid_cpu, dummy_shapes_cpu)
-            if dummy_grid_cpu is not None and dummy_shapes_cpu is not None
-            else None
-        )
+        # Pass potentially None model/input to constructor
         tb_recorder = TensorBoardStatsRecorder(
             aggregator=stats_aggregator,
             console_recorder=console_recorder,
             log_dir=tb_config.LOG_DIR,
-            hparam_dict=config_dict,
-            model_for_graph=model_for_graph_cpu,
-            dummy_input_for_graph=dummy_input_tuple,
+            hparam_dict=config_dict if not is_reinit else None,  # Log hparams only once
+            model_for_graph=model_for_graph_cpu,  # Will be None if is_reinit
+            dummy_input_for_graph=dummy_input_tuple,  # Will be None if is_reinit
             histogram_log_interval=(
                 tb_config.HISTOGRAM_LOG_FREQ if tb_config.LOG_HISTOGRAMS else -1
             ),
             image_log_interval=(
                 tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1
             ),
-            shape_q_log_interval=(
-                tb_config.SHAPE_Q_LOG_FREQ
-                if tb_config.LOG_SHAPE_PLACEMENT_Q_VALUES
-                else -1
-            ),
+            env_config=env_config,
+            rnn_config=rnn_config,
         )
         print("Statistics Components initialized successfully.")
         return tb_recorder
@@ -198,32 +205,32 @@ def initialize_stats_recorder(
         raise e
 
 
+# --- END MODIFIED ---
+
+
 def initialize_trainer(
     envs: List[GameState],
-    agent: DQNAgent,
-    buffer: ReplayBufferBase,
+    agent: PPOAgent,
     stats_recorder: StatsRecorderBase,
     env_config: EnvConfig,
-    dqn_config: DQNConfig,
+    ppo_config: PPOConfig,
+    rnn_config: RNNConfig,
     train_config: TrainConfig,
-    buffer_config: BufferConfig,
     model_config: ModelConfig,
 ) -> Trainer:
-    print("Initializing Trainer...")
+    """Initializes the PPO Trainer."""
+    print("Initializing PPO Trainer...")
     trainer = Trainer(
         envs=envs,
         agent=agent,
-        buffer=buffer,
         stats_recorder=stats_recorder,
         env_config=env_config,
-        dqn_config=dqn_config,
+        ppo_config=ppo_config,
+        rnn_config=rnn_config,
         train_config=train_config,
-        buffer_config=buffer_config,
         model_config=model_config,
         model_save_path=MODEL_SAVE_PATH,
-        buffer_save_path=BUFFER_SAVE_PATH,
         load_checkpoint_path=train_config.LOAD_CHECKPOINT_PATH,
-        load_buffer_path=train_config.LOAD_BUFFER_PATH,
     )
-    print("Trainer initialization finished.")
+    print("PPO Trainer initialization finished.")
     return trainer

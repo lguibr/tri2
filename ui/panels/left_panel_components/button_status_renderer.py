@@ -31,7 +31,7 @@ class ButtonStatusRenderer:
         y_start: int,
         panel_width: int,
         app_state: str,
-        is_training: bool,
+        is_running: bool,  # Renamed from is_training
         status: str,
     ) -> Tuple[int, Dict[str, pygame.Rect], Optional[pygame.Rect]]:
         """Renders buttons and status. Returns next_y, stat_rects, notification_rect."""
@@ -40,19 +40,21 @@ class ButtonStatusRenderer:
         next_y = y_start
 
         if app_state == "MainMenu":
-            train_btn_rect = pygame.Rect(10, y_start, 100, 40)
-            cleanup_btn_rect = pygame.Rect(train_btn_rect.right + 10, y_start, 160, 40)
+            run_btn_rect = pygame.Rect(10, y_start, 100, 40)  # Renamed
+            cleanup_btn_rect = pygame.Rect(run_btn_rect.right + 10, y_start, 160, 40)
             demo_btn_rect = pygame.Rect(cleanup_btn_rect.right + 10, y_start, 120, 40)
 
             self._draw_button(
-                train_btn_rect,
-                "Pause" if is_training and status == "Training" else "Train",
+                run_btn_rect,  # Use run_btn_rect
+                (
+                    "Stop" if is_running and status == "Training" else "Run"
+                ),  # Updated text
                 (70, 70, 70),
             )
             self._draw_button(cleanup_btn_rect, "Cleanup This Run", (100, 40, 40))
             self._draw_button(demo_btn_rect, "Play Demo", (40, 100, 40))
 
-            stat_rects["Train Button"] = train_btn_rect
+            stat_rects["Run Button"] = run_btn_rect  # Renamed key
             stat_rects["Cleanup Button"] = cleanup_btn_rect
             stat_rects["Play Demo Button"] = demo_btn_rect
 
@@ -66,7 +68,7 @@ class ButtonStatusRenderer:
                     notification_x, y_start, notification_w, notification_h
                 )
 
-            next_y = train_btn_rect.bottom + 10
+            next_y = run_btn_rect.bottom + 10  # Use run_btn_rect
         # --- Status Text ---
         status_text = f"Status: {status}"
         if app_state == "Playing":

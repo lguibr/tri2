@@ -88,17 +88,11 @@ class Grid:
                     tri.is_occupied = True
                     tri.color = shp.color
 
-    # --- MODIFIED: clear_filled_rows returns coords ---
     def clear_filled_rows(self) -> Tuple[int, int, List[Tuple[int, int]]]:
-        """
-        Clears fully occupied rows (ignoring death cells) by marking triangles as
-        unoccupied. Does NOT apply gravity.
-        Returns: (lines cleared, triangles cleared, list of (r, c) coords cleared).
-        """
         lines_cleared = 0
         triangles_cleared = 0
         rows_to_clear_indices = []
-        cleared_triangles_coords: List[Tuple[int, int]] = []  # Store coords here
+        cleared_triangles_coords: List[Tuple[int, int]] = []
 
         for r in range(self.rows):
             if not (0 <= r < len(self.triangles)):
@@ -125,11 +119,36 @@ class Grid:
                     triangles_cleared += 1
                     t.is_occupied = False
                     t.color = None
-                    cleared_triangles_coords.append((r_idx, t.col))  # Add coords
+                    cleared_triangles_coords.append((r_idx, t.col))
 
         return lines_cleared, triangles_cleared, cleared_triangles_coords
 
-    # --- END MODIFIED ---
+    def get_column_heights(self) -> List[int]:
+        heights = [0] * self.cols
+        for c in range(self.cols):
+            for r in range(self.rows - 1, -1, -1):
+                if (
+                    0 <= r < len(self.triangles)
+                    and 0 <= c < len(self.triangles[r])
+                    and self.triangles[r][c].is_occupied
+                    and not self.triangles[r][c].is_death
+                ):
+                    heights[c] = r + 1
+                    break
+        return heights
+
+    def get_max_height(self) -> int:
+        """Calculates the highest occupied row index (0-based) + 1."""
+        heights = self.get_column_heights()
+        return max(heights) if heights else 0
+
+    def get_bumpiness(self) -> int:
+        """Calculates the sum of absolute height differences between adjacent columns."""
+        heights = self.get_column_heights()
+        bumpiness = 0
+        for i in range(len(heights) - 1):
+            bumpiness += abs(heights[i] - heights[i + 1])
+        return bumpiness
 
     def count_holes(self) -> int:
         holes = 0

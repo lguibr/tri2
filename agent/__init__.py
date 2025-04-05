@@ -1,12 +1,10 @@
 # File: agent/__init__.py
-from .dqn_agent import DQNAgent
-from .action_selector import ActionSelector
-from .loss_calculator import LossCalculator
+from .ppo_agent import PPOAgent
 from .model_factory import create_network
+from agent.networks.agent_network import ActorCriticNetwork
 
 __all__ = [
-    "DQNAgent",
-    "ActionSelector",
-    "LossCalculator",
+    "PPOAgent",
     "create_network",
+    "ActorCriticNetwork",
 ]
