@@ -9,7 +9,7 @@ from .core import (
     StatsConfig,
     TensorBoardConfig,
     VisConfig,
-    DemoConfig,  # Added DemoConfig just in case for future validation
+    DemoConfig,
 )
 from .general import (
     RUN_ID,
@@ -23,9 +23,7 @@ from .general import (
 
 
 def print_config_info_and_validate():
-    # --- MODIFIED: Instantiate EnvConfig ---
     env_config_instance = EnvConfig()
-    # --- END MODIFIED ---
 
     print("-" * 70)
     print(f"RUN ID: {RUN_ID}")
@@ -35,11 +33,9 @@ def print_config_info_and_validate():
     print(
         f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
         f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}, "
-        f"ShapeQs={'ON' if TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES else 'OFF'}"  # Added ShapeQ log status
+        f"ShapeQs={'ON' if TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES else 'OFF'}"
     )
-    # --- MODIFIED: Check GRID_FEATURES_PER_CELL on instance ---
-    if env_config_instance.GRID_FEATURES_PER_CELL != 2:  # Check against 2 now
-        # --- END MODIFIED ---
+    if env_config_instance.GRID_FEATURES_PER_CELL != 2:
         print(
             f"Warning: Network expects {EnvConfig.GRID_FEATURES_PER_CELL} features per cell (Occupied, Is_Up)."
             f" Config has: {env_config_instance.GRID_FEATURES_PER_CELL}"
@@ -73,38 +69,31 @@ def print_config_info_and_validate():
         )
         + " ---"
     )
-    # --- MODIFIED: Print state shapes and action dim from instance ---
     print(
         f"Config: Env=(R={env_config_instance.ROWS}, C={env_config_instance.COLS}), "
         f"GridState={env_config_instance.GRID_STATE_SHAPE}, "
         f"ShapeState={env_config_instance.SHAPE_STATE_DIM}, "
         f"ActionDim={env_config_instance.ACTION_DIM}"
     )
-    # --- END MODIFIED ---
     cnn_str = str(ModelConfig.Network.CONV_CHANNELS).replace(" ", "")
     mlp_str = str(ModelConfig.Network.COMBINED_FC_DIMS).replace(" ", "")
-    # --- MODIFIED: Print shape MLP dims from config ---
     shape_mlp_cfg_str = str(ModelConfig.Network.SHAPE_FEATURE_MLP_DIMS).replace(" ", "")
-    # --- MODIFIED: Removed ShapeEmb ---
     print(
         f"Network: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}, Dueling={DQNConfig.USE_DUELING}"
     )
-    # --- END MODIFIED ---
 
-    # --- MODIFIED: Access NUM_ENVS from instance ---
     print(
         f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M, BUFFER={BufferConfig.REPLAY_BUFFER_SIZE/1e6:.1f}M, BATCH={TrainConfig.BATCH_SIZE}, LEARN_START={TrainConfig.LEARN_START_STEP/1e3:.1f}k"
     )
-    # --- END MODIFIED ---
     print(
         f"Buffer: PER={BufferConfig.USE_PER}, N-Step={BufferConfig.N_STEP if BufferConfig.USE_N_STEP else 'N/A'}"
     )
+    # --- MODIFIED: Print list of window sizes ---
     print(
-        f"Stats: AVG_WINDOW={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ}"
+        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ}"
     )
-    # --- MODIFIED: Access NUM_ENVS from instance ---
+    # --- END MODIFIED ---
     if env_config_instance.NUM_ENVS >= 1024:
-        # --- END MODIFIED ---
         print(
             "*" * 70
             + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. Monitor system resources. ***"
@@ -116,9 +105,7 @@ def print_config_info_and_validate():
             + "\n"
             + "*" * 70
         )
-    # --- MODIFIED: Access NUM_ENVS from instance ---
     print(
         f"--- Rendering {VisConfig.NUM_ENVS_TO_RENDER if VisConfig.NUM_ENVS_TO_RENDER > 0 else 'ALL'} of {env_config_instance.NUM_ENVS} environments ---"
     )
-    # --- END MODIFIED ---
     print("-" * 70)

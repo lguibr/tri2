@@ -1,5 +1,4 @@
 # File: config/core.py
-# --- Core Configuration Classes ---
 import torch
 from typing import Deque, Dict, Any, List, Type, Tuple, Optional
 
@@ -8,10 +7,11 @@ from .general import TOTAL_TRAINING_STEPS
 
 # --- Visualization (Pygame) ---
 class VisConfig:
+    NUM_ENVS_TO_RENDER = 9
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
-    VISUAL_STEP_DELAY = 0
-    LEFT_PANEL_WIDTH = SCREEN_WIDTH // 2
+    VISUAL_STEP_DELAY = 0.005
+    LEFT_PANEL_WIDTH = (SCREEN_WIDTH // 4) * 3
     ENV_SPACING = 1
     ENV_GRID_PADDING = 1
     FPS = 0
@@ -20,17 +20,18 @@ class VisConfig:
     LIGHTG = (140, 140, 140)
     GRAY = (50, 50, 50)
     RED = (255, 50, 50)
+    DARK_RED = (80, 10, 10)
     BLUE = (50, 50, 255)
     YELLOW = (255, 255, 100)
     GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
-    NUM_ENVS_TO_RENDER = 48
     LINE_CLEAR_FLASH_COLOR = (180, 180, 220)
     LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)
+    GAME_OVER_FLASH_COLOR = (255, 0, 0)  # Bright Red
 
 
 # --- Environment ---
 class EnvConfig:
-    NUM_ENVS = 256
+    NUM_ENVS = 4096
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2  # Occupied, Is_Up
@@ -52,15 +53,14 @@ class EnvConfig:
 
 # --- Reward Shaping (RL Reward) ---
 class RewardConfig:
-    REWARD_PLACE_PER_TRI = 0.0  # Base reward for placing a piece (can be 0)
+    REWARD_PLACE_PER_TRI = 0.0
     REWARD_CLEAR_1 = 1.0
     REWARD_CLEAR_2 = 3.0
     REWARD_CLEAR_3PLUS = 6.0
     PENALTY_INVALID_MOVE = -0.1
     PENALTY_HOLE_PER_HOLE = -0.05
     PENALTY_GAME_OVER = -1.0
-    # --- MODIFIED: Add small survival reward ---
-    REWARD_ALIVE_STEP = 0.001  # Small positive reward for making a valid move
+    REWARD_ALIVE_STEP = 0.001
 
 
 # --- DQN Algorithm ---
@@ -96,7 +96,7 @@ class TrainConfig:
 class BufferConfig:
     REPLAY_BUFFER_SIZE = 200_000
     USE_N_STEP = True
-    N_STEP = 3
+    N_STEP = 6
     USE_PER = True
     PER_ALPHA = 0.6
     PER_BETA_START = 0.4
@@ -127,7 +127,7 @@ class ModelConfig:
 
 # --- Statistics and Logging ---
 class StatsConfig:
-    STATS_AVG_WINDOW = 1000
+    STATS_AVG_WINDOW: List[int] = [10, 100, 1_000, 10_000]
     CONSOLE_LOG_FREQ = 5_000
     PLOT_DATA_WINDOW = 100_000
 
@@ -146,9 +146,7 @@ class TensorBoardConfig:
 # --- Demo Mode Visuals ---
 class DemoConfig:
     BACKGROUND_COLOR = (10, 10, 20)
-    PREVIEW_COLOR = (200, 200, 200, 100)
-    INVALID_PREVIEW_COLOR = (255, 0, 0, 100)
-    SELECTED_SHAPE_HIGHLIGHT_COLOR = VisConfig.YELLOW
+    SELECTED_SHAPE_HIGHLIGHT_COLOR = VisConfig.BLUE
     HUD_FONT_SIZE = 24
     HELP_FONT_SIZE = 18
     HELP_TEXT = "[Arrows]=Move | [Q/E]=Cycle Shape | [Space]=Place | [ESC]=Exit"

@@ -8,7 +8,6 @@ import time
 import warnings
 from io import BytesIO
 
-# Ensure Agg backend is used before importing pyplot
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -16,7 +15,7 @@ from config import VisConfig, BufferConfig, StatsConfig, DQNConfig
 from .plot_utils import (
     render_single_plot,
     normalize_color_for_matplotlib,
-)  # Import helper
+)
 
 
 class Plotter:
@@ -25,32 +24,39 @@ class Plotter:
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        self.plot_update_interval: float = 1.0  # Update plot every second
-        self.rolling_window_size = StatsConfig.STATS_AVG_WINDOW
+        self.plot_update_interval: float = 1.0
+        self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
         self.default_line_width = 1.0
         self.avg_line_width = 1.5
-        self.avg_line_alpha = 0.7
+        self.avg_line_alpha = 0.8  # Slightly increased alpha for averages
 
-        # Define colors once
+        # Define base colors
         self.colors = {
             "rl_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
             "game_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[1]),
             "loss": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[3]),
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
             "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
-            "best_game": normalize_color_for_matplotlib((255, 165, 0)),
-            "lr": normalize_color_for_matplotlib((255, 0, 255)),
+            "best_game": normalize_color_for_matplotlib((255, 165, 0)),  # Orange
+            "lr": normalize_color_for_matplotlib((255, 0, 255)),  # Magenta
             "buffer": normalize_color_for_matplotlib(VisConfig.RED),
-            "beta": normalize_color_for_matplotlib((100, 100, 255)),
-            "avg": normalize_color_for_matplotlib(VisConfig.YELLOW),
+            "beta": normalize_color_for_matplotlib((100, 100, 255)),  # Light Blue
+            "avg_primary": normalize_color_for_matplotlib(VisConfig.YELLOW),
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
+        # --- NEW: Define colors for secondary average lines ---
+        self.avg_line_colors_secondary = [
+            normalize_color_for_matplotlib((0, 255, 255)),  # Cyan
+            normalize_color_for_matplotlib((255, 165, 0)),  # Orange
+            normalize_color_for_matplotlib((0, 255, 0)),  # Lime Green
+            normalize_color_for_matplotlib((255, 0, 255)),  # Magenta
+        ]
+        # --- END NEW ---
 
     def create_plot_surface(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Creates the Matplotlib figure and renders subplots."""
         if target_width <= 10 or target_height <= 10 or not plot_data:
             return None
 
@@ -93,14 +99,15 @@ class Plotter:
                 max_len = max((len(d) for d in data_lists.values() if d), default=0)
                 plot_window_label = f"Latest {min(self.plot_data_window, max_len)} Pts"
 
-                # --- Render Subplots using Helper ---
+                # --- MODIFIED: Pass primary and secondary avg colors ---
                 render_single_plot(
                     axes_flat[0],
                     data_lists["episode_scores"],
                     "RL Score",
                     self.colors["rl_score"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],  # Primary avg color
+                    self.avg_line_colors_secondary,  # Secondary avg colors
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -111,8 +118,9 @@ class Plotter:
                     data_lists["game_scores"],
                     "Game Score",
                     self.colors["game_score"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -123,8 +131,9 @@ class Plotter:
                     data_lists["losses"],
                     "Loss",
                     self.colors["loss"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     show_placeholder=True,
                     placeholder_text="Loss data after Learn Start",
@@ -137,8 +146,9 @@ class Plotter:
                     data_lists["episode_lengths"],
                     "Ep Length",
                     self.colors["len"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -149,8 +159,9 @@ class Plotter:
                     data_lists["best_game_score_history"],
                     "Best Game Score",
                     self.colors["best_game"],
-                    None,
-                    self.rolling_window_size,
+                    None,  # No average
+                    [],  # No average
+                    [],  # No average
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -161,8 +172,9 @@ class Plotter:
                     data_lists["sps_values"],
                     "Steps/Sec",
                     self.colors["sps"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -173,8 +185,9 @@ class Plotter:
                     data_lists["lr_values"],
                     "Learning Rate",
                     self.colors["lr"],
-                    None,
-                    self.rolling_window_size,
+                    None,  # No average
+                    [],  # No average
+                    [],  # No average
                     xlabel=plot_window_label,
                     y_log_scale=True,
                     default_line_width=self.default_line_width,
@@ -190,8 +203,9 @@ class Plotter:
                     buffer_fill_percent,
                     "Buffer Fill %",
                     self.colors["buffer"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -203,8 +217,9 @@ class Plotter:
                         data_lists["beta_values"],
                         "PER Beta",
                         self.colors["beta"],
-                        self.colors["avg"],
-                        self.rolling_window_size,
+                        self.colors["avg_primary"],
+                        self.avg_line_colors_secondary,
+                        self.rolling_window_sizes,
                         xlabel=plot_window_label,
                         default_line_width=self.default_line_width,
                         avg_line_width=self.avg_line_width,
@@ -223,7 +238,7 @@ class Plotter:
                     )
                     axes_flat[8].set_yticks([])
                     axes_flat[8].set_xticks([])
-                # --- End Subplot Rendering ---
+                # --- END MODIFIED ---
 
                 for ax in axes_flat:
                     ax.tick_params(axis="x", rotation=0)
@@ -262,7 +277,6 @@ class Plotter:
     def get_cached_or_updated_plot(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Returns the cached plot surface or generates a new one if needed."""
         current_time = time.time()
         has_data = any(plot_data.values())
         needs_update_time = (

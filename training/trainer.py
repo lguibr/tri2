@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import traceback
 import random
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 from config import (
     EnvConfig,
@@ -18,11 +18,21 @@ from config import (
     RewardConfig,
     TOTAL_TRAINING_STEPS,
 )
-from environment.game_state import GameState
+
+# --- MODIFIED: Import GameState directly for type hinting ---
+from environment.game_state import GameState, StateType
+
+# --- END MODIFIED ---
 from agent.dqn_agent import DQNAgent
 from agent.replay_buffer.base_buffer import ReplayBufferBase
 from stats.stats_recorder import StatsRecorderBase
 from utils.helpers import ensure_numpy
+from utils.types import (
+    PrioritizedNumpyBatch,
+    PrioritizedNumpyNStepBatch,
+    NumpyBatch,
+    NumpyNStepBatch,
+)
 from .experience_collector import ExperienceCollector
 from .checkpoint_manager import CheckpointManager
 from .training_utils import get_env_image_as_numpy
@@ -33,7 +43,7 @@ class Trainer:
 
     def __init__(
         self,
-        envs: List[GameState],
+        envs: List[GameState],  # Keep GameState type hint
         agent: DQNAgent,
         buffer: ReplayBufferBase,
         stats_recorder: StatsRecorderBase,
@@ -51,7 +61,9 @@ class Trainer:
         self.envs = envs
         self.agent = agent
         self.stats_recorder = stats_recorder
-        self.num_envs = env_config.NUM_ENVS
+        # --- MODIFIED: num_envs is max, collector tracks active ---
+        self.max_num_envs = env_config.NUM_ENVS
+        # --- END MODIFIED ---
         self.device = DEVICE
         self.env_config = env_config
         self.dqn_config = dqn_config
@@ -62,44 +74,45 @@ class Trainer:
         self.tb_config = TensorBoardConfig()
         self.vis_config = VisConfig()
 
-        # --- Initialize Checkpoint Manager (handles buffer creation/loading) ---
         self.checkpoint_manager = CheckpointManager(
             agent=self.agent,
-            buffer=buffer,  # Pass initial (potentially empty) buffer reference
+            buffer=buffer,
             model_save_path=model_save_path,
             buffer_save_path=buffer_save_path,
             load_checkpoint_path=load_checkpoint_path,
             load_buffer_path=load_buffer_path,
-            buffer_config=self.buffer_config,  # Pass config for potential recreation
-            dqn_config=self.dqn_config,  # Pass config for potential recreation
+            buffer_config=self.buffer_config,
+            dqn_config=self.dqn_config,
             device=self.device,
         )
-        # --- Get potentially loaded/recreated buffer and state ---
         self.buffer = self.checkpoint_manager.get_buffer()
         self.global_step, initial_episode_count = (
             self.checkpoint_manager.get_initial_state()
         )
-        # --- End Checkpoint Manager Init ---
 
         self.experience_collector = ExperienceCollector(
             envs=self.envs,
             agent=self.agent,
-            buffer=self.buffer,  # Use the potentially loaded buffer
+            buffer=self.buffer,
             stats_recorder=self.stats_recorder,
             env_config=self.env_config,
             reward_config=self.reward_config,
             tb_config=self.tb_config,
         )
+        # Initialize collector's episode count from checkpoint if loaded
         self.experience_collector.episode_count = initial_episode_count
 
         self.last_image_log_step = -self.tb_config.IMAGE_LOG_FREQ
+        self.is_n_step_buffer = (
+            self.buffer_config.USE_N_STEP and self.buffer_config.N_STEP > 1
+        )
 
         self._log_initial_state()
         print("[Trainer] Initialization complete.")
 
     def _log_initial_state(self):
         """Logs the state after initialization and potential loading."""
-        initial_beta = self._update_beta()  # Calculate and set initial beta
+        initial_beta = self._update_beta()
         initial_lr = self._get_current_lr()
         self.stats_recorder.record_step(
             {
@@ -126,138 +139,145 @@ class Trainer:
         """Performs one full step: collect experience, train, update target net."""
         step_start_time = time.perf_counter()
 
+        # --- MODIFIED: Use steps_collected from collector ---
         steps_collected = self.experience_collector.collect(self.global_step)
-        self.global_step += steps_collected
+        if steps_collected == 0:  # Handle case where no envs are active yet
+            time.sleep(0.01)  # Small sleep to prevent busy-waiting
+            return
 
-        # --- Training Step ---
+        step_before_collection = self.global_step
+        self.global_step += steps_collected
+        # --- END MODIFIED ---
+
         if (
             self.global_step >= self.train_config.LEARN_START_STEP
             and self.global_step % self.train_config.LEARN_FREQ == 0
         ):
             if len(self.buffer) >= self.train_config.BATCH_SIZE:
-                self._train_batch()  # Now handles PER logic internally
-        # --- End Training Step ---
+                self._train_batch()
 
         step_end_time = time.perf_counter()
         step_duration = step_end_time - step_start_time
 
-        # Record step time for SPS calculation
         self.stats_recorder.record_step(
             {
                 "step_time": step_duration,
-                "num_steps_processed": steps_collected,
-                "global_step": self.global_step,  # Pass current step
+                "num_steps_processed": steps_collected,  # Log actual steps processed
+                "global_step": self.global_step,
             }
         )
 
-        # --- Target Network Update ---
         target_freq = self.dqn_config.TARGET_UPDATE_FREQ
         if target_freq > 0 and self.global_step > 0:
-            # Check if the update step boundary was crossed in this iteration
-            steps_before_this_iter = self.global_step - steps_collected
-            if steps_before_this_iter // target_freq < self.global_step // target_freq:
+            # --- MODIFIED: Use step_before_collection for comparison ---
+            if step_before_collection // target_freq < self.global_step // target_freq:
+                # --- END MODIFIED ---
                 print(f"[Trainer] Updating target network at step {self.global_step}")
                 self.agent.update_target_network()
-        # --- End Target Network Update ---
 
-        self.maybe_save_checkpoint()
+        self.maybe_save_checkpoint(
+            step_before_collection
+        )  # Pass previous step for freq check
         self._maybe_log_image()
 
     def _train_batch(self):
         """Samples a batch, computes loss, updates agent, and updates priorities (for PER)."""
-        beta = self._update_beta()  # Update beta *before* sampling
-        indices, is_weights_np, batch_tuple = None, None, None
-
+        beta = self._update_beta()
+        batch_sample = None
         try:
-            # --- MODIFIED: Handle PER sampling ---
-            if self.buffer_config.USE_PER:
-                sample_result = self.buffer.sample(self.train_config.BATCH_SIZE)
-                if sample_result:
-                    batch_tuple, indices, is_weights_np = sample_result
-                else:
-                    # print(f"[Trainer] Sample returned None (Buffer size: {len(self.buffer)}). Skipping training step.")
-                    return  # Skip if sampling fails
-            else:  # Uniform sampling
-                batch_tuple = self.buffer.sample(self.train_config.BATCH_SIZE)
-                if batch_tuple is None:
-                    # print(f"[Trainer] Sample returned None (Buffer size: {len(self.buffer)}). Skipping training step.")
-                    return
-            # --- END MODIFIED ---
+            batch_sample = self.buffer.sample(self.train_config.BATCH_SIZE)
+            if batch_sample is None:
+                # print(f"[Trainer] Buffer sample returned None (Size: {len(self.buffer)}). Skipping train step.")
+                return  # Not enough samples or other issue
         except Exception as e:
             print(f"ERROR sampling buffer: {e}")
             traceback.print_exc()
             return
 
+        # Unpack sample based on whether it's prioritized
+        indices, is_weights_np = None, None
+        if self.buffer_config.USE_PER:
+            if (
+                batch_sample
+                and isinstance(batch_sample, tuple)
+                and len(batch_sample) == 3
+            ):
+                batch_tuple, indices, is_weights_np = batch_sample
+            else:
+                print(
+                    f"Warning: Expected prioritized batch (tuple of 3), got {type(batch_sample)}. Skipping training step."
+                )
+                return
+        else:  # Uniform sampling
+            # Batch tuple is the whole sample for uniform (length 5 or 6)
+            if (
+                batch_sample
+                and isinstance(batch_sample, tuple)
+                and len(batch_sample) in [5, 6]
+            ):
+                batch_tuple = batch_sample
+            else:
+                print(
+                    f"Warning: Expected uniform batch (tuple of 5 or 6), got {type(batch_sample)}. Skipping training step."
+                )
+                return
+
         loss, td_errors = torch.tensor(0.0), None
         try:
-            # --- MODIFIED: Pass is_weights_np to compute_loss ---
-            loss, td_errors = self.agent.compute_loss(
-                batch_tuple,
-                self.buffer_config.USE_N_STEP,  # Pass whether N-step was used (determined by buffer)
-                is_weights_np,  # Pass IS weights (can be None for uniform)
-            )
-            # --- END MODIFIED ---
+            # Agent's compute_loss handles checking buffer_config for is_n_step
+            loss, td_errors = self.agent.compute_loss(batch_tuple, is_weights_np)
         except Exception as e:
             print(f"ERROR computing loss: {e}")
             traceback.print_exc()
-            return  # Skip update if loss calculation fails
+            return
 
         grad_norm = None
         try:
             grad_norm = self.agent.update(loss)
-            # Check if grad clipping failed (returned None)
             if grad_norm is None and self.dqn_config.GRADIENT_CLIP_NORM > 0:
-                print("[Trainer] Skipping agent update due to gradient clipping error.")
-                return
+                print("[Trainer] Skipping PER update due to gradient clipping error.")
+                return  # Skip PER update if agent update failed
         except Exception as e:
             print(f"ERROR updating agent: {e}")
             traceback.print_exc()
-            return  # Skip PER update if agent update fails
+            return
 
-        # --- MODIFIED: Update PER priorities ---
         if self.buffer_config.USE_PER and indices is not None and td_errors is not None:
             try:
-                # td_errors are already detached from compute_loss
                 td_errors_np = ensure_numpy(td_errors)
                 self.buffer.update_priorities(indices, td_errors_np)
             except Exception as e:
                 print(f"ERROR updating PER priorities: {e}")
                 traceback.print_exc()
-        # --- END MODIFIED ---
 
-        # --- Log training stats ---
         train_log_data = {
             "loss": loss.item(),
             "grad_norm": grad_norm if grad_norm is not None else 0.0,
             "avg_max_q": self.agent.get_last_avg_max_q(),
             "lr": self._get_current_lr(),
-            "global_step": self.global_step,  # Pass current step
+            "global_step": self.global_step,
         }
-        # Log TD errors histogram if enabled and available
         if self.tb_config.LOG_HISTOGRAMS and td_errors is not None:
-            train_log_data["batch_td_errors"] = td_errors  # Pass tensor for TB logging
+            train_log_data["batch_td_errors"] = (
+                td_errors.detach() if td_errors.requires_grad else td_errors
+            )
 
         self.stats_recorder.record_step(train_log_data)
-        # --- End logging ---
 
     def _update_beta(self) -> float:
         """Updates PER beta based on annealing schedule and sets it in the buffer."""
-        if not self.buffer_config.USE_PER:
-            beta = 1.0  # No beta needed for uniform
-        else:
+        beta = 1.0  # Default for uniform
+        if self.buffer_config.USE_PER:
             start, end, frames = (
                 self.buffer_config.PER_BETA_START,
                 1.0,
                 self.buffer_config.PER_BETA_FRAMES,
             )
-            # Calculate annealing fraction
             fraction = min(1.0, float(self.global_step) / max(1, frames))
             beta = start + fraction * (end - start)
-            # Set the calculated beta in the buffer
-            if hasattr(self.buffer, "set_beta"):
-                self.buffer.set_beta(beta)
+            self.buffer.set_beta(beta)  # Update buffer's beta
 
-        # Always record beta (even if 1.0 for uniform) for consistent logging
+        # Always record beta for consistency
         self.stats_recorder.record_step({"beta": beta, "global_step": self.global_step})
         return beta
 
@@ -272,12 +292,16 @@ class Trainer:
         steps_since_last = self.global_step - self.last_image_log_step
         if steps_since_last >= img_freq:
             try:
-                env_idx = random.randint(0, self.num_envs - 1)
+                # --- MODIFIED: Sample from active envs ---
+                num_currently_active = self.experience_collector.num_active_envs
+                if num_currently_active == 0:
+                    return
+                env_idx = random.randint(0, num_currently_active - 1)
+                # --- END MODIFIED ---
                 img_array = get_env_image_as_numpy(
                     self.envs[env_idx], self.env_config, self.vis_config
                 )
                 if img_array is not None:
-                    # Permute HWC to CHW for TensorBoard
                     img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)
                     self.stats_recorder.record_image(
                         f"Environment/Sample State Env {env_idx}",
@@ -287,25 +311,25 @@ class Trainer:
                     self.last_image_log_step = self.global_step
             except Exception as e:
                 print(f"Error logging environment image: {e}")
+                traceback.print_exc()
 
-    def maybe_save_checkpoint(self, force_save=False):
+    # --- MODIFIED: Pass previous step for frequency check ---
+    def maybe_save_checkpoint(self, step_before_collection: int, force_save=False):
+        # --- END MODIFIED ---
         """Saves agent and buffer state based on frequency or if forced."""
         save_freq = self.train_config.CHECKPOINT_SAVE_FREQ
         if save_freq <= 0 and not force_save:
             return
 
-        # Check if save frequency boundary is crossed
+        # --- MODIFIED: Use step_before_collection for frequency check ---
         should_save_freq = (
             save_freq > 0
             and self.global_step > 0
-            and (
-                self.global_step // save_freq
-                > (self.global_step - self.num_envs) // save_freq
-            )
+            and (step_before_collection // save_freq < self.global_step // save_freq)
         )
+        # --- END MODIFIED ---
 
         if force_save or should_save_freq:
-            # Delegate saving to CheckpointManager
             self.checkpoint_manager.save_checkpoint(
                 self.global_step, self.experience_collector.get_episode_count()
             )
@@ -323,26 +347,28 @@ class Trainer:
             traceback.print_exc()
         finally:
             print("[Trainer] Training loop finished or terminated.")
-            self.cleanup(save_final=True)  # Ensure cleanup saves final state
+            self.cleanup(save_final=True)
 
     def cleanup(self, save_final: bool = True):
         """Performs cleanup actions like saving final state and closing logger."""
         print("[Trainer] Cleaning up resources...")
         if save_final:
             print("[Trainer] Saving final checkpoint...")
-            # Ensure any pending N-step transitions are flushed before saving
             if hasattr(self.buffer, "flush_pending"):
                 print("[Trainer] Flushing pending buffer transitions...")
-                self.buffer.flush_pending()
+                try:
+                    self.buffer.flush_pending()
+                except Exception as flush_err:
+                    print(f"ERROR flushing buffer: {flush_err}")
+                    traceback.print_exc()
             self.checkpoint_manager.save_checkpoint(
                 self.global_step,
                 self.experience_collector.get_episode_count(),
-                is_final=True,  # Mark as final save
+                is_final=True,
             )
         else:
             print("[Trainer] Skipping final save as requested.")
 
-        # Close stats recorder (e.g., TensorBoard writer)
         if hasattr(self.stats_recorder, "close"):
             try:
                 self.stats_recorder.close()

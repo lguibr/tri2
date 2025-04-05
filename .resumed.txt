@@ -847,13 +847,10 @@ from agent.replay_buffer.base_buffer import ReplayBufferBase
 from agent.replay_buffer.buffer_utils import create_replay_buffer
 from training.trainer import Trainer
 
-# --- MODIFIED IMPORTS ---
 from stats.stats_recorder import StatsRecorderBase
 from stats.aggregator import StatsAggregator
 from stats.simple_stats_recorder import SimpleStatsRecorder
 from stats.tensorboard_logger import TensorBoardStatsRecorder
-
-# --- END MODIFIED ---
 
 
 def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
@@ -916,13 +913,17 @@ def initialize_agent_buffer(
     buffer_config: BufferConfig,
 ) -> Tuple[DQNAgent, ReplayBufferBase]:
     print("Initializing Agent and Buffer...")
-    agent = DQNAgent(config=model_config, dqn_config=dqn_config, env_config=env_config)
+    agent = DQNAgent(
+        config=model_config,
+        dqn_config=dqn_config,
+        env_config=env_config,
+        buffer_config=buffer_config,
+    )
     buffer = create_replay_buffer(config=buffer_config, dqn_config=dqn_config)
-    print("Agent and Buffer initialized.")
+    print("Agent and Initial Buffer structure initialized.")
     return agent, buffer
 
 
-# --- MODIFIED: initialize_stats_recorder ---
 def initialize_stats_recorder(
     stats_config: StatsConfig,
     tb_config: TensorBoardConfig,
@@ -930,28 +931,19 @@ def initialize_stats_recorder(
     agent: Optional[DQNAgent],
     env_config: EnvConfig,
 ) -> StatsRecorderBase:
-    """
-    Creates the StatsAggregator, SimpleStatsRecorder, and TensorBoardStatsRecorder.
-    Returns the final TensorBoardStatsRecorder instance.
-    """
     print(f"Initializing Statistics Components...")
-
-    # 1. Create the Aggregator
+    # --- MODIFIED: Use avg_windows keyword argument ---
     stats_aggregator = StatsAggregator(
-        avg_window=stats_config.STATS_AVG_WINDOW,
+        avg_windows=stats_config.STATS_AVG_WINDOW,  # Changed from avg_window
         plot_window=stats_config.PLOT_DATA_WINDOW,
     )
-
-    # 2. Create the Console Logger (uses the aggregator)
+    # --- END MODIFIED ---
     console_recorder = SimpleStatsRecorder(
         aggregator=stats_aggregator,
         console_log_interval=stats_config.CONSOLE_LOG_FREQ,
     )
 
-    # 3. Prepare for TensorBoard Logger (Graph, HParams)
-    dummy_grid_cpu = None
-    dummy_shapes_cpu = None
-    model_for_graph_cpu = None
+    dummy_grid_cpu, dummy_shapes_cpu, model_for_graph_cpu = None, None, None
     if agent and agent.online_net:
         try:
             expected_grid_shape = env_config.GRID_STATE_SHAPE
@@ -978,17 +970,15 @@ def initialize_stats_recorder(
                 dueling=agent.online_net.dueling,
                 use_noisy=agent.online_net.use_noisy,
             ).to("cpu")
+
             model_for_graph_cpu.load_state_dict(agent.online_net.state_dict())
             model_for_graph_cpu.eval()
             print("[Stats Init] Prepared model copy and dummy input on CPU for graph.")
         except Exception as e:
             print(f"Warning: Failed to prepare model/input for graph logging: {e}")
             traceback.print_exc()
-            dummy_grid_cpu = None
-            dummy_shapes_cpu = None
-            model_for_graph_cpu = None
+            dummy_grid_cpu, dummy_shapes_cpu, model_for_graph_cpu = None, None, None
 
-    # 4. Create the TensorBoard Logger (uses aggregator and console logger)
     print(f"Using TensorBoard Logger (Log Dir: {tb_config.LOG_DIR})")
     try:
         dummy_input_tuple = (
@@ -1016,21 +1006,18 @@ def initialize_stats_recorder(
             ),
         )
         print("Statistics Components initialized successfully.")
-        return tb_recorder  # Return the main recorder instance
+        return tb_recorder
     except Exception as e:
         print(f"FATAL: Error initializing TensorBoardStatsRecorder: {e}. Exiting.")
         traceback.print_exc()
         raise e
 
 
-# --- END MODIFIED ---
-
-
 def initialize_trainer(
     envs: List[GameState],
     agent: DQNAgent,
     buffer: ReplayBufferBase,
-    stats_recorder: StatsRecorderBase,  # This is now the TB recorder instance
+    stats_recorder: StatsRecorderBase,
     env_config: EnvConfig,
     dqn_config: DQNConfig,
     train_config: TrainConfig,
@@ -1210,7 +1197,7 @@ from typing import Optional, Tuple
 
 from config import VisConfig, EnvConfig, DemoConfig
 from environment.game_state import GameState
-from .panels.game_area import GameAreaRenderer  # Need this for grid rendering
+from .panels.game_area import GameAreaRenderer
 
 
 class DemoRenderer:
@@ -1226,13 +1213,17 @@ class DemoRenderer:
         self.screen = screen
         self.vis_config = vis_config
         self.demo_config = demo_config
-        self.game_area_renderer = (
-            game_area_renderer  # Use existing grid/shape render logic
-        )
+        self.game_area_renderer = game_area_renderer
         self._init_demo_fonts()
+        self.overlay_font = self.game_area_renderer.fonts.get("env_overlay")
+        if not self.overlay_font:
+            print("Warning: DemoRenderer could not get overlay font. Using default.")
+            self.overlay_font = pygame.font.Font(None, 36)
+        # --- NEW: Define invalid placement color ---
+        self.invalid_placement_color = (0, 0, 0, 150)  # Transparent Gray
+        # --- END NEW ---
 
     def _init_demo_fonts(self):
-        """Initialize fonts specific to demo mode."""
         try:
             self.demo_hud_font = pygame.font.SysFont(
                 None, self.demo_config.HUD_FONT_SIZE
@@ -1240,11 +1231,10 @@ class DemoRenderer:
             self.demo_help_font = pygame.font.SysFont(
                 None, self.demo_config.HELP_FONT_SIZE
             )
-            # Ensure the game_area_renderer fonts are also loaded if needed here
             if not hasattr(
                 self.game_area_renderer, "fonts"
             ) or not self.game_area_renderer.fonts.get("ui"):
-                self.game_area_renderer._init_fonts()  # Ensure base fonts are loaded
+                self.game_area_renderer._init_fonts()
         except Exception as e:
             print(f"Warning: SysFont error for demo fonts: {e}. Using default.")
             self.demo_hud_font = pygame.font.Font(None, self.demo_config.HUD_FONT_SIZE)
@@ -1253,13 +1243,13 @@ class DemoRenderer:
             )
 
     def render(self, demo_env: GameState, env_config: EnvConfig):
-        """Renders the single-player interactive demo mode. Does NOT flip display."""
         if not demo_env:
             print("Error: DemoRenderer called with demo_env=None")
-            # Optionally render an error message here
             return
 
-        self.screen.fill(self.demo_config.BACKGROUND_COLOR)
+        bg_color = self._determine_background_color(demo_env)
+        self.screen.fill(bg_color)
+
         sw, sh = self.screen.get_size()
         padding = 30
         hud_height = 60
@@ -1273,6 +1263,42 @@ class DemoRenderer:
             )
             return
 
+        game_rect, clipped_game_rect = self._calculate_game_area_rect(
+            sw, sh, padding, hud_height, help_height, env_config
+        )
+
+        if clipped_game_rect.width > 10 and clipped_game_rect.height > 10:
+            self._render_game_area(demo_env, env_config, clipped_game_rect, bg_color)
+        else:
+            self._render_too_small_message("Demo Area Too Small", clipped_game_rect)
+
+        self._render_shape_previews_area(demo_env, sw, clipped_game_rect, padding)
+        self._render_hud(demo_env, sw, game_rect.bottom + 10)
+        self._render_help_text(sw, sh)
+
+    def _determine_background_color(self, demo_env: GameState) -> Tuple[int, int, int]:
+        if demo_env.is_line_clearing():
+            return VisConfig.LINE_CLEAR_FLASH_COLOR
+        elif demo_env.is_game_over_flashing():
+            return VisConfig.GAME_OVER_FLASH_COLOR
+        elif demo_env.is_over():
+            return VisConfig.DARK_RED
+        elif demo_env.is_frozen():
+            return (30, 30, 100)
+        else:
+            return self.demo_config.BACKGROUND_COLOR
+
+    def _calculate_game_area_rect(
+        self,
+        screen_width: int,
+        screen_height: int,
+        padding: int,
+        hud_height: int,
+        help_height: int,
+        env_config: EnvConfig,
+    ) -> Tuple[pygame.Rect, pygame.Rect]:
+        max_game_h = screen_height - 2 * padding - hud_height - help_height
+        max_game_w = screen_width - 2 * padding
         aspect_ratio = (env_config.COLS * 0.75 + 0.25) / max(1, env_config.ROWS)
         game_w = max_game_w
         game_h = game_w / aspect_ratio if aspect_ratio > 0 else max_game_h
@@ -1281,61 +1307,64 @@ class DemoRenderer:
             game_w = game_h * aspect_ratio
         game_w = math.floor(min(game_w, max_game_w))
         game_h = math.floor(min(game_h, max_game_h))
-        game_x = (sw - game_w) // 2
+        game_x = (screen_width - game_w) // 2
         game_y = padding
         game_rect = pygame.Rect(game_x, game_y, game_w, game_h)
         clipped_game_rect = game_rect.clip(self.screen.get_rect())
+        return game_rect, clipped_game_rect
 
-        # 1. Render Game Area (Grid + Preview)
-        if clipped_game_rect.width > 10 and clipped_game_rect.height > 10:
-            try:
-                game_surf = self.screen.subsurface(clipped_game_rect)
-                # Render the main grid using GameAreaRenderer's method
-                self.game_area_renderer._render_single_env_grid(
-                    game_surf, demo_env, env_config
+    def _render_game_area(
+        self,
+        demo_env: GameState,
+        env_config: EnvConfig,
+        clipped_game_rect: pygame.Rect,
+        bg_color: Tuple[int, int, int],
+    ):
+        try:
+            game_surf = self.screen.subsurface(clipped_game_rect)
+            game_surf.fill(bg_color)
+
+            self.game_area_renderer._render_single_env_grid(
+                game_surf, demo_env, env_config
+            )
+
+            preview_tri_cell_w, preview_tri_cell_h = self._calculate_demo_triangle_size(
+                clipped_game_rect.width, clipped_game_rect.height, env_config
+            )
+            if preview_tri_cell_w > 0 and preview_tri_cell_h > 0:
+                grid_ox, grid_oy = self._calculate_grid_offset(
+                    clipped_game_rect.width, clipped_game_rect.height, env_config
+                )
+                self._render_placement_preview(
+                    game_surf,
+                    demo_env,
+                    preview_tri_cell_w,
+                    preview_tri_cell_h,
+                    grid_ox,
+                    grid_oy,
                 )
 
-                # Render Placement Preview on top of the grid
-                preview_tri_cell_w, preview_tri_cell_h = (
-                    self._calculate_demo_triangle_size(
-                        clipped_game_rect.width, clipped_game_rect.height, env_config
-                    )
-                )
-                if preview_tri_cell_w > 0 and preview_tri_cell_h > 0:
-                    # Calculate offset needed for _render_placement_preview based on scaling
-                    padding_grid = self.vis_config.ENV_GRID_PADDING
-                    drawable_w = max(0, clipped_game_rect.width - 2 * padding_grid)
-                    drawable_h = max(0, clipped_game_rect.height - 2 * padding_grid)
-                    grid_cols_eff_width = env_config.COLS * 0.75 + 0.25
-                    scale_w = drawable_w / max(1, grid_cols_eff_width)
-                    scale_h = drawable_h / max(1, env_config.ROWS)
-                    final_scale = min(scale_w, scale_h)
-                    final_grid_pixel_w = max(1, grid_cols_eff_width * final_scale)
-                    final_grid_pixel_h = max(1, env_config.ROWS * final_scale)
-                    grid_ox = padding_grid + (drawable_w - final_grid_pixel_w) / 2
-                    grid_oy = padding_grid + (drawable_h - final_grid_pixel_h) / 2
+            if demo_env.is_over():
+                self._render_demo_overlay_text(game_surf, "GAME OVER", VisConfig.RED)
+            elif demo_env.is_line_clearing():
+                self._render_demo_overlay_text(game_surf, "Line Clear!", VisConfig.BLUE)
 
-                    self._render_placement_preview(
-                        game_surf,  # Draw on the game surface
-                        demo_env,
-                        preview_tri_cell_w,
-                        preview_tri_cell_h,
-                        grid_ox,
-                        grid_oy,
-                    )
+        except ValueError as e:
+            print(f"Error subsurface demo game ({clipped_game_rect}): {e}")
+            pygame.draw.rect(self.screen, VisConfig.RED, clipped_game_rect, 1)
+        except Exception as render_e:
+            print(f"Error rendering demo game area: {render_e}")
+            traceback.print_exc()
+            pygame.draw.rect(self.screen, VisConfig.RED, clipped_game_rect, 1)
 
-            except ValueError as e:
-                print(f"Error subsurface demo game ({clipped_game_rect}): {e}")
-                pygame.draw.rect(self.screen, VisConfig.RED, clipped_game_rect, 1)
-            except Exception as render_e:
-                print(f"Error rendering demo game area: {render_e}")
-                traceback.print_exc()
-                pygame.draw.rect(self.screen, VisConfig.RED, clipped_game_rect, 1)
-        else:
-            self._render_too_small_message("Demo Area Too Small", clipped_game_rect)
-
-        # 2. Render Shape Previews (Right Side)
-        preview_area_w = min(150, sw - clipped_game_rect.right - padding // 2)
+    def _render_shape_previews_area(
+        self,
+        demo_env: GameState,
+        screen_width: int,
+        clipped_game_rect: pygame.Rect,
+        padding: int,
+    ):
+        preview_area_w = min(150, screen_width - clipped_game_rect.right - padding // 2)
         if preview_area_w > 20:
             preview_area_rect = pygame.Rect(
                 clipped_game_rect.right + padding // 2,
@@ -1362,30 +1391,48 @@ class DemoRenderer:
                     print(f"Error rendering demo shape previews: {e}")
                     traceback.print_exc()
 
-        # 3. Render HUD (Below Game Area)
-        hud_y = game_rect.bottom + 10
+    def _render_hud(self, demo_env: GameState, screen_width: int, hud_y: int):
         score_text = f"Score: {demo_env.game_score} | Lines: {demo_env.lines_cleared_this_episode}"
         try:
             score_surf = self.demo_hud_font.render(score_text, True, VisConfig.WHITE)
-            score_rect = score_surf.get_rect(midtop=(sw // 2, hud_y))
+            score_rect = score_surf.get_rect(midtop=(screen_width // 2, hud_y))
             self.screen.blit(score_surf, score_rect)
         except Exception as e:
             print(f"HUD render error: {e}")
 
-        # 4. Render Help Text (Bottom)
+    def _render_help_text(self, screen_width: int, screen_height: int):
         try:
             help_surf = self.demo_help_font.render(
                 self.demo_config.HELP_TEXT, True, VisConfig.LIGHTG
             )
-            help_rect = help_surf.get_rect(centerx=sw // 2, bottom=sh - 10)
+            help_rect = help_surf.get_rect(
+                centerx=screen_width // 2, bottom=screen_height - 10
+            )
             self.screen.blit(help_surf, help_rect)
         except Exception as e:
             print(f"Help render error: {e}")
 
+    def _render_demo_overlay_text(
+        self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
+    ):
+        try:
+            if not self.overlay_font:
+                print("Error: Overlay font not available for demo overlay.")
+                return
+            text_surf = self.overlay_font.render(
+                text,
+                True,
+                VisConfig.WHITE,
+                (color[0] // 2, color[1] // 2, color[2] // 2, 220),
+            )
+            text_rect = text_surf.get_rect(center=surf.get_rect().center)
+            surf.blit(text_surf, text_rect)
+        except Exception as e:
+            print(f"Error rendering demo overlay text '{text}': {e}")
+
     def _calculate_demo_triangle_size(
-        self, surf_w, surf_h, env_config: EnvConfig
+        self, surf_w: int, surf_h: int, env_config: EnvConfig
     ) -> Tuple[int, int]:
-        """Calculates the cell width/height for triangles within a given surface."""
         padding = self.vis_config.ENV_GRID_PADDING
         drawable_w = max(1, surf_w - 2 * padding)
         drawable_h = max(1, surf_h - 2 * padding)
@@ -1398,9 +1445,27 @@ class DemoRenderer:
         final_scale = min(scale_w, scale_h)
         if final_scale <= 0:
             return 0, 0
-        # Use integer scaling for simplicity in drawing
         tri_cell_size = max(1, int(final_scale))
         return tri_cell_size, tri_cell_size
+
+    def _calculate_grid_offset(
+        self, surf_w: int, surf_h: int, env_config: EnvConfig
+    ) -> Tuple[float, float]:
+        padding = self.vis_config.ENV_GRID_PADDING
+        drawable_w = max(1, surf_w - 2 * padding)
+        drawable_h = max(1, surf_h - 2 * padding)
+        grid_rows = env_config.ROWS
+        grid_cols_eff_width = env_config.COLS * 0.75 + 0.25
+        if grid_rows <= 0 or grid_cols_eff_width <= 0:
+            return float(padding), float(padding)
+        scale_w = drawable_w / grid_cols_eff_width
+        scale_h = drawable_h / grid_rows
+        final_scale = min(scale_w, scale_h)
+        final_grid_pixel_w = max(1, grid_cols_eff_width * final_scale)
+        final_grid_pixel_h = max(1, grid_rows * final_scale)
+        grid_ox = padding + (drawable_w - final_grid_pixel_w) / 2
+        grid_oy = padding + (drawable_h - final_grid_pixel_h) / 2
+        return grid_ox, grid_oy
 
     def _render_placement_preview(
         self,
@@ -1411,7 +1476,6 @@ class DemoRenderer:
         offset_x: float,
         offset_y: float,
     ):
-        """Renders the preview of where the selected shape will be placed."""
         if cell_w <= 0 or cell_h <= 0:
             return
         shp, rr, cc = env.get_current_selection_info()
@@ -1419,43 +1483,45 @@ class DemoRenderer:
             return
 
         is_valid = env.grid.can_place(shp, rr, cc)
-        preview_color = (
-            self.demo_config.PREVIEW_COLOR
-            if is_valid
-            else self.demo_config.INVALID_PREVIEW_COLOR
-        )
 
-        # Create a temporary surface with alpha for drawing the preview
+        preview_alpha = 150
+        if is_valid:
+            shape_rgb = shp.color
+            preview_color_to_use = (
+                shape_rgb[0],
+                shape_rgb[1],
+                shape_rgb[2],
+                preview_alpha,
+            )
+        else:
+            # --- MODIFIED: Use the defined gray color for invalid placement ---
+            preview_color_to_use = self.invalid_placement_color
+            # --- END MODIFIED ---
+
         temp_surface = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
-        temp_surface.fill((0, 0, 0, 0))  # Transparent
+        temp_surface.fill((0, 0, 0, 0))
 
         for dr, dc, up in shp.triangles:
             nr, nc = rr + dr, cc + dc
-            # Check if the target triangle exists and is not a death cell
             if (
                 env.grid.valid(nr, nc)
                 and 0 <= nr < len(env.grid.triangles)
                 and 0 <= nc < len(env.grid.triangles[nr])
                 and not env.grid.triangles[nr][nc].is_death
             ):
-                # Use the actual triangle from the grid to get correct orientation for points
                 temp_tri = env.grid.triangles[nr][nc]
                 try:
                     pts = temp_tri.get_points(
                         ox=offset_x, oy=offset_y, cw=cell_w, ch=cell_h
                     )
-                    pygame.draw.polygon(temp_surface, preview_color, pts)
+                    pygame.draw.polygon(temp_surface, preview_color_to_use, pts)
                 except Exception as e:
-                    # Reduce log spam for minor render errors during preview
-                    # print(f"Error rendering preview tri ({nr},{nc}): {e}")
                     pass
 
-        # Blit the transparent preview surface onto the main game surface
         surf.blit(temp_surface, (0, 0))
 
     def _render_demo_shape_previews(self, surf: pygame.Surface, env: GameState):
-        """Renders the small previews of available shapes in the side area."""
-        surf.fill((25, 25, 25))  # Background for shape preview area
+        surf.fill((25, 25, 25))
         all_slots = env.shapes
         selected_shape_obj = (
             all_slots[env.demo_selected_shape_idx]
@@ -1469,7 +1535,6 @@ class DemoRenderer:
         if num_slots <= 0:
             return
 
-        # Calculate layout: Vertical list of previews
         preview_h = max(20, (surf_h - (num_slots + 1) * preview_padding) / num_slots)
         preview_w = max(20, surf_w - 2 * preview_padding)
         current_preview_y = preview_padding
@@ -1485,7 +1550,6 @@ class DemoRenderer:
                 current_preview_y += preview_h + preview_padding
                 continue
 
-            # Determine background and border based on selection
             bg_color = (40, 40, 40)
             border_color = VisConfig.GRAY
             border_width = 1
@@ -1498,57 +1562,61 @@ class DemoRenderer:
                 surf, border_color, clipped_preview_rect, border_width, border_radius=3
             )
 
-            # Render the shape itself inside the preview box
             if shp is not None:
-                try:
-                    # Create a subsurface for the shape rendering area inside the box
-                    inner_padding = 2
-                    shape_render_area_rect = pygame.Rect(
-                        inner_padding,
-                        inner_padding,
-                        clipped_preview_rect.width - 2 * inner_padding,
-                        clipped_preview_rect.height - 2 * inner_padding,
-                    )
-                    if (
-                        shape_render_area_rect.width > 0
-                        and shape_render_area_rect.height > 0
-                    ):
-                        # Use subsurface from the main surf, not clipped_preview_rect surface
-                        shape_sub_surf = surf.subsurface(
-                            preview_rect.left + shape_render_area_rect.left,
-                            preview_rect.top + shape_render_area_rect.top,
-                            shape_render_area_rect.width,
-                            shape_render_area_rect.height,
-                        )
-                        # Calculate cell size to fit the shape
-                        min_r, min_c, max_r, max_c = shp.bbox()
-                        shape_h = max(1, max_r - min_r + 1)
-                        shape_w_eff = max(1, (max_c - min_c + 1) * 0.75 + 0.25)
-                        scale_h = shape_render_surf.get_height() / shape_h
-                        scale_w = shape_render_surf.get_width() / shape_w_eff
-                        cell_size = max(1, min(scale_h, scale_w))
-                        # Render the shape using game_area_renderer's helper
-                        self.game_area_renderer._render_single_shape(
-                            shape_render_surf, shp, int(cell_size)
-                        )
-                except ValueError as sub_err:
-                    print(f"Error subsurface shape preview {i}: {sub_err}")
-                    pygame.draw.rect(surf, VisConfig.RED, clipped_preview_rect, 1)
-                except Exception as e:
-                    print(f"Error rendering demo shape preview {i}: {e}")
-                    pygame.draw.rect(surf, VisConfig.RED, clipped_preview_rect, 1)
+                self._render_single_shape_in_preview_box(
+                    surf, shp, preview_rect, clipped_preview_rect
+                )
 
             current_preview_y += preview_h + preview_padding
 
-    def _render_too_small_message(self, text: str, area_rect: pygame.Rect):
-        """Helper to render 'Too Small' messages."""
+    def _render_single_shape_in_preview_box(
+        self,
+        surf: pygame.Surface,
+        shp,
+        preview_rect: pygame.Rect,
+        clipped_preview_rect: pygame.Rect,
+    ):
         try:
-            # Use a font known to exist in game_area_renderer or init one here
+            inner_padding = 2
+            shape_render_area_rect = pygame.Rect(
+                inner_padding,
+                inner_padding,
+                clipped_preview_rect.width - 2 * inner_padding,
+                clipped_preview_rect.height - 2 * inner_padding,
+            )
+            if shape_render_area_rect.width > 0 and shape_render_area_rect.height > 0:
+                sub_surf_x = preview_rect.left + shape_render_area_rect.left
+                sub_surf_y = preview_rect.top + shape_render_area_rect.top
+                shape_sub_surf = surf.subsurface(
+                    sub_surf_x,
+                    sub_surf_y,
+                    shape_render_area_rect.width,
+                    shape_render_area_rect.height,
+                )
+                min_r, min_c, max_r, max_c = shp.bbox()
+                shape_h = max(1, max_r - min_r + 1)
+                shape_w_eff = max(1, (max_c - min_c + 1) * 0.75 + 0.25)
+
+                scale_h = shape_render_area_rect.height / shape_h
+                scale_w = shape_render_area_rect.width / shape_w_eff
+                cell_size = max(1, min(scale_h, scale_w))
+
+                self.game_area_renderer._render_single_shape(
+                    shape_sub_surf, shp, int(cell_size)
+                )
+        except ValueError as sub_err:
+            print(f"Error subsurface shape preview: {sub_err}")
+            pygame.draw.rect(surf, VisConfig.RED, clipped_preview_rect, 1)
+        except Exception as e:
+            print(f"Error rendering demo shape preview: {e}")
+            pygame.draw.rect(surf, VisConfig.RED, clipped_preview_rect, 1)
+
+    def _render_too_small_message(self, text: str, area_rect: pygame.Rect):
+        try:
             font = self.game_area_renderer.fonts.get("ui") or pygame.font.SysFont(
                 None, 24
             )
             err_surf = font.render(text, True, VisConfig.GRAY)
-            # Center the message within the specified area_rect relative to the screen
             target_rect = err_surf.get_rect(center=area_rect.center)
             self.screen.blit(err_surf, target_rect)
         except Exception as e:
@@ -1789,7 +1857,6 @@ import time
 import warnings
 from io import BytesIO
 
-# Ensure Agg backend is used before importing pyplot
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -1797,7 +1864,7 @@ from config import VisConfig, BufferConfig, StatsConfig, DQNConfig
 from .plot_utils import (
     render_single_plot,
     normalize_color_for_matplotlib,
-)  # Import helper
+)
 
 
 class Plotter:
@@ -1806,32 +1873,39 @@ class Plotter:
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        self.plot_update_interval: float = 1.0  # Update plot every second
-        self.rolling_window_size = StatsConfig.STATS_AVG_WINDOW
+        self.plot_update_interval: float = 1.0
+        self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
         self.default_line_width = 1.0
         self.avg_line_width = 1.5
-        self.avg_line_alpha = 0.7
+        self.avg_line_alpha = 0.8  # Slightly increased alpha for averages
 
-        # Define colors once
+        # Define base colors
         self.colors = {
             "rl_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
             "game_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[1]),
             "loss": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[3]),
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
             "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
-            "best_game": normalize_color_for_matplotlib((255, 165, 0)),
-            "lr": normalize_color_for_matplotlib((255, 0, 255)),
+            "best_game": normalize_color_for_matplotlib((255, 165, 0)),  # Orange
+            "lr": normalize_color_for_matplotlib((255, 0, 255)),  # Magenta
             "buffer": normalize_color_for_matplotlib(VisConfig.RED),
-            "beta": normalize_color_for_matplotlib((100, 100, 255)),
-            "avg": normalize_color_for_matplotlib(VisConfig.YELLOW),
+            "beta": normalize_color_for_matplotlib((100, 100, 255)),  # Light Blue
+            "avg_primary": normalize_color_for_matplotlib(VisConfig.YELLOW),
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
+        # --- NEW: Define colors for secondary average lines ---
+        self.avg_line_colors_secondary = [
+            normalize_color_for_matplotlib((0, 255, 255)),  # Cyan
+            normalize_color_for_matplotlib((255, 165, 0)),  # Orange
+            normalize_color_for_matplotlib((0, 255, 0)),  # Lime Green
+            normalize_color_for_matplotlib((255, 0, 255)),  # Magenta
+        ]
+        # --- END NEW ---
 
     def create_plot_surface(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Creates the Matplotlib figure and renders subplots."""
         if target_width <= 10 or target_height <= 10 or not plot_data:
             return None
 
@@ -1874,14 +1948,15 @@ class Plotter:
                 max_len = max((len(d) for d in data_lists.values() if d), default=0)
                 plot_window_label = f"Latest {min(self.plot_data_window, max_len)} Pts"
 
-                # --- Render Subplots using Helper ---
+                # --- MODIFIED: Pass primary and secondary avg colors ---
                 render_single_plot(
                     axes_flat[0],
                     data_lists["episode_scores"],
                     "RL Score",
                     self.colors["rl_score"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],  # Primary avg color
+                    self.avg_line_colors_secondary,  # Secondary avg colors
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -1892,8 +1967,9 @@ class Plotter:
                     data_lists["game_scores"],
                     "Game Score",
                     self.colors["game_score"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -1904,8 +1980,9 @@ class Plotter:
                     data_lists["losses"],
                     "Loss",
                     self.colors["loss"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     show_placeholder=True,
                     placeholder_text="Loss data after Learn Start",
@@ -1918,8 +1995,9 @@ class Plotter:
                     data_lists["episode_lengths"],
                     "Ep Length",
                     self.colors["len"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -1930,8 +2008,9 @@ class Plotter:
                     data_lists["best_game_score_history"],
                     "Best Game Score",
                     self.colors["best_game"],
-                    None,
-                    self.rolling_window_size,
+                    None,  # No average
+                    [],  # No average
+                    [],  # No average
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -1942,8 +2021,9 @@ class Plotter:
                     data_lists["sps_values"],
                     "Steps/Sec",
                     self.colors["sps"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -1954,8 +2034,9 @@ class Plotter:
                     data_lists["lr_values"],
                     "Learning Rate",
                     self.colors["lr"],
-                    None,
-                    self.rolling_window_size,
+                    None,  # No average
+                    [],  # No average
+                    [],  # No average
                     xlabel=plot_window_label,
                     y_log_scale=True,
                     default_line_width=self.default_line_width,
@@ -1971,8 +2052,9 @@ class Plotter:
                     buffer_fill_percent,
                     "Buffer Fill %",
                     self.colors["buffer"],
-                    self.colors["avg"],
-                    self.rolling_window_size,
+                    self.colors["avg_primary"],
+                    self.avg_line_colors_secondary,
+                    self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     default_line_width=self.default_line_width,
                     avg_line_width=self.avg_line_width,
@@ -1984,8 +2066,9 @@ class Plotter:
                         data_lists["beta_values"],
                         "PER Beta",
                         self.colors["beta"],
-                        self.colors["avg"],
-                        self.rolling_window_size,
+                        self.colors["avg_primary"],
+                        self.avg_line_colors_secondary,
+                        self.rolling_window_sizes,
                         xlabel=plot_window_label,
                         default_line_width=self.default_line_width,
                         avg_line_width=self.avg_line_width,
@@ -2004,7 +2087,7 @@ class Plotter:
                     )
                     axes_flat[8].set_yticks([])
                     axes_flat[8].set_xticks([])
-                # --- End Subplot Rendering ---
+                # --- END MODIFIED ---
 
                 for ax in axes_flat:
                     ax.tick_params(axis="x", rotation=0)
@@ -2043,7 +2126,6 @@ class Plotter:
     def get_cached_or_updated_plot(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Returns the cached plot surface or generates a new one if needed."""
         current_time = time.time()
         has_data = any(plot_data.values())
         needs_update_time = (
@@ -2254,14 +2336,12 @@ import matplotlib
 import warnings
 from io import BytesIO
 
-# Ensure Agg backend is used before importing pyplot
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import VisConfig, BufferConfig, StatsConfig, DQNConfig
 
 # --- Matplotlib Style Configuration ---
-# Moved here for better organization
 try:
     plt.style.use("dark_background")
     plt.rcParams.update(
@@ -2274,7 +2354,7 @@ try:
             "legend.fontsize": 6,
             "figure.facecolor": "#262626",
             "axes.facecolor": "#303030",
-            "axes.edgecolor": "#707070",
+            "axes.edgecolor": "#707070",  # Default edge color
             "axes.labelcolor": "#D0D0D0",
             "xtick.color": "#C0C0C0",
             "ytick.color": "#C0C0C0",
@@ -2291,7 +2371,6 @@ except Exception as e:
 def normalize_color_for_matplotlib(
     color_tuple_0_255: Tuple[int, int, int],
 ) -> Tuple[float, float, float]:
-    """Converts RGB 0-255 tuple to Matplotlib's 0.0-1.0 tuple."""
     if isinstance(color_tuple_0_255, tuple) and len(color_tuple_0_255) == 3:
         return tuple(c / 255.0 for c in color_tuple_0_255)
     else:
@@ -2299,14 +2378,25 @@ def normalize_color_for_matplotlib(
         return (0.0, 0.0, 0.0)
 
 
-# --- Extracted Subplot Rendering Logic ---
+# --- NEW: Trend Colors and Settings ---
+TREND_INCREASING_COLOR = normalize_color_for_matplotlib((0, 180, 0))  # Darker Green
+TREND_DECREASING_COLOR = normalize_color_for_matplotlib((180, 0, 0))  # Darker Red
+TREND_STABLE_COLOR = normalize_color_for_matplotlib((70, 70, 70))  # Default gray border
+TREND_LINEWIDTH = 1.5  # Make trend border slightly thicker
+DEFAULT_LINEWIDTH = 0.8  # Default border thickness
+TREND_TOLERANCE = 1e-6  # Tolerance for stability check
+# --- END NEW ---
+
+
+# --- MODIFIED: Function signature and logic (added trend border) ---
 def render_single_plot(
     ax,
     data: List[Union[float, int]],
     label: str,
     color: Tuple[float, float, float],
-    avg_color: Optional[Tuple[float, float, float]],
-    rolling_window_size: int,
+    avg_color_primary: Optional[Tuple[float, float, float]],
+    avg_colors_secondary: List[Tuple[float, float, float]],
+    rolling_window_sizes: List[int],
     xlabel: Optional[str] = None,
     show_placeholder: bool = True,
     placeholder_text: Optional[str] = None,
@@ -2315,19 +2405,27 @@ def render_single_plot(
     avg_line_width: float = 1.5,
     avg_line_alpha: float = 0.7,
 ):
-    """Renders data onto a single Matplotlib Axes object."""
+    """Renders data onto a single Matplotlib Axes object, including multiple rolling averages and trend indicator."""
     n_points = len(data)
     latest_val_str = ""
-    avg_window = rolling_window_size
+    primary_avg_window = rolling_window_sizes[0] if rolling_window_sizes else 0
+
+    # --- Reset border style initially ---
+    for spine in ax.spines.values():
+        spine.set_color(TREND_STABLE_COLOR)
+        spine.set_linewidth(DEFAULT_LINEWIDTH)
+    # --- End Reset ---
 
     if data:
         current_val = data[-1]
-        if n_points >= avg_window and avg_color is not None:
+        if (
+            n_points >= primary_avg_window
+            and avg_color_primary is not None
+            and primary_avg_window > 0
+        ):
             try:
-                latest_avg = np.mean(data[-avg_window:])
-                latest_val_str = (
-                    f" (Now: {current_val:.3g}, Avg{avg_window}: {latest_avg:.3g})"
-                )
+                latest_avg = np.mean(data[-primary_avg_window:])
+                latest_val_str = f" (Now: {current_val:.3g}, Avg{primary_avg_window}: {latest_avg:.3g})"
             except Exception:
                 latest_val_str = f" (Now: {current_val:.3g})"
         else:
@@ -2358,18 +2456,60 @@ def render_single_plot(
             x_coords, data, color=color, linewidth=default_line_width, label=f"{label}"
         )
 
-        if avg_color is not None and n_points >= avg_window:
-            weights = np.ones(avg_window) / avg_window
-            rolling_avg = np.convolve(data, weights, mode="valid")
-            avg_x_coords = np.arange(avg_window - 1, n_points)
-            ax.plot(
-                avg_x_coords,
-                rolling_avg,
-                color=avg_color,
-                linewidth=avg_line_width,
-                alpha=avg_line_alpha,
-                label=f"Avg {avg_window}",
-            )
+        avg_linestyles = ["-", "--", ":", "-."]
+        plotted_averages = False
+        longest_avg_rolling = None
+        longest_window = 0
+
+        for i, avg_window in enumerate(rolling_window_sizes):
+            if n_points >= avg_window:
+                if i == 0 and avg_color_primary:
+                    current_avg_color = avg_color_primary
+                elif avg_colors_secondary:
+                    current_avg_color = avg_colors_secondary[
+                        (i - 1) % len(avg_colors_secondary)
+                    ]
+                else:
+                    current_avg_color = color
+
+                weights = np.ones(avg_window) / avg_window
+                rolling_avg = np.convolve(data, weights, mode="valid")
+                avg_x_coords = np.arange(avg_window - 1, n_points)
+                linestyle = avg_linestyles[i % len(avg_linestyles)]
+                ax.plot(
+                    avg_x_coords,
+                    rolling_avg,
+                    color=current_avg_color,
+                    linewidth=avg_line_width,
+                    alpha=avg_line_alpha,
+                    linestyle=linestyle,
+                    label=f"Avg {avg_window}",
+                )
+                plotted_averages = True
+                # --- Store the longest average calculated ---
+                if avg_window >= longest_window:
+                    longest_window = avg_window
+                    longest_avg_rolling = rolling_avg
+            # --- End average plotting loop ---
+
+        # --- Determine and apply trend border based on longest average ---
+        if longest_avg_rolling is not None and len(longest_avg_rolling) >= 2:
+            latest_avg_long = longest_avg_rolling[-1]
+            prev_avg_long = longest_avg_rolling[-2]
+            trend_color = TREND_STABLE_COLOR
+            trend_lw = DEFAULT_LINEWIDTH
+
+            if latest_avg_long > prev_avg_long + TREND_TOLERANCE:
+                trend_color = TREND_INCREASING_COLOR
+                trend_lw = TREND_LINEWIDTH
+            elif latest_avg_long < prev_avg_long - TREND_TOLERANCE:
+                trend_color = TREND_DECREASING_COLOR
+                trend_lw = TREND_LINEWIDTH
+
+            for spine in ax.spines.values():
+                spine.set_color(trend_color)
+                spine.set_linewidth(trend_lw)
+        # --- End trend border ---
 
         ax.tick_params(axis="both", which="major")
         if xlabel:
@@ -2382,15 +2522,24 @@ def render_single_plot(
 
         min_val = np.min(data)
         max_val = np.max(data)
-        padding = (
-            (max_val - min_val) * 0.1
-            if max_val > min_val
-            else max(abs(max_val * 0.1), 1.0)
-        )
+        padding_factor = 0.1
+        # --- Prevent y-axis range collapsing to zero ---
+        range_val = max_val - min_val
+        if range_val < 1e-6:  # Very small range
+            padding = max(
+                abs(max_val * padding_factor), 0.5
+            )  # Use larger default padding
+        else:
+            padding = range_val * padding_factor
+
+        # Ensure padding is not excessively small
         padding = max(padding, 1e-6)
+        # Set y-limits, ensuring lower can be negative if min_val is negative
         ax.set_ylim(min_val - padding, max_val + padding)
+        # --- End y-axis range fix ---
 
         if y_log_scale and min_val > 1e-9:
+            # Ensure bottom limit is positive for log scale
             ax.set_yscale("log")
             ax.set_ylim(bottom=max(min_val * 0.9, 1e-9))
         else:
@@ -2415,6 +2564,9 @@ def render_single_plot(
         elif n_points > 10:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
 
+        if plotted_averages:
+            ax.legend(loc="best", fontsize=plt.rcParams["legend.fontsize"])
+
     except Exception as plot_err:
         print(f"ERROR during render_single_plot for '{label}': {plot_err}")
         error_text_color = normalize_color_for_matplotlib(VisConfig.RED)
@@ -2430,6 +2582,9 @@ def render_single_plot(
         )
         ax.set_yticks([])
         ax.set_xticks([])
+
+
+# --- END MODIFIED ---
 
 
 File: ui/input_handler.py
@@ -2744,16 +2899,18 @@ class GameAreaRenderer:
         if cell_w <= 0 or cell_h <= 0:
             return
 
-        # --- Background Color Logic (Flash takes precedence) ---
-        bg_color = VisConfig.GRAY
-        if env.is_line_clearing():  # Check flash first
+        # --- Background Color Logic (Order Matters!) ---
+        bg_color = VisConfig.GRAY  # Default
+        if env.is_line_clearing():  # Line clear flash has highest priority
             bg_color = VisConfig.LINE_CLEAR_FLASH_COLOR
-        elif env.is_blinking():
+        elif env.is_game_over_flashing():  # Game over flash is next
+            bg_color = VisConfig.GAME_OVER_FLASH_COLOR
+        elif env.is_blinking():  # Generic blink (currently unused but kept)
             bg_color = VisConfig.YELLOW
-        elif env.is_frozen() and not env.is_over():
+        elif env.is_over():  # Static game over (no flash)
+            bg_color = VisConfig.DARK_RED
+        elif env.is_frozen():  # Frozen Blue (only if not game over/line clearing)
             bg_color = (30, 30, 100)
-        elif env.is_over():
-            bg_color = (40, 20, 20)
         surf.fill(bg_color)
 
         shape_area_height_ratio = 0.20
@@ -2781,7 +2938,6 @@ class GameAreaRenderer:
                 pygame.draw.rect(surf, VisConfig.RED, shape_rect, 1)
 
         if grid_surf:
-            # --- Pass env to grid rendering for highlight check ---
             self._render_single_env_grid(grid_surf, env, env_config)
 
         if shape_surf:
@@ -2798,10 +2954,15 @@ class GameAreaRenderer:
         except Exception as e:
             print(f"Error rendering score: {e}")
 
+        # --- MODIFIED: Specific Overlay Logic ---
         if env.is_over():
+            # Always show GAME OVER text if the game is over
             self._render_overlay_text(surf, "GAME OVER", VisConfig.RED)
-        elif env.is_frozen() and not env.is_blinking() and not env.is_line_clearing():
-            self._render_overlay_text(surf, "Frozen", VisConfig.BLUE)
+        elif env.is_line_clearing():
+            # Show Line Clear! text only during the line clear flash
+            self._render_overlay_text(surf, "Line Clear!", VisConfig.BLUE)
+        # No generic "Frozen" message anymore
+        # --- END MODIFIED ---
 
     def _render_overlay_text(
         self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
@@ -2812,14 +2973,13 @@ class GameAreaRenderer:
                 text,
                 True,
                 VisConfig.WHITE,
-                (color[0] // 2, color[1] // 2, color[2] // 2, 200),
+                (color[0] // 2, color[1] // 2, color[2] // 2, 220),
             )
             text_rect = text_surf.get_rect(center=surf.get_rect().center)
             surf.blit(text_surf, text_rect)
         except Exception as e:
             print(f"Error rendering overlay text '{text}': {e}")
 
-    # --- MODIFIED: _render_single_env_grid handles highlighting ---
     def _render_single_env_grid(
         self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
     ):
@@ -2848,13 +3008,11 @@ class GameAreaRenderer:
             grid_ox = padding + (drawable_w - final_grid_pixel_w) / 2
             grid_oy = padding + (drawable_h - final_grid_pixel_h) / 2
 
-            # --- Get highlight state ---
             is_highlighting = env.is_highlighting_cleared()
             cleared_coords = (
                 set(env.get_cleared_triangle_coords()) if is_highlighting else set()
             )
             highlight_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
-            # --- End highlight state ---
 
             if hasattr(env, "grid") and hasattr(env.grid, "triangles"):
                 for r in range(env.grid.rows):
@@ -2875,14 +3033,12 @@ class GameAreaRenderer:
                                     cw=int(tri_cell_w),
                                     ch=int(tri_cell_h),
                                 )
-                                # --- Determine color with highlight ---
                                 if is_highlighting and (r, c) in cleared_coords:
                                     color = highlight_color
                                 elif t.is_occupied:
                                     color = t.color if t.color else VisConfig.RED
                                 else:
-                                    color = VisConfig.LIGHTG  # Default empty color
-                                # --- End color determination ---
+                                    color = VisConfig.LIGHTG
 
                                 pygame.draw.polygon(surf, color, pts)
                                 pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
@@ -2899,8 +3055,6 @@ class GameAreaRenderer:
             print(f"Unexpected Render Error in _render_single_env_grid: {e}")
             traceback.print_exc()
             pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
-
-    # --- END MODIFIED ---
 
     def _render_shape_previews(self, surf: pygame.Surface, env: GameState):
         available_shapes = env.get_shapes()
@@ -3030,7 +3184,6 @@ from config import (
 from config.general import TOTAL_TRAINING_STEPS
 from ui.plotter import Plotter
 
-# Import the new component renderers
 from .left_panel_components import (
     ButtonStatusRenderer,
     NotificationRenderer,
@@ -3039,12 +3192,13 @@ from .left_panel_components import (
     PlotAreaRenderer,
 )
 
-# Tooltips specific to this panel
+# --- MODIFIED: Update tooltip text ---
 TOOLTIP_TEXTS = {
     "Status": "Current state: Paused, Buffering, Training, Confirm Cleanup, Cleaning, or Error.",
     "Global Steps": "Total environment steps taken / Total planned steps.",
     "Total Episodes": "Total completed episodes across all environments.",
-    "Steps/Sec (Current)": f"Current avg Steps/Sec (~{StatsConfig.STATS_AVG_WINDOW} intervals). See plot for history.",
+    # Removed specific window size mention
+    "Steps/Sec (Current)": "Current avg Steps/Sec. See plot for history and different averaging windows.",
     "Buffer Fill": f"Current replay buffer fill % ({BufferConfig.REPLAY_BUFFER_SIZE / 1e6:.1f}M cap). See plot.",
     "PER Beta": f"Current PER IS exponent ({BufferConfig.PER_BETA_START:.1f}->1.0). See plot.",
     "Learning Rate": "Current learning rate. See plot for history/schedule.",
@@ -3059,6 +3213,7 @@ TOOLTIP_TEXTS = {
     "Best Game Score Info": "Best Game Score achieved: Current Value (Previous Value) - Steps Ago",
     "Best Loss Info": "Best (Lowest) Loss achieved: Current Value (Previous Value) - Steps Ago",
 }
+# --- END MODIFIED ---
 
 
 class LeftPanelRenderer:
@@ -3071,7 +3226,6 @@ class LeftPanelRenderer:
         self.fonts = self._init_fonts()
         self.stat_rects: Dict[str, pygame.Rect] = {}
 
-        # Instantiate sub-renderers
         self.button_status_renderer = ButtonStatusRenderer(self.screen, self.fonts)
         self.notification_renderer = NotificationRenderer(self.screen, self.fonts)
         self.info_text_renderer = InfoTextRenderer(self.screen, self.fonts)
@@ -3081,7 +3235,6 @@ class LeftPanelRenderer:
         )
 
     def _init_fonts(self):
-        """Loads necessary fonts using system defaults."""
         fonts = {}
         font_configs = {
             "ui": 24,
@@ -3095,7 +3248,7 @@ class LeftPanelRenderer:
             try:
                 fonts[key] = pygame.font.SysFont(None, size)
             except Exception:
-                fonts[key] = pygame.font.Font(None, size)  # Fallback
+                fonts[key] = pygame.font.Font(None, size)
             if fonts[key] is None:
                 print(f"ERROR: Font '{key}' failed to load.")
         return fonts
@@ -3110,7 +3263,6 @@ class LeftPanelRenderer:
         plot_data: Dict[str, Deque],
         app_state: str,
     ):
-        """Renders the entire left panel by calling sub-render methods."""
         current_width, current_height = self.screen.get_size()
         lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
         lp_rect = pygame.Rect(0, 0, lp_width, current_height)
@@ -3132,47 +3284,38 @@ class LeftPanelRenderer:
         current_y = 10
         notification_area_rect = None
 
-        # 1. Buttons and Status
         next_y, rects_bs, notification_area_rect = self.button_status_renderer.render(
             current_y, lp_width, app_state, is_training, status
         )
         self.stat_rects.update(rects_bs)
         current_y = next_y
 
-        # 2. Notification Area (if applicable)
         if notification_area_rect:
             rects_notif = self.notification_renderer.render(
                 notification_area_rect, stats_summary
             )
             self.stat_rects.update(rects_notif)
-            # Adjust current_y only if notifications were below buttons (which they aren't)
-            # current_y = max(current_y, notification_area_rect.bottom + 10) # Not needed here
 
-        # 3. Info Text Block
         next_y, rects_info = self.info_text_renderer.render(
             current_y, stats_summary, buffer_capacity, lp_width
         )
         self.stat_rects.update(rects_info)
         current_y = next_y
 
-        # 4. TensorBoard Status
         next_y, rects_tb = self.tb_status_renderer.render(
             current_y + 10, tensorboard_log_dir, lp_width
         )
         self.stat_rects.update(rects_tb)
         current_y = next_y
 
-        # 5. Plot Area
         self.plot_area_renderer.render(
             current_y + 15, lp_width, current_height, plot_data, status
         )
 
     def get_stat_rects(self) -> Dict[str, pygame.Rect]:
-        """Returns the dictionary of rects for tooltip handling."""
         return self.stat_rects.copy()
 
     def get_tooltip_texts(self) -> Dict[str, str]:
-        """Returns the dictionary of tooltip texts."""
         return TOOLTIP_TEXTS
 
 
@@ -3816,7 +3959,6 @@ __all__ = [
 
 File: config/core.py
 # File: config/core.py
-# --- Core Configuration Classes ---
 import torch
 from typing import Deque, Dict, Any, List, Type, Tuple, Optional
 
@@ -3825,10 +3967,11 @@ from .general import TOTAL_TRAINING_STEPS
 
 # --- Visualization (Pygame) ---
 class VisConfig:
+    NUM_ENVS_TO_RENDER = 9
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
-    VISUAL_STEP_DELAY = 0
-    LEFT_PANEL_WIDTH = SCREEN_WIDTH // 2
+    VISUAL_STEP_DELAY = 0.005
+    LEFT_PANEL_WIDTH = (SCREEN_WIDTH // 4) * 3
     ENV_SPACING = 1
     ENV_GRID_PADDING = 1
     FPS = 0
@@ -3837,17 +3980,18 @@ class VisConfig:
     LIGHTG = (140, 140, 140)
     GRAY = (50, 50, 50)
     RED = (255, 50, 50)
+    DARK_RED = (80, 10, 10)
     BLUE = (50, 50, 255)
     YELLOW = (255, 255, 100)
     GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
-    NUM_ENVS_TO_RENDER = 48
     LINE_CLEAR_FLASH_COLOR = (180, 180, 220)
     LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)
+    GAME_OVER_FLASH_COLOR = (255, 0, 0)  # Bright Red
 
 
 # --- Environment ---
 class EnvConfig:
-    NUM_ENVS = 256
+    NUM_ENVS = 4096
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2  # Occupied, Is_Up
@@ -3869,15 +4013,14 @@ class EnvConfig:
 
 # --- Reward Shaping (RL Reward) ---
 class RewardConfig:
-    REWARD_PLACE_PER_TRI = 0.0  # Base reward for placing a piece (can be 0)
+    REWARD_PLACE_PER_TRI = 0.0
     REWARD_CLEAR_1 = 1.0
     REWARD_CLEAR_2 = 3.0
     REWARD_CLEAR_3PLUS = 6.0
     PENALTY_INVALID_MOVE = -0.1
     PENALTY_HOLE_PER_HOLE = -0.05
     PENALTY_GAME_OVER = -1.0
-    # --- MODIFIED: Add small survival reward ---
-    REWARD_ALIVE_STEP = 0.001  # Small positive reward for making a valid move
+    REWARD_ALIVE_STEP = 0.001
 
 
 # --- DQN Algorithm ---
@@ -3913,7 +4056,7 @@ class TrainConfig:
 class BufferConfig:
     REPLAY_BUFFER_SIZE = 200_000
     USE_N_STEP = True
-    N_STEP = 3
+    N_STEP = 6
     USE_PER = True
     PER_ALPHA = 0.6
     PER_BETA_START = 0.4
@@ -3944,7 +4087,7 @@ class ModelConfig:
 
 # --- Statistics and Logging ---
 class StatsConfig:
-    STATS_AVG_WINDOW = 1000
+    STATS_AVG_WINDOW: List[int] = [10, 100, 1_000, 10_000]
     CONSOLE_LOG_FREQ = 5_000
     PLOT_DATA_WINDOW = 100_000
 
@@ -3963,9 +4106,7 @@ class TensorBoardConfig:
 # --- Demo Mode Visuals ---
 class DemoConfig:
     BACKGROUND_COLOR = (10, 10, 20)
-    PREVIEW_COLOR = (200, 200, 200, 100)
-    INVALID_PREVIEW_COLOR = (255, 0, 0, 100)
-    SELECTED_SHAPE_HIGHLIGHT_COLOR = VisConfig.YELLOW
+    SELECTED_SHAPE_HIGHLIGHT_COLOR = VisConfig.BLUE
     HUD_FONT_SIZE = 24
     HELP_FONT_SIZE = 18
     HELP_TEXT = "[Arrows]=Move | [Q/E]=Cycle Shape | [Space]=Place | [ESC]=Exit"
@@ -4083,7 +4224,7 @@ from .core import (
     StatsConfig,
     TensorBoardConfig,
     VisConfig,
-    DemoConfig,  # Added DemoConfig just in case for future validation
+    DemoConfig,
 )
 from .general import (
     RUN_ID,
@@ -4097,9 +4238,7 @@ from .general import (
 
 
 def print_config_info_and_validate():
-    # --- MODIFIED: Instantiate EnvConfig ---
     env_config_instance = EnvConfig()
-    # --- END MODIFIED ---
 
     print("-" * 70)
     print(f"RUN ID: {RUN_ID}")
@@ -4109,11 +4248,9 @@ def print_config_info_and_validate():
     print(
         f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
         f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}, "
-        f"ShapeQs={'ON' if TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES else 'OFF'}"  # Added ShapeQ log status
+        f"ShapeQs={'ON' if TensorBoardConfig.LOG_SHAPE_PLACEMENT_Q_VALUES else 'OFF'}"
     )
-    # --- MODIFIED: Check GRID_FEATURES_PER_CELL on instance ---
-    if env_config_instance.GRID_FEATURES_PER_CELL != 2:  # Check against 2 now
-        # --- END MODIFIED ---
+    if env_config_instance.GRID_FEATURES_PER_CELL != 2:
         print(
             f"Warning: Network expects {EnvConfig.GRID_FEATURES_PER_CELL} features per cell (Occupied, Is_Up)."
             f" Config has: {env_config_instance.GRID_FEATURES_PER_CELL}"
@@ -4147,38 +4284,31 @@ def print_config_info_and_validate():
         )
         + " ---"
     )
-    # --- MODIFIED: Print state shapes and action dim from instance ---
     print(
         f"Config: Env=(R={env_config_instance.ROWS}, C={env_config_instance.COLS}), "
         f"GridState={env_config_instance.GRID_STATE_SHAPE}, "
         f"ShapeState={env_config_instance.SHAPE_STATE_DIM}, "
         f"ActionDim={env_config_instance.ACTION_DIM}"
     )
-    # --- END MODIFIED ---
     cnn_str = str(ModelConfig.Network.CONV_CHANNELS).replace(" ", "")
     mlp_str = str(ModelConfig.Network.COMBINED_FC_DIMS).replace(" ", "")
-    # --- MODIFIED: Print shape MLP dims from config ---
     shape_mlp_cfg_str = str(ModelConfig.Network.SHAPE_FEATURE_MLP_DIMS).replace(" ", "")
-    # --- MODIFIED: Removed ShapeEmb ---
     print(
         f"Network: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}, Dueling={DQNConfig.USE_DUELING}"
     )
-    # --- END MODIFIED ---
 
-    # --- MODIFIED: Access NUM_ENVS from instance ---
     print(
         f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M, BUFFER={BufferConfig.REPLAY_BUFFER_SIZE/1e6:.1f}M, BATCH={TrainConfig.BATCH_SIZE}, LEARN_START={TrainConfig.LEARN_START_STEP/1e3:.1f}k"
     )
-    # --- END MODIFIED ---
     print(
         f"Buffer: PER={BufferConfig.USE_PER}, N-Step={BufferConfig.N_STEP if BufferConfig.USE_N_STEP else 'N/A'}"
     )
+    # --- MODIFIED: Print list of window sizes ---
     print(
-        f"Stats: AVG_WINDOW={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ}"
+        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ}"
     )
-    # --- MODIFIED: Access NUM_ENVS from instance ---
+    # --- END MODIFIED ---
     if env_config_instance.NUM_ENVS >= 1024:
-        # --- END MODIFIED ---
         print(
             "*" * 70
             + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. Monitor system resources. ***"
@@ -4190,11 +4320,9 @@ def print_config_info_and_validate():
             + "\n"
             + "*" * 70
         )
-    # --- MODIFIED: Access NUM_ENVS from instance ---
     print(
         f"--- Rendering {VisConfig.NUM_ENVS_TO_RENDER if VisConfig.NUM_ENVS_TO_RENDER > 0 else 'ALL'} of {env_config_instance.NUM_ENVS} environments ---"
     )
-    # --- END MODIFIED ---
     print("-" * 70)
 
 
@@ -4208,7 +4336,11 @@ import traceback
 from typing import List, Dict, Any, Tuple
 
 from config import EnvConfig, RewardConfig, TensorBoardConfig, DEVICE
+
+# --- MODIFIED: Import GameState directly for type hinting ---
 from environment.game_state import GameState, StateType
+
+# --- END MODIFIED ---
 from agent.dqn_agent import DQNAgent
 from agent.replay_buffer.base_buffer import ReplayBufferBase
 from stats.stats_recorder import StatsRecorderBase
@@ -4216,11 +4348,14 @@ from utils.types import ActionType
 
 
 class ExperienceCollector:
-    """Handles interaction with parallel environments to collect experience."""
+    """
+    Handles interaction with parallel environments to collect experience.
+    Introduces environments sequentially to avoid synchronized starts.
+    """
 
     def __init__(
         self,
-        envs: List[GameState],
+        envs: List[GameState],  # Keep GameState type hint
         agent: DQNAgent,
         buffer: ReplayBufferBase,
         stats_recorder: StatsRecorderBase,
@@ -4238,41 +4373,74 @@ class ExperienceCollector:
         self.tb_config = tb_config
         self.device = DEVICE
 
+        # Initialize all states, but only a subset will be active initially
         self.current_states: List[StateType] = [env.reset() for env in self.envs]
         self.current_episode_scores = np.zeros(self.num_envs, dtype=np.float32)
         self.current_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
         self.current_episode_game_scores = np.zeros(self.num_envs, dtype=np.int32)
         self.current_episode_lines_cleared = np.zeros(self.num_envs, dtype=np.int32)
-        self.episode_count = 0  # Managed internally, but Trainer reads it
+        self.episode_count = 0
+
+        # --- NEW: Track active environments ---
+        self.num_active_envs: int = 0
+        print(
+            f"[ExperienceCollector] Initialized. Staggering start for {self.num_envs} environments."
+        )
+        # --- END NEW ---
 
     def collect(self, current_global_step: int) -> int:
-        """Collects one step of experience from each environment."""
-        actions, batch_chosen_slots, batch_shape_qs = self._select_actions()
-        next_states, rewards, dones, step_rewards = self._step_environments(actions)
-        self._store_transitions(actions, rewards, next_states, dones)
-        self._handle_episode_ends(dones, current_global_step)
-        self._update_current_states(next_states)
+        """
+        Collects one step of experience from each *active* environment.
+        Activates one new environment per call until all are active.
+        Returns the number of environment steps actually taken in this call.
+        """
+        # --- Activate one new environment if not all are active ---
+        if self.num_active_envs < self.num_envs:
+            self.num_active_envs += 1
+            print(
+                f"[ExperienceCollector] Activating environment {self.num_active_envs}/{self.num_envs} at global step ~{current_global_step}"
+            )
+        # --- END ---
+
+        if self.num_active_envs == 0:
+            return 0  # Should not happen if num_envs > 0
+
+        # --- Only interact with the active subset ---
+        num_to_process = self.num_active_envs
+        actions, batch_chosen_slots, batch_shape_qs = self._select_actions(
+            num_to_process
+        )
+        next_states, rewards, dones, step_rewards = self._step_environments(
+            actions, num_to_process
+        )
+        self._store_transitions(actions, rewards, next_states, dones, num_to_process)
+        self._handle_episode_ends(dones, current_global_step, num_to_process)
+        self._update_current_states(next_states, num_to_process)
         self._log_step_stats(
             actions,
             step_rewards,
             batch_chosen_slots,
             batch_shape_qs,
             current_global_step,
+            num_to_process,  # Pass the number processed
         )
-        return self.num_envs  # Return number of steps collected
+        # --- Return the number of environments processed in this step ---
+        return num_to_process
 
-    def _select_actions(self) -> Tuple[List[ActionType], np.ndarray, List[np.ndarray]]:
-        """Selects actions for all environments using the agent."""
-        actions = [-1] * self.num_envs
-        chosen_slots = np.full(self.num_envs, -1, dtype=np.int32)
+    def _select_actions(
+        self, num_to_select: int
+    ) -> Tuple[List[ActionType], np.ndarray, List[np.ndarray]]:
+        """Selects actions for the first `num_to_select` environments."""
+        actions = [-1] * num_to_select
+        chosen_slots = np.full(num_to_select, -1, dtype=np.int32)
         shape_qs_list = []
         num_slots = self.env_config.NUM_SHAPE_SLOTS
 
-        for i in range(self.num_envs):
+        for i in range(num_to_select):  # Loop only over active envs
             state = self.current_states[i]
             valid_actions = self.envs[i].valid_actions()
             if not valid_actions:
-                actions[i] = 0
+                actions[i] = 0  # Default action if none valid
                 shape_qs_list.append(np.full(num_slots, -np.inf, dtype=np.float32))
             else:
                 try:
@@ -4282,25 +4450,28 @@ class ExperienceCollector:
                     qs_to_log = (
                         shape_qs if shape_qs is not None else [-np.inf] * num_slots
                     )
+                    # Ensure logged array has correct size
                     shape_qs_list.append(
                         np.array(qs_to_log[:num_slots], dtype=np.float32)
                     )
                 except Exception as e:
                     print(f"ERROR: Agent select_action failed env {i}: {e}")
+                    traceback.print_exc()
                     actions[i] = random.choice(valid_actions)
                     shape_qs_list.append(np.full(num_slots, -np.inf, dtype=np.float32))
         return actions, chosen_slots, shape_qs_list
 
     def _step_environments(
-        self, actions: List[ActionType]
+        self, actions: List[ActionType], num_to_step: int
     ) -> Tuple[List[StateType], np.ndarray, np.ndarray, np.ndarray]:
-        """Steps all environments with the selected actions."""
-        next_states = [{} for _ in range(self.num_envs)]
-        rewards = np.zeros(self.num_envs, dtype=np.float32)
-        dones = np.zeros(self.num_envs, dtype=bool)
-        step_rewards = np.zeros(self.num_envs, dtype=np.float32)
+        """Steps the first `num_to_step` environments with the selected actions."""
+        # Initialize results for the number of envs being stepped
+        next_states = [{} for _ in range(num_to_step)]
+        rewards = np.zeros(num_to_step, dtype=np.float32)
+        dones = np.zeros(num_to_step, dtype=bool)
+        step_rewards = np.zeros(num_to_step, dtype=np.float32)
 
-        for i in range(self.num_envs):
+        for i in range(num_to_step):  # Loop only over active envs
             env = self.envs[i]
             action = actions[i]
             try:
@@ -4310,6 +4481,7 @@ class ExperienceCollector:
                 dones[i] = done
                 step_rewards[i] = reward
                 next_states[i] = next_state
+                # Update internal tracking for this env
                 self.current_episode_scores[i] += reward
                 self.current_episode_lengths[i] += 1
                 if not done:
@@ -4319,14 +4491,15 @@ class ExperienceCollector:
                     )
             except Exception as e:
                 print(f"ERROR: Env {i} step failed (Action: {action}): {e}")
+                traceback.print_exc()
                 rewards[i] = self.reward_config.PENALTY_GAME_OVER
                 dones[i] = True
                 step_rewards[i] = rewards[i]
                 next_states[i] = self._handle_env_crash(env, i)  # Reset and get state
                 # Record episode immediately on crash
                 self._record_episode_end(
-                    i, rewards[i], current_global_step=0
-                )  # Step will be updated later
+                    i, rewards[i], current_global_step=0  # Step will be updated later
+                )
                 self._reset_episode_stats(i)
 
         return next_states, rewards, dones, step_rewards
@@ -4340,6 +4513,7 @@ class ExperienceCollector:
             print(
                 f"FATAL: Env {env_index} failed reset after crash: {reset_e}. Creating zero state."
             )
+            traceback.print_exc()
             grid_zeros = np.zeros(self.env_config.GRID_STATE_SHAPE, dtype=np.float32)
             shape_zeros = np.zeros(
                 (
@@ -4356,18 +4530,25 @@ class ExperienceCollector:
         rewards: np.ndarray,
         next_states: List[StateType],
         dones: np.ndarray,
+        num_to_store: int,
     ):
-        """Pushes transitions to the replay buffer."""
-        for i in range(self.num_envs):
+        """Pushes transitions for the first `num_to_store` environments to the replay buffer."""
+        for i in range(num_to_store):  # Loop only over active envs
+            # Use the state *before* the step was taken
+            state_before_step = self.current_states[i]
             self.buffer.push(
-                self.current_states[i], actions[i], rewards[i], next_states[i], dones[i]
+                state_before_step, actions[i], rewards[i], next_states[i], dones[i]
             )
 
-    def _handle_episode_ends(self, dones: np.ndarray, current_global_step: int):
-        """Records stats for finished episodes and resets their state."""
-        for i in range(self.num_envs):
+    def _handle_episode_ends(
+        self, dones: np.ndarray, current_global_step: int, num_to_check: int
+    ):
+        """Records stats for finished episodes among the first `num_to_check` environments."""
+        for i in range(num_to_check):  # Loop only over active envs
             if dones[i]:
-                self._record_episode_end(i, 0, current_global_step + i + 1)  # Pass step
+                # Pass the correct global step for this env's termination
+                step_at_termination = current_global_step + i + 1
+                self._record_episode_end(i, 0, step_at_termination)
                 self.current_states[i] = self.envs[i].reset()  # Reset env state
                 self._reset_episode_stats(i)
 
@@ -4385,7 +4566,7 @@ class ExperienceCollector:
             episode_score=final_score,
             episode_length=final_length,
             episode_num=self.episode_count,
-            global_step=current_global_step,
+            global_step=current_global_step,  # Use the passed step
             game_score=final_game_score,
             lines_cleared=final_lines,
         )
@@ -4397,9 +4578,10 @@ class ExperienceCollector:
         self.current_episode_game_scores[env_index] = 0
         self.current_episode_lines_cleared[env_index] = 0
 
-    def _update_current_states(self, next_states: List[StateType]):
-        """Updates the current states for the next iteration."""
-        self.current_states = next_states
+    def _update_current_states(self, next_states: List[StateType], num_to_update: int):
+        """Updates the current states for the first `num_to_update` environments."""
+        for i in range(num_to_update):  # Loop only over active envs
+            self.current_states[i] = next_states[i]
 
     def _log_step_stats(
         self,
@@ -4408,27 +4590,39 @@ class ExperienceCollector:
         chosen_slots: np.ndarray,
         shape_qs_list: List[np.ndarray],
         current_global_step: int,
+        num_envs_processed: int,  # Number of envs processed in this step
     ):
-        """Logs statistics related to the collection step."""
+        """Logs statistics related to the collection step for the active environments."""
         step_log_data = {
             "buffer_size": len(self.buffer),
-            "global_step": current_global_step + self.num_envs,  # Step after collection
+            # The global step *after* this collection step
+            "global_step": current_global_step + num_envs_processed,
         }
         if self.tb_config.LOG_HISTOGRAMS:
-            step_log_data["step_rewards_batch"] = step_rewards
-            step_log_data["action_batch"] = np.array(actions, dtype=np.int32)
-            valid_chosen_slots = chosen_slots[chosen_slots != -1]
+            # Log data only from the processed environments
+            step_log_data["step_rewards_batch"] = step_rewards[:num_envs_processed]
+            step_log_data["action_batch"] = np.array(
+                actions[:num_envs_processed], dtype=np.int32
+            )
+
+            valid_chosen_slots = chosen_slots[:num_envs_processed]
+            valid_chosen_slots = valid_chosen_slots[valid_chosen_slots != -1]
             if len(valid_chosen_slots) > 0:
                 step_log_data["chosen_shape_slot_batch"] = valid_chosen_slots
-            if shape_qs_list:
+
+            if shape_qs_list:  # shape_qs_list already has length num_envs_processed
                 flat_shape_qs = np.concatenate(shape_qs_list)
                 valid_flat_shape_qs = flat_shape_qs[np.isfinite(flat_shape_qs)]
                 if len(valid_flat_shape_qs) > 0:
                     step_log_data["shape_slot_max_q_batch"] = valid_flat_shape_qs
+
         if self.tb_config.LOG_SHAPE_PLACEMENT_Q_VALUES:
+            # Agent's last batch Q values correspond to the last call to select_action,
+            # which processed num_envs_processed environments.
             batch_q_vals = self.agent.get_last_batch_q_values_for_actions()
-            if batch_q_vals is not None:
+            if batch_q_vals is not None and len(batch_q_vals) == num_envs_processed:
                 step_log_data["batch_q_values_actions_taken"] = batch_q_vals
+            # else: Handle potential mismatch if needed
 
         self.stats_recorder.record_step(step_log_data)
 
@@ -4499,7 +4693,7 @@ import torch
 import numpy as np
 import traceback
 import random
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 from config import (
     EnvConfig,
@@ -4513,11 +4707,21 @@ from config import (
     RewardConfig,
     TOTAL_TRAINING_STEPS,
 )
-from environment.game_state import GameState
+
+# --- MODIFIED: Import GameState directly for type hinting ---
+from environment.game_state import GameState, StateType
+
+# --- END MODIFIED ---
 from agent.dqn_agent import DQNAgent
 from agent.replay_buffer.base_buffer import ReplayBufferBase
 from stats.stats_recorder import StatsRecorderBase
 from utils.helpers import ensure_numpy
+from utils.types import (
+    PrioritizedNumpyBatch,
+    PrioritizedNumpyNStepBatch,
+    NumpyBatch,
+    NumpyNStepBatch,
+)
 from .experience_collector import ExperienceCollector
 from .checkpoint_manager import CheckpointManager
 from .training_utils import get_env_image_as_numpy
@@ -4528,7 +4732,7 @@ class Trainer:
 
     def __init__(
         self,
-        envs: List[GameState],
+        envs: List[GameState],  # Keep GameState type hint
         agent: DQNAgent,
         buffer: ReplayBufferBase,
         stats_recorder: StatsRecorderBase,
@@ -4546,7 +4750,9 @@ class Trainer:
         self.envs = envs
         self.agent = agent
         self.stats_recorder = stats_recorder
-        self.num_envs = env_config.NUM_ENVS
+        # --- MODIFIED: num_envs is max, collector tracks active ---
+        self.max_num_envs = env_config.NUM_ENVS
+        # --- END MODIFIED ---
         self.device = DEVICE
         self.env_config = env_config
         self.dqn_config = dqn_config
@@ -4582,14 +4788,19 @@ class Trainer:
             reward_config=self.reward_config,
             tb_config=self.tb_config,
         )
+        # Initialize collector's episode count from checkpoint if loaded
         self.experience_collector.episode_count = initial_episode_count
 
         self.last_image_log_step = -self.tb_config.IMAGE_LOG_FREQ
+        self.is_n_step_buffer = (
+            self.buffer_config.USE_N_STEP and self.buffer_config.N_STEP > 1
+        )
 
         self._log_initial_state()
         print("[Trainer] Initialization complete.")
 
     def _log_initial_state(self):
+        """Logs the state after initialization and potential loading."""
         initial_beta = self._update_beta()
         initial_lr = self._get_current_lr()
         self.stats_recorder.record_step(
@@ -4606,6 +4817,7 @@ class Trainer:
         )
 
     def _get_current_lr(self) -> float:
+        """Retrieves the current learning rate from the optimizer."""
         return (
             self.agent.optimizer.param_groups[0]["lr"]
             if hasattr(self.agent, "optimizer") and self.agent.optimizer.param_groups
@@ -4614,11 +4826,17 @@ class Trainer:
 
     def step(self):
         """Performs one full step: collect experience, train, update target net."""
-        # --- MODIFIED: Add timing for SPS calculation ---
         step_start_time = time.perf_counter()
 
+        # --- MODIFIED: Use steps_collected from collector ---
         steps_collected = self.experience_collector.collect(self.global_step)
+        if steps_collected == 0:  # Handle case where no envs are active yet
+            time.sleep(0.01)  # Small sleep to prevent busy-waiting
+            return
+
+        step_before_collection = self.global_step
         self.global_step += steps_collected
+        # --- END MODIFIED ---
 
         if (
             self.global_step >= self.train_config.LEARN_START_STEP
@@ -4630,50 +4848,73 @@ class Trainer:
         step_end_time = time.perf_counter()
         step_duration = step_end_time - step_start_time
 
-        # Record step time for SPS calculation
         self.stats_recorder.record_step(
             {
                 "step_time": step_duration,
-                "num_steps_processed": steps_collected,
-                "global_step": self.global_step,  # Pass current step
+                "num_steps_processed": steps_collected,  # Log actual steps processed
+                "global_step": self.global_step,
             }
         )
-        # --- END MODIFIED ---
 
         target_freq = self.dqn_config.TARGET_UPDATE_FREQ
         if target_freq > 0 and self.global_step > 0:
-            steps_before_this_iter = self.global_step - steps_collected
-            if steps_before_this_iter // target_freq < self.global_step // target_freq:
+            # --- MODIFIED: Use step_before_collection for comparison ---
+            if step_before_collection // target_freq < self.global_step // target_freq:
+                # --- END MODIFIED ---
                 print(f"[Trainer] Updating target network at step {self.global_step}")
                 self.agent.update_target_network()
 
-        self.maybe_save_checkpoint()
+        self.maybe_save_checkpoint(
+            step_before_collection
+        )  # Pass previous step for freq check
         self._maybe_log_image()
 
     def _train_batch(self):
+        """Samples a batch, computes loss, updates agent, and updates priorities (for PER)."""
         beta = self._update_beta()
-        indices, is_weights_np, batch_tuple = None, None, None
+        batch_sample = None
         try:
-            if self.buffer_config.USE_PER:
-                sample_result = self.buffer.sample(self.train_config.BATCH_SIZE)
-                if sample_result:
-                    batch_tuple, indices, is_weights_np = sample_result
-                else:
-                    return
-            else:
-                batch_tuple = self.buffer.sample(self.train_config.BATCH_SIZE)
-                if batch_tuple is None:
-                    return
+            batch_sample = self.buffer.sample(self.train_config.BATCH_SIZE)
+            if batch_sample is None:
+                # print(f"[Trainer] Buffer sample returned None (Size: {len(self.buffer)}). Skipping train step.")
+                return  # Not enough samples or other issue
         except Exception as e:
             print(f"ERROR sampling buffer: {e}")
             traceback.print_exc()
             return
 
+        # Unpack sample based on whether it's prioritized
+        indices, is_weights_np = None, None
+        if self.buffer_config.USE_PER:
+            if (
+                batch_sample
+                and isinstance(batch_sample, tuple)
+                and len(batch_sample) == 3
+            ):
+                batch_tuple, indices, is_weights_np = batch_sample
+            else:
+                print(
+                    f"Warning: Expected prioritized batch (tuple of 3), got {type(batch_sample)}. Skipping training step."
+                )
+                return
+        else:  # Uniform sampling
+            # Batch tuple is the whole sample for uniform (length 5 or 6)
+            if (
+                batch_sample
+                and isinstance(batch_sample, tuple)
+                and len(batch_sample) in [5, 6]
+            ):
+                batch_tuple = batch_sample
+            else:
+                print(
+                    f"Warning: Expected uniform batch (tuple of 5 or 6), got {type(batch_sample)}. Skipping training step."
+                )
+                return
+
         loss, td_errors = torch.tensor(0.0), None
         try:
-            loss, td_errors = self.agent.compute_loss(
-                batch_tuple, self.buffer_config.USE_N_STEP, is_weights_np
-            )
+            # Agent's compute_loss handles checking buffer_config for is_n_step
+            loss, td_errors = self.agent.compute_loss(batch_tuple, is_weights_np)
         except Exception as e:
             print(f"ERROR computing loss: {e}")
             traceback.print_exc()
@@ -4683,7 +4924,8 @@ class Trainer:
         try:
             grad_norm = self.agent.update(loss)
             if grad_norm is None and self.dqn_config.GRADIENT_CLIP_NORM > 0:
-                return
+                print("[Trainer] Skipping PER update due to gradient clipping error.")
+                return  # Skip PER update if agent update failed
         except Exception as e:
             print(f"ERROR updating agent: {e}")
             traceback.print_exc()
@@ -4702,16 +4944,19 @@ class Trainer:
             "grad_norm": grad_norm if grad_norm is not None else 0.0,
             "avg_max_q": self.agent.get_last_avg_max_q(),
             "lr": self._get_current_lr(),
-            "global_step": self.global_step,  # Pass current step
+            "global_step": self.global_step,
         }
         if self.tb_config.LOG_HISTOGRAMS and td_errors is not None:
-            train_log_data["batch_td_errors"] = td_errors
+            train_log_data["batch_td_errors"] = (
+                td_errors.detach() if td_errors.requires_grad else td_errors
+            )
+
         self.stats_recorder.record_step(train_log_data)
 
     def _update_beta(self) -> float:
-        if not self.buffer_config.USE_PER:
-            beta = 1.0
-        else:
+        """Updates PER beta based on annealing schedule and sets it in the buffer."""
+        beta = 1.0  # Default for uniform
+        if self.buffer_config.USE_PER:
             start, end, frames = (
                 self.buffer_config.PER_BETA_START,
                 1.0,
@@ -4719,22 +4964,29 @@ class Trainer:
             )
             fraction = min(1.0, float(self.global_step) / max(1, frames))
             beta = start + fraction * (end - start)
-            if hasattr(self.buffer, "set_beta"):
-                self.buffer.set_beta(beta)
-        # Record beta along with the current step
+            self.buffer.set_beta(beta)  # Update buffer's beta
+
+        # Always record beta for consistency
         self.stats_recorder.record_step({"beta": beta, "global_step": self.global_step})
         return beta
 
     def _maybe_log_image(self):
+        """Logs a sample environment state image to TensorBoard periodically."""
         if not self.tb_config.LOG_IMAGES:
             return
         img_freq = self.tb_config.IMAGE_LOG_FREQ
         if img_freq <= 0:
             return
+
         steps_since_last = self.global_step - self.last_image_log_step
         if steps_since_last >= img_freq:
             try:
-                env_idx = random.randint(0, self.num_envs - 1)
+                # --- MODIFIED: Sample from active envs ---
+                num_currently_active = self.experience_collector.num_active_envs
+                if num_currently_active == 0:
+                    return
+                env_idx = random.randint(0, num_currently_active - 1)
+                # --- END MODIFIED ---
                 img_array = get_env_image_as_numpy(
                     self.envs[env_idx], self.env_config, self.vis_config
                 )
@@ -4748,25 +5000,31 @@ class Trainer:
                     self.last_image_log_step = self.global_step
             except Exception as e:
                 print(f"Error logging environment image: {e}")
+                traceback.print_exc()
 
-    def maybe_save_checkpoint(self, force_save=False):
+    # --- MODIFIED: Pass previous step for frequency check ---
+    def maybe_save_checkpoint(self, step_before_collection: int, force_save=False):
+        # --- END MODIFIED ---
+        """Saves agent and buffer state based on frequency or if forced."""
         save_freq = self.train_config.CHECKPOINT_SAVE_FREQ
         if save_freq <= 0 and not force_save:
             return
+
+        # --- MODIFIED: Use step_before_collection for frequency check ---
         should_save_freq = (
             save_freq > 0
             and self.global_step > 0
-            and (
-                self.global_step // save_freq
-                > (self.global_step - self.num_envs) // save_freq
-            )
+            and (step_before_collection // save_freq < self.global_step // save_freq)
         )
+        # --- END MODIFIED ---
+
         if force_save or should_save_freq:
             self.checkpoint_manager.save_checkpoint(
                 self.global_step, self.experience_collector.get_episode_count()
             )
 
     def train_loop(self):
+        """Main training loop until max steps."""
         print("[Trainer] Starting training loop...")
         try:
             while self.global_step < TOTAL_TRAINING_STEPS:
@@ -4781,9 +5039,17 @@ class Trainer:
             self.cleanup(save_final=True)
 
     def cleanup(self, save_final: bool = True):
+        """Performs cleanup actions like saving final state and closing logger."""
         print("[Trainer] Cleaning up resources...")
         if save_final:
             print("[Trainer] Saving final checkpoint...")
+            if hasattr(self.buffer, "flush_pending"):
+                print("[Trainer] Flushing pending buffer transitions...")
+                try:
+                    self.buffer.flush_pending()
+                except Exception as flush_err:
+                    print(f"ERROR flushing buffer: {flush_err}")
+                    traceback.print_exc()
             self.checkpoint_manager.save_checkpoint(
                 self.global_step,
                 self.experience_collector.get_episode_count(),
@@ -4791,11 +5057,13 @@ class Trainer:
             )
         else:
             print("[Trainer] Skipping final save as requested.")
+
         if hasattr(self.stats_recorder, "close"):
             try:
                 self.stats_recorder.close()
             except Exception as e:
                 print(f"Error closing stats recorder: {e}")
+
         print("[Trainer] Cleanup complete.")
 
 
@@ -4828,7 +5096,7 @@ class CheckpointManager:
         device: torch.device,
     ):
         self.agent = agent
-        self.buffer = buffer
+        self.buffer = buffer  # Store initial reference
         self.model_save_path = model_save_path
         self.buffer_save_path = buffer_save_path
         self.buffer_config = buffer_config
@@ -4843,14 +5111,23 @@ class CheckpointManager:
         else:
             print("[CheckpointManager] No agent checkpoint specified, starting fresh.")
 
+        # --- Load or create buffer ---
         if load_buffer_path:
             self.load_buffer_state(load_buffer_path)
         else:
-            print("[CheckpointManager] No buffer specified, starting empty.")
-            if self.buffer is None:
-                self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
+            print("[CheckpointManager] No buffer specified, creating new empty buffer.")
+            # Create a new buffer if none was loaded
+            self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
+
+        # --- Ensure buffer is initialized ---
+        if self.buffer is None:
+            print(
+                "[CheckpointManager] ERROR: Buffer is None after initialization/loading attempt. Creating empty."
+            )
+            self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
 
     def load_agent_checkpoint(self, path_to_load: str):
+        # Logic remains the same
         if not os.path.isfile(path_to_load):
             print(
                 f"[CheckpointManager] LOAD WARNING: Agent ckpt not found: {path_to_load}"
@@ -4858,13 +5135,22 @@ class CheckpointManager:
             return
         print(f"[CheckpointManager] Loading agent checkpoint from: {path_to_load}")
         try:
+            # Load checkpoint to the specified device
             checkpoint = torch.load(path_to_load, map_location=self.device)
+            # --- Pass buffer_config to agent's load_state_dict ---
             self.agent.load_state_dict(checkpoint)
+            # --- Get state from checkpoint AFTER loading agent ---
             self.global_step = checkpoint.get("global_step", 0)
             self.episode_count = checkpoint.get("episode_count", 0)
             print(
                 f"  -> Resuming from Step: {self.global_step}, Ep: {self.episode_count}"
             )
+        except KeyError as e:
+            print(
+                f"  -> ERROR loading agent checkpoint: Missing key '{e}'. Check compatibility."
+            )
+            self.global_step = 0
+            self.episode_count = 0
         except Exception as e:
             print(f"  -> ERROR loading agent checkpoint ('{e}'). Check compatibility.")
             traceback.print_exc()
@@ -4872,26 +5158,34 @@ class CheckpointManager:
             self.episode_count = 0
 
     def load_buffer_state(self, path_to_load: str):
+        # Logic remains the same, but recreate buffer first
         if not os.path.isfile(path_to_load):
             print(
                 f"[CheckpointManager] LOAD WARNING: Buffer file not found: {path_to_load}"
             )
+            # Create new buffer if load path invalid
             self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
             return
-        print(f"[CheckpointManager] Loading buffer state from: {path_to_load}")
+
+        print(
+            f"[CheckpointManager] Recreating buffer structure before loading state from: {path_to_load}"
+        )
         try:
-            # Recreate buffer first to ensure config match
+            # Create buffer instance based on config FIRST
             self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
+            # Then load the state into the newly created instance
             self.buffer.load_state(path_to_load)
             print(f"  -> Buffer loaded. Size: {len(self.buffer)}")
         except Exception as e:
-            print(f"  -> ERROR loading buffer state ('{e}'). Starting empty.")
+            print(f"  -> ERROR loading buffer state ('{e}'). Creating empty buffer.")
             traceback.print_exc()
+            # Create new buffer on error
             self.buffer = create_replay_buffer(self.buffer_config, self.dqn_config)
 
     def save_checkpoint(
         self, global_step: int, episode_count: int, is_final: bool = False
     ):
+        # Logic remains the same for agent
         prefix = "FINAL" if is_final else f"step_{global_step}"
         save_dir = os.path.dirname(self.model_save_path)
         os.makedirs(save_dir, exist_ok=True)
@@ -4899,6 +5193,7 @@ class CheckpointManager:
         print(f"[CheckpointManager] Saving agent checkpoint ({prefix})...")
         try:
             agent_save_data = self.agent.get_state_dict()
+            # Add step/episode info directly to the agent state dict
             agent_save_data["global_step"] = global_step
             agent_save_data["episode_count"] = episode_count
             torch.save(agent_save_data, self.model_save_path)
@@ -4911,8 +5206,11 @@ class CheckpointManager:
 
         print(f"[CheckpointManager] Saving buffer state ({prefix})...")
         try:
+            # --- MODIFIED: Flush pending transitions before saving buffer ---
             if hasattr(self.buffer, "flush_pending"):
+                print("  -> Flushing pending buffer transitions before saving...")
                 self.buffer.flush_pending()
+            # --- END MODIFIED ---
             self.buffer.save_state(self.buffer_save_path)
             print(
                 f"  -> Buffer state saved: {os.path.basename(self.buffer_save_path)} (Size: {len(self.buffer)})"
@@ -4922,9 +5220,15 @@ class CheckpointManager:
             traceback.print_exc()
 
     def get_initial_state(self) -> Tuple[int, int]:
+        # Logic remains the same
         return self.global_step, self.episode_count
 
     def get_buffer(self) -> ReplayBufferBase:
+        # Logic remains the same
+        if self.buffer is None:
+            raise RuntimeError(
+                "Buffer accessed before initialization in CheckpointManager."
+            )
         return self.buffer
 
 
@@ -5026,31 +5330,30 @@ from typing import NamedTuple, Union, Tuple, List, Dict, Any, Optional
 import numpy as np
 import torch
 
-# --- MODIFIED: StateType is now Dict ---
-# from environment.game_state import StateType # Import from env if defined there
+# --- State represented as a dictionary ---
 StateType = Dict[str, np.ndarray]  # e.g., {"grid": ndarray, "shapes": ndarray}
-# --- END MODIFIED ---
 
 # Type alias for action
 ActionType = int
 
 
+# --- Transition Tuple ---
 class Transition(NamedTuple):
-    state: StateType  # State is now a Dict
+    state: StateType
     action: ActionType
     reward: float
-    next_state: StateType  # Next state is now a Dict
+    next_state: StateType
     done: bool
-    n_step_discount: Optional[float] = None
+    n_step_discount: Optional[float] = None  # Store gamma^n for N-step
 
 
 # --- Batch Types (Numpy) ---
-# States and next_states are now lists of dictionaries
+# State batches are now lists of dictionaries
 NumpyStateBatch = List[StateType]
 NumpyActionBatch = np.ndarray
 NumpyRewardBatch = np.ndarray
 NumpyDoneBatch = np.ndarray
-NumpyDiscountBatch = np.ndarray  # For N-step
+NumpyDiscountBatch = np.ndarray  # For N-step discount factor (gamma^n)
 
 # Standard 1-step batch
 NumpyBatch = Tuple[
@@ -5061,31 +5364,37 @@ NumpyBatch = Tuple[
 NumpyNStepBatch = Tuple[
     NumpyStateBatch,
     NumpyActionBatch,
-    NumpyRewardBatch,
-    NumpyStateBatch,
-    NumpyDoneBatch,
-    NumpyDiscountBatch,
+    NumpyRewardBatch,  # N-step rewards
+    NumpyStateBatch,  # State after N steps
+    NumpyDoneBatch,  # Done flag after N steps
+    NumpyDiscountBatch,  # Effective discount gamma^n
 ]
 
 # Prioritized 1-step batch
-PrioritizedNumpyBatch = Tuple[NumpyBatch, np.ndarray, np.ndarray]
-# ((s_dicts, a, r, ns_dicts, d), indices, weights)
+PrioritizedNumpyBatch = Tuple[
+    NumpyBatch,  # (states_dicts, actions, rewards, next_states_dicts, dones)
+    np.ndarray,  # indices (tree indices for PER update)
+    np.ndarray,  # is_weights (importance sampling weights)
+]
 
 # Prioritized N-step batch
-PrioritizedNumpyNStepBatch = Tuple[NumpyNStepBatch, np.ndarray, np.ndarray]
-# ((s_dicts, a, rn, nsn_dicts, dn, gamman), indices, weights)
+PrioritizedNumpyNStepBatch = Tuple[
+    NumpyNStepBatch,  # (states_dicts, actions, rewards_n, next_states_dicts_n, dones_n, discounts_n)
+    np.ndarray,  # indices
+    np.ndarray,  # is_weights
+]
 
 
 # --- Batch Types (Tensor) ---
-# State tensors are now tuples (grid_tensor, shape_tensor)
+# State tensors are tuples (grid_tensor, shape_tensor) after conversion
 TensorStateBatch = Tuple[torch.Tensor, torch.Tensor]
 TensorActionBatch = torch.Tensor
 TensorRewardBatch = torch.Tensor
 TensorDoneBatch = torch.Tensor
-TensorDiscountBatch = torch.Tensor  # For N-step
-TensorWeightsBatch = torch.Tensor  # For PER
+TensorDiscountBatch = torch.Tensor  # For N-step discount factor
+TensorWeightsBatch = torch.Tensor  # For PER IS weights
 
-# Standard 1-step batch
+# Standard 1-step batch (Tensor)
 TensorBatch = Tuple[
     TensorStateBatch,
     TensorActionBatch,
@@ -5094,7 +5403,7 @@ TensorBatch = Tuple[
     TensorDoneBatch,
 ]
 
-# N-step batch
+# N-step batch (Tensor)
 TensorNStepBatch = Tuple[
     TensorStateBatch,
     TensorActionBatch,
@@ -5105,8 +5414,8 @@ TensorNStepBatch = Tuple[
 ]
 
 
-# --- Agent State ---
-AgentStateDict = Dict[str, Any]  # Remains the same
+# --- Agent State Dictionary ---
+AgentStateDict = Dict[str, Any]  # For saving/loading agent checkpoints
 
 
 File: utils/helpers.py
@@ -5266,10 +5575,12 @@ class ActionSelector:
             self._last_avg_max_q = -float("inf")
             return 0
 
+        # Epsilon-greedy exploration (only if NOT using noisy nets)
         if not self.use_noisy_nets and random.random() < epsilon:
             self._last_avg_max_q = -float("inf")
             return random.choice(valid_actions_indices)
 
+        # Always act greedily based on network output (noise is handled internally if enabled)
         q_values_np = self._get_q_values_for_state(state)
         return self._select_best_action_from_q_values(
             q_values_np, valid_actions_indices
@@ -5296,8 +5607,14 @@ class ActionSelector:
         grid_t = grid_t.to(model_device)
         shapes_t = shapes_t.to(model_device)
 
+        # --- MODIFIED: Always use eval() mode for action selection ---
+        # This prevents BatchNorm errors with batch size 1 and uses mean
+        # weights for NoisyLinear during inference.
         self.online_net.eval()
-        dist_or_q = self.online_net(grid_t, shapes_t)
+        # --- END MODIFIED ---
+
+        with torch.no_grad():
+            dist_or_q = self.online_net(grid_t, shapes_t)
 
         if self.use_distributional:
             probabilities = F.softmax(dist_or_q, dim=2)
@@ -5328,21 +5645,33 @@ class ActionSelector:
         for s_idx in range(self.num_shape_slots):
             valid_placements_for_slot = valid_actions_by_slot[s_idx]
             if not valid_placements_for_slot:
+                self._last_shape_slot_max_q_values[s_idx] = -float(
+                    "inf"
+                )  # Ensure it's set even if no valid actions
                 continue
 
             global_indices = [
                 s_idx * self.locations_per_shape + p_idx
                 for p_idx in valid_placements_for_slot
             ]
-            q_values_for_valid_placements = q_values_np[global_indices]
+            # Ensure indices are within bounds of the q_values array
+            valid_global_indices = [
+                idx for idx in global_indices if 0 <= idx < q_values_np.shape[0]
+            ]
+            if not valid_global_indices:
+                self._last_shape_slot_max_q_values[s_idx] = -float("inf")
+                continue
+
+            q_values_for_valid_placements = q_values_np[valid_global_indices]
 
             if q_values_for_valid_placements.size == 0:
+                self._last_shape_slot_max_q_values[s_idx] = -float("inf")
                 continue
 
             max_q_for_slot = np.max(q_values_for_valid_placements)
-            best_placement_idx_for_slot = valid_placements_for_slot[
-                np.argmax(q_values_for_valid_placements)
-            ]
+            # Find the original placement index corresponding to the max Q value
+            argmax_local = np.argmax(q_values_for_valid_placements)
+            best_placement_idx_for_slot = valid_placements_for_slot[argmax_local]
 
             self._last_shape_slot_max_q_values[s_idx] = float(max_q_for_slot)
 
@@ -5352,9 +5681,15 @@ class ActionSelector:
                 best_placement_idx = best_placement_idx_for_slot
                 start_g_idx = s_idx * self.locations_per_shape
                 end_g_idx = start_g_idx + self.locations_per_shape
-                placement_qs_for_best_shape = q_values_np[
-                    start_g_idx:end_g_idx
-                ].tolist()
+                # Ensure slicing is within bounds
+                if 0 <= start_g_idx < end_g_idx <= q_values_np.shape[0]:
+                    placement_qs_for_best_shape = q_values_np[
+                        start_g_idx:end_g_idx
+                    ].tolist()
+                else:
+                    placement_qs_for_best_shape = [
+                        -float("inf")
+                    ] * self.locations_per_shape
 
         if best_shape_slot != -1:
             final_action = (
@@ -5366,15 +5701,21 @@ class ActionSelector:
 
             if final_action not in valid_actions_indices:
                 print(
-                    f"CRITICAL WARNING: Chosen action {final_action} not in valid_actions! Falling back."
+                    f"CRITICAL WARNING: Chosen action {final_action} (Slot: {best_shape_slot}, Place: {best_placement_idx}, Q: {best_overall_q:.3f}) not in valid_actions! Falling back."
                 )
+                # print(f"Q-values shape: {q_values_np.shape}")
+                # print(f"Valid actions: {valid_actions_indices}")
                 self._reset_log_state()
                 return random.choice(valid_actions_indices)
 
             return final_action
         else:
+            # This case should ideally not happen if valid_actions_indices is not empty
+            print(
+                "Warning: No best action found despite having valid actions. Falling back."
+            )
             self._last_avg_max_q = -float("inf")
-            return 0
+            return random.choice(valid_actions_indices) if valid_actions_indices else 0
 
     def get_last_avg_max_q(self) -> float:
         return self._last_avg_max_q
@@ -5382,10 +5723,21 @@ class ActionSelector:
     def get_last_shape_selection_info(
         self,
     ) -> Tuple[Optional[int], Optional[List[float]], Optional[List[float]]]:
+        # Return copies to prevent external modification
+        shape_qs = (
+            self._last_shape_slot_max_q_values[:]
+            if self._last_shape_slot_max_q_values
+            else None
+        )
+        placement_qs = (
+            self._last_placement_q_values_for_chosen_shape[:]
+            if self._last_placement_q_values_for_chosen_shape
+            else None
+        )
         return (
             self._last_chosen_shape_slot,
-            self._last_shape_slot_max_q_values,
-            self._last_placement_q_values_for_chosen_shape,
+            shape_qs,
+            placement_qs,
         )
 
 
@@ -5412,20 +5764,50 @@ def np_batch_to_tensor(
 ) -> Union[TensorBatch, TensorNStepBatch]:
     """Converts numpy batch tuple (where states are dicts) to tensor tuple."""
 
+    # --- MODIFIED: Unpack based on is_n_step flag ---
     if is_n_step:
+        # Ensure the batch has 6 elements for N-step
+        if len(batch) != 6:
+            raise ValueError(f"Expected 6 elements in N-step batch, got {len(batch)}")
         states_dicts, actions, rewards, next_states_dicts, dones, discounts = batch
     else:
-        states_dicts, actions, rewards, next_states_dicts, dones = batch[:5]
-        discounts = None
+        # Ensure the batch has 5 elements for 1-step
+        if len(batch) != 5:
+            raise ValueError(f"Expected 5 elements in 1-step batch, got {len(batch)}")
+        states_dicts, actions, rewards, next_states_dicts, dones = batch
+        discounts = None  # No discount element in 1-step batch
+    # --- END MODIFIED ---
 
-    grid_states = np.array([s["grid"] for s in states_dicts], dtype=np.float32)
-    shape_states = np.array([s["shapes"] for s in states_dicts], dtype=np.float32)
-    grid_next_states = np.array(
-        [ns["grid"] for ns in next_states_dicts], dtype=np.float32
-    )
-    shape_next_states = np.array(
-        [ns["shapes"] for ns in next_states_dicts], dtype=np.float32
-    )
+    # --- Input Validation and Conversion (Remains the same) ---
+    if not isinstance(states_dicts, list) or not isinstance(next_states_dicts, list):
+        raise TypeError("States and next_states must be lists of dictionaries.")
+    if not states_dicts or not next_states_dicts:
+        raise ValueError("State lists cannot be empty.")
+
+    # Validate first state dictionary structure
+    first_state = states_dicts[0]
+    if (
+        not isinstance(first_state, dict)
+        or "grid" not in first_state
+        or "shapes" not in first_state
+    ):
+        raise ValueError("State dictionaries must contain 'grid' and 'shapes' keys.")
+
+    try:
+        grid_states = np.array([s["grid"] for s in states_dicts], dtype=np.float32)
+        shape_states = np.array([s["shapes"] for s in states_dicts], dtype=np.float32)
+        grid_next_states = np.array(
+            [ns["grid"] for ns in next_states_dicts], dtype=np.float32
+        )
+        shape_next_states = np.array(
+            [ns["shapes"] for ns in next_states_dicts], dtype=np.float32
+        )
+    except KeyError as e:
+        raise ValueError(
+            f"Missing key in state dictionary during batch conversion: {e}"
+        )
+    except Exception as e:
+        raise RuntimeError(f"Error converting states to numpy arrays: {e}")
 
     expected_channels = env_config.GRID_FEATURES_PER_CELL
     if (
@@ -5436,24 +5818,35 @@ def np_batch_to_tensor(
             f"Batch grid state channel mismatch! Expected {expected_channels}, got {grid_states.shape[1]} and {grid_next_states.shape[1]}."
         )
 
-    grid_s_t = torch.tensor(grid_states, device=device, dtype=torch.float32)
-    shape_s_t = torch.tensor(shape_states, device=device, dtype=torch.float32)
-    a_t = torch.tensor(actions, device=device, dtype=torch.long).unsqueeze(1)
-    r_t = torch.tensor(rewards, device=device, dtype=torch.float32).unsqueeze(1)
-    grid_ns_t = torch.tensor(grid_next_states, device=device, dtype=torch.float32)
-    shape_ns_t = torch.tensor(shape_next_states, device=device, dtype=torch.float32)
-    d_t = torch.tensor(dones, device=device, dtype=torch.float32).unsqueeze(1)
+    try:
+        grid_s_t = torch.tensor(grid_states, device=device, dtype=torch.float32)
+        shape_s_t = torch.tensor(shape_states, device=device, dtype=torch.float32)
+        a_t = torch.tensor(actions, device=device, dtype=torch.long).unsqueeze(1)
+        r_t = torch.tensor(rewards, device=device, dtype=torch.float32).unsqueeze(1)
+        grid_ns_t = torch.tensor(grid_next_states, device=device, dtype=torch.float32)
+        shape_ns_t = torch.tensor(shape_next_states, device=device, dtype=torch.float32)
+        # Convert dones to float for multiplication in loss calculation
+        d_t = torch.tensor(dones, device=device, dtype=torch.float32).unsqueeze(1)
+    except Exception as e:
+        raise RuntimeError(f"Error converting numpy arrays to tensors: {e}")
 
     states_t = (grid_s_t, shape_s_t)
     next_states_t = (grid_ns_t, shape_ns_t)
 
+    # --- MODIFIED: Return based on is_n_step ---
     if is_n_step:
-        disc_t = torch.tensor(discounts, device=device, dtype=torch.float32).unsqueeze(
-            1
-        )
+        if discounts is None:
+            raise ValueError("Discounts array is missing for N-step batch.")
+        try:
+            disc_t = torch.tensor(
+                discounts, device=device, dtype=torch.float32
+            ).unsqueeze(1)
+        except Exception as e:
+            raise RuntimeError(f"Error converting discounts to tensor: {e}")
         return states_t, a_t, r_t, next_states_t, d_t, disc_t
     else:
         return states_t, a_t, r_t, next_states_t, d_t
+    # --- END MODIFIED ---
 
 
 File: agent/loss_calculator.py
@@ -5462,10 +5855,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Tuple, Optional, Union
-
+from typing import Tuple, Optional, Union, Dict, List  # Added List, Dict
 from config import DQNConfig, TensorBoardConfig, EnvConfig
-from utils.types import TensorBatch, TensorNStepBatch
+from utils.types import (
+    TensorBatch,
+    TensorNStepBatch,
+    NumpyBatch,
+    NumpyNStepBatch,
+)  # Added Numpy types
 from utils.helpers import ensure_numpy
 from .agent_utils import np_batch_to_tensor
 
@@ -5488,7 +5885,9 @@ class LossCalculator:
         self.dqn_config = dqn_config
         self.tb_config = tb_config
         self.device = device
-        self.gamma = dqn_config.GAMMA
+        self.gamma = (
+            dqn_config.GAMMA
+        )  # Still keep gamma for potential 1-step use or fallbacks
         self.use_distributional = dqn_config.USE_DISTRIBUTIONAL
         self.num_atoms = dqn_config.NUM_ATOMS
         self.v_min = dqn_config.V_MIN
@@ -5509,14 +5908,21 @@ class LossCalculator:
 
     def compute_loss(
         self,
-        batch: Union[np.ndarray, np.ndarray],
+        # --- MODIFIED: Type hint for numpy batch from buffer ---
+        batch: Union[NumpyBatch, NumpyNStepBatch],
         is_n_step: bool,
         is_weights: Optional[np.ndarray] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Computes the loss and TD errors."""
-        tensor_batch = np_batch_to_tensor(
-            batch, is_n_step, self.env_config, self.device
-        )
+        """Computes the loss and TD errors, handling PER weights."""
+        # --- Conversion now happens inside loss computation ---
+        try:
+            tensor_batch = np_batch_to_tensor(
+                batch, is_n_step, self.env_config, self.device
+            )
+        except Exception as e:
+            print(f"Error converting batch to tensor in compute_loss: {e}")
+            # Return zero loss and no errors if conversion fails
+            return torch.tensor(0.0, device=self.device, requires_grad=True), None
 
         if self.use_distributional:
             return self._compute_distributional_loss(
@@ -5531,15 +5937,31 @@ class LossCalculator:
         is_n_step: bool,
         is_weights: Optional[np.ndarray],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Computes standard (SmoothL1) loss."""
-        states_tuple, actions, rewards, next_states_tuple, dones = tensor_batch[:5]
+        """Computes standard (SmoothL1) loss, applying PER weights."""
+        # --- MODIFIED: Unpack based on is_n_step ---
+        if is_n_step:
+            # Ensure batch has 6 elements for N-step tensor batch
+            if len(tensor_batch) != 6:
+                raise ValueError(
+                    f"Expected 6 elements in N-step tensor batch, got {len(tensor_batch)}"
+                )
+            states_tuple, actions, rewards, next_states_tuple, dones, discounts = (
+                tensor_batch
+            )
+        else:
+            # Ensure batch has 5 elements for 1-step tensor batch
+            if len(tensor_batch) != 5:
+                raise ValueError(
+                    f"Expected 5 elements in 1-step tensor batch, got {len(tensor_batch)}"
+                )
+            states_tuple, actions, rewards, next_states_tuple, dones = tensor_batch
+            # Use standard gamma for 1-step
+            discounts = torch.full_like(rewards, self.gamma)
+        # --- END MODIFIED ---
+
         grids, shapes = states_tuple
         next_grids, next_shapes = next_states_tuple
         batch_size = grids.size(0)
-
-        discounts = (
-            tensor_batch[5] if is_n_step else torch.full_like(rewards, self.gamma)
-        )
 
         with torch.no_grad():
             self.online_net.eval()
@@ -5551,7 +5973,10 @@ class LossCalculator:
             target_q_for_best_actions = target_next_q_values.gather(
                 1, best_next_actions
             )
+            # --- MODIFIED: Use n-step reward and discount ---
+            # target_q = R_n + discount_n * Q_target(s_{t+n}, argmax_a Q_online(s_{t+n}, a))
             target_q = rewards + discounts * target_q_for_best_actions * (1.0 - dones)
+            # --- END MODIFIED ---
 
         self.online_net.train()
         current_q_all_actions = self.online_net(grids, shapes)
@@ -5573,17 +5998,35 @@ class LossCalculator:
         is_n_step: bool,
         is_weights: Optional[np.ndarray],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Computes distributional (C51) loss using KL divergence."""
-        states_tuple, actions, _, _, _ = tensor_batch[:5]
+        """Computes distributional (C51) loss using KL divergence, applying PER weights."""
+        # --- MODIFIED: Unpack based on is_n_step ---
+        if is_n_step:
+            if len(tensor_batch) != 6:
+                raise ValueError(
+                    f"Expected 6 elements in N-step tensor batch, got {len(tensor_batch)}"
+                )
+            states_tuple, actions, _, _, _, _ = (
+                tensor_batch  # Rewards/discounts used in target calculation
+            )
+        else:
+            if len(tensor_batch) != 5:
+                raise ValueError(
+                    f"Expected 5 elements in 1-step tensor batch, got {len(tensor_batch)}"
+                )
+            states_tuple, actions, _, _, _ = tensor_batch
+        # --- END MODIFIED ---
+
         grids, shapes = states_tuple
         batch_size = grids.size(0)
 
         with torch.no_grad():
+            # --- Target calculation now uses n-step rewards/discounts internally ---
             target_dist = self._get_target_distribution(tensor_batch, is_n_step)
 
         self.online_net.train()
         current_dist_logits = self.online_net(grids, shapes)
         current_dist_log_probs = F.log_softmax(current_dist_logits, dim=2)
+
         actions_expanded = actions.view(batch_size, 1, 1).expand(-1, -1, self.num_atoms)
         current_log_probs_for_actions = current_dist_log_probs.gather(
             1, actions_expanded
@@ -5609,11 +6052,21 @@ class LossCalculator:
                 "_get_target_distribution called when use_distributional is False"
             )
 
+        # --- MODIFIED: Unpack rewards and discounts based on is_n_step ---
         if is_n_step:
+            if len(batch) != 6:
+                raise ValueError(
+                    f"Expected 6 elements in N-step tensor batch, got {len(batch)}"
+                )
             _, _, rewards, next_states_tuple, dones, discounts = batch
         else:
+            if len(batch) != 5:
+                raise ValueError(
+                    f"Expected 5 elements in 1-step tensor batch, got {len(batch)}"
+                )
             _, _, rewards, next_states_tuple, dones = batch[:5]
-            discounts = torch.full_like(rewards, self.gamma)
+            discounts = torch.full_like(rewards, self.gamma)  # Use standard gamma
+        # --- END MODIFIED ---
 
         next_grids, next_shapes = next_states_tuple
         batch_size = next_grids.size(0)
@@ -5621,7 +6074,9 @@ class LossCalculator:
         self.online_net.eval()
         online_next_dist_logits = self.online_net(next_grids, next_shapes)
         online_next_probs = F.softmax(online_next_dist_logits, dim=2)
-        online_expected_q = (online_next_probs * self.support).sum(dim=2)
+        online_expected_q = (
+            online_next_probs * self.support.unsqueeze(0).unsqueeze(0)
+        ).sum(dim=2)
         best_next_actions = online_expected_q.argmax(dim=1)
 
         self.target_net.eval()
@@ -5631,32 +6086,28 @@ class LossCalculator:
             torch.arange(batch_size), best_next_actions
         ]
 
+        # --- MODIFIED: Project using n-step rewards and discounts ---
+        # Tz = R_n + discount_n * z
         Tz = rewards + discounts * self.support.unsqueeze(0) * (1.0 - dones)
+        # --- END MODIFIED ---
+
         Tz = Tz.clamp(self.v_min, self.v_max)
         b = (Tz - self.v_min) / self.delta_z
         lower_idx = b.floor().long()
         upper_idx = b.ceil().long()
 
-        offset = (
-            torch.linspace(
-                0, (batch_size - 1) * self.num_atoms, batch_size, device=self.device
-            )
-            .long()
-            .unsqueeze(1)
-        )
-        lower_idx = (lower_idx + offset).clamp(0, batch_size * self.num_atoms - 1)
-        upper_idx = (upper_idx + offset).clamp(0, batch_size * self.num_atoms - 1)
+        # Handle edge cases and integer bins
+        lower_idx = torch.where(lower_idx == upper_idx, lower_idx - 1, lower_idx)
+        upper_idx = torch.where(lower_idx >= upper_idx, lower_idx + 1, upper_idx)
+        lower_idx = lower_idx.clamp(0, self.num_atoms - 1)
+        upper_idx = upper_idx.clamp(0, self.num_atoms - 1)
 
         weight_u = b - b.floor()
         weight_l = 1.0 - weight_u
 
         target_dist = torch.zeros_like(target_next_best_dist_probs)
-        target_dist.view(-1).index_add_(
-            0, lower_idx.view(-1), (target_next_best_dist_probs * weight_l).view(-1)
-        )
-        target_dist.view(-1).index_add_(
-            0, upper_idx.view(-1), (target_next_best_dist_probs * weight_u).view(-1)
-        )
+        target_dist.scatter_add_(1, lower_idx, target_next_best_dist_probs * weight_l)
+        target_dist.scatter_add_(1, upper_idx, target_next_best_dist_probs * weight_u)
 
         return target_dist
 
@@ -5666,18 +6117,23 @@ class LossCalculator:
         shapes: torch.Tensor,
         current_q: Optional[torch.Tensor] = None,
     ):
-        """Logs average max Q and optionally Q-values for actions taken."""
         with torch.no_grad():
             self.online_net.eval()
             q_or_dist = self.online_net(grids, shapes)
             if self.use_distributional:
                 probabilities = F.softmax(q_or_dist, dim=2)
-                q_values = (probabilities * self.support).sum(dim=2)
+                q_values = (probabilities * self.support.unsqueeze(0).unsqueeze(0)).sum(
+                    dim=2
+                )
             else:
                 q_values = q_or_dist
             self._last_avg_max_q = q_values.max(dim=1)[0].mean().item()
 
-        if self.tb_config.LOG_SHAPE_PLACEMENT_Q_VALUES and current_q is not None:
+        if (
+            self.tb_config.LOG_SHAPE_PLACEMENT_Q_VALUES
+            and current_q is not None
+            and not self.use_distributional
+        ):
             self._batch_q_values_for_actions_taken = (
                 current_q.detach().squeeze().cpu().numpy()
             )
@@ -5687,15 +6143,26 @@ class LossCalculator:
     def _apply_per_weights(
         self, elementwise_loss: torch.Tensor, is_weights: Optional[np.ndarray]
     ) -> torch.Tensor:
-        """Applies PER weights to the loss."""
         if is_weights is not None:
             is_weights_t = torch.tensor(
                 is_weights, dtype=torch.float32, device=self.device
             )
-            # Ensure is_weights_t matches elementwise_loss shape if needed
-            if elementwise_loss.ndim > 1 and is_weights_t.ndim == 1:
+            # Ensure dimensions match for broadcasting (elementwise_loss is likely [B])
+            if (
+                elementwise_loss.ndim == 1
+                and is_weights_t.ndim == 1
+                and elementwise_loss.shape[0] == is_weights_t.shape[0]
+            ):
+                loss = (is_weights_t * elementwise_loss).mean()
+            elif elementwise_loss.ndim > 1 and is_weights_t.ndim == 1:
+                # Try unsqueezing weights if loss has extra dimensions
                 is_weights_t = is_weights_t.unsqueeze(1)
-            loss = (is_weights_t * elementwise_loss).mean()
+                loss = (is_weights_t * elementwise_loss).mean()
+            else:
+                print(
+                    f"Warning: Mismatched shapes for loss ({elementwise_loss.shape}) and IS weights ({is_weights_t.shape}). Using unweighted mean."
+                )
+                loss = elementwise_loss.mean()
         else:
             loss = elementwise_loss.mean()
         return loss
@@ -5730,9 +6197,17 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 import traceback
+import copy
 from typing import Tuple, List, Dict, Any, Optional, Union
 
-from config import ModelConfig, EnvConfig, DQNConfig, DEVICE, TensorBoardConfig
+from config import (
+    ModelConfig,
+    EnvConfig,
+    DQNConfig,
+    DEVICE,
+    TensorBoardConfig,
+    BufferConfig,
+)
 from environment.game_state import StateType
 from utils.types import ActionType, AgentStateDict, NumpyBatch, NumpyNStepBatch
 from agent.model_factory import create_network
@@ -5745,13 +6220,18 @@ class DQNAgent:
     """DQN Agent orchestrating network, action selection, and loss calculation."""
 
     def __init__(
-        self, config: ModelConfig, dqn_config: DQNConfig, env_config: EnvConfig
+        self,
+        config: ModelConfig,
+        dqn_config: DQNConfig,
+        env_config: EnvConfig,
+        buffer_config: BufferConfig,
     ):
         print("[DQNAgent] Initializing...")
         self.device = DEVICE
         self.env_config = env_config
         self.dqn_config = dqn_config
         self.tb_config = TensorBoardConfig()
+        self.buffer_config = buffer_config
         self.action_dim = env_config.ACTION_DIM
 
         self.online_net = create_network(
@@ -5821,21 +6301,36 @@ class DQNAgent:
     def select_action(
         self, state: StateType, epsilon: float, valid_actions_indices: List[ActionType]
     ) -> ActionType:
+        self.online_net.to(self.device)
+        # --- Epsilon is ignored by ActionSelector if USE_NOISY_NETS is true ---
         return self.action_selector.select_action(state, epsilon, valid_actions_indices)
 
     def compute_loss(
         self,
         batch: Union[NumpyBatch, NumpyNStepBatch],
-        is_n_step: bool,
         is_weights: Optional[np.ndarray] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        return self.loss_calculator.compute_loss(batch, is_n_step, is_weights)
+        is_n_step = self.buffer_config.USE_N_STEP and self.buffer_config.N_STEP > 1
+        # --- Set networks to train() for Noisy Nets before loss calculation ---
+        if self.dqn_config.USE_NOISY_NETS:
+            self.online_net.train()
+            self.target_net.train()  # Target also uses noise during loss calculation
+        else:
+            self.online_net.train()
+            self.target_net.eval()  # Standard eval mode for target net
+        loss, td_errors = self.loss_calculator.compute_loss(
+            batch, is_n_step, is_weights
+        )
+        # --- Restore target net eval mode if not noisy ---
+        if not self.dqn_config.USE_NOISY_NETS:
+            self.target_net.eval()
+        return loss, td_errors
 
     def update(self, loss: torch.Tensor) -> Optional[float]:
         grad_norm = None
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        self.online_net.train()
+        self.online_net.train()  # Keep online net in train mode
 
         if self.dqn_config.GRADIENT_CLIP_NORM > 0:
             try:
@@ -5845,62 +6340,67 @@ class DQNAgent:
                     error_if_nonfinite=True,
                 ).item()
             except RuntimeError as clip_err:
-                print(f"ERROR: Gradient clipping failed: {clip_err}")
+                print(
+                    f"ERROR: Gradient clipping failed: {clip_err}. Skipping optimizer step."
+                )
+                self.optimizer.zero_grad(set_to_none=True)
                 return None
             except Exception as clip_err:
-                print(f"Warning: Error during gradient clipping: {clip_err}")
+                print(f"Warning: Unexpected error during gradient clipping: {clip_err}")
                 grad_norm = None
 
-        self.optimizer.step()
+        try:
+            self.optimizer.step()
+        except Exception as optim_err:
+            print(f"ERROR: Optimizer step failed: {optim_err}")
+            traceback.print_exc()
+            return None
 
         if self.scheduler:
             self.scheduler.step()
+
+        # --- Reset noise after optimizer step ---
         if self.dqn_config.USE_NOISY_NETS:
             self.online_net.reset_noise()
             self.target_net.reset_noise()
+        # --- END Reset Noise ---
+
         return grad_norm
 
     def update_target_network(self):
         self.target_net.load_state_dict(self.online_net.state_dict())
-        self.target_net.eval()
+        self.target_net.eval()  # Standard eval mode after update
 
     def get_state_dict(self) -> AgentStateDict:
+        self.online_net.to(self.device)
+        self.target_net.to(self.device)
         self.online_net.cpu()
         self.target_net.cpu()
-        optim_state_cpu = {}
-        if hasattr(self.optimizer, "state") and self.optimizer.state:
-            for group in self.optimizer.param_groups:
-                for p in group["params"]:
-                    if p in self.optimizer.state:
-                        state = self.optimizer.state[p]
-                        for k, v in state.items():
-                            if isinstance(v, torch.Tensor):
-                                optim_state_cpu[id(p), k] = v.cpu()
-                                state[k] = v.cpu()
+
+        cpu_optimizer = optim.AdamW(
+            self.online_net.parameters(),
+            lr=self.dqn_config.LEARNING_RATE,
+            eps=self.dqn_config.ADAM_EPS,
+            weight_decay=1e-5,
+        )
+        cpu_optimizer.load_state_dict(self.optimizer.state_dict())
+        optimizer_state_dict_cpu = cpu_optimizer.state_dict()
+        del cpu_optimizer
+
         state = {
             "online_net_state_dict": self.online_net.state_dict(),
             "target_net_state_dict": self.target_net.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
+            "optimizer_state_dict": optimizer_state_dict_cpu,
             "scheduler_state_dict": (
                 self.scheduler.state_dict() if self.scheduler else None
             ),
         }
-        if hasattr(self.optimizer, "state") and self.optimizer.state:
-            for group in self.optimizer.param_groups:
-                for p in group["params"]:
-                    if p in self.optimizer.state:
-                        state_opt = self.optimizer.state[p]
-                        for k, v_cpu in state_opt.items():
-                            if (
-                                isinstance(v_cpu, torch.Tensor)
-                                and (id(p), k) in optim_state_cpu
-                            ):
-                                original_tensor = optim_state_cpu[(id(p), k)].to(
-                                    self.device
-                                )
-                                state_opt[k] = original_tensor
+
         self.online_net.to(self.device)
         self.target_net.to(self.device)
+        self.online_net.train()
+        self.target_net.eval()
+
         return state
 
     def load_state_dict(self, state_dict: AgentStateDict):
@@ -5909,52 +6409,53 @@ class DQNAgent:
             self.online_net.load_state_dict(
                 state_dict["online_net_state_dict"], strict=False
             )
-        except Exception as e:
-            print(f"ERROR loading online_net state_dict: {e}")
-            traceback.print_exc()
-            raise
-        if "target_net_state_dict" in state_dict:
-            try:
+            if "target_net_state_dict" in state_dict:
                 self.target_net.load_state_dict(
                     state_dict["target_net_state_dict"], strict=False
                 )
-            except Exception as e:
-                print(f"ERROR loading target_net state_dict: {e}. Copying from online.")
+            else:
+                print("Warning: Target net state missing, copying from online.")
                 self.target_net.load_state_dict(self.online_net.state_dict())
-        else:
-            print("Warning: Target net state missing, copying from online.")
-            self.target_net.load_state_dict(self.online_net.state_dict())
-        self.online_net.to(self.device)
-        self.target_net.to(self.device)
-        if "optimizer_state_dict" in state_dict:
-            try:
+
+            self.online_net.to(self.device)
+            self.target_net.to(self.device)
+
+            if "optimizer_state_dict" in state_dict:
                 self.optimizer.load_state_dict(state_dict["optimizer_state_dict"])
-                for state in self.optimizer.state.values():
-                    for k, v in state.items():
-                        if isinstance(v, torch.Tensor) and v.device != self.device:
-                            state[k] = v.to(self.device)
-            except Exception as e:
-                print(f"Warning: Could not load optimizer state ({e}). Resetting.")
+                print("[DQNAgent] Optimizer state loaded.")
+            else:
+                print("Warning: Optimizer state not found. Resetting optimizer.")
                 self._reset_optimizer()
-        else:
-            print("Warning: Optimizer state not found. Resetting.")
-            self._reset_optimizer()
-        if (
-            self.scheduler
-            and "scheduler_state_dict" in state_dict
-            and state_dict["scheduler_state_dict"] is not None
-        ):
-            try:
-                self.scheduler.load_state_dict(state_dict["scheduler_state_dict"])
-            except Exception as e:
-                print(f"Warning: Could not load LR scheduler state ({e}). Resetting.")
+
+            if (
+                self.scheduler
+                and "scheduler_state_dict" in state_dict
+                and state_dict["scheduler_state_dict"] is not None
+            ):
+                try:
+                    self.scheduler.load_state_dict(state_dict["scheduler_state_dict"])
+                    print("[DQNAgent] Scheduler state loaded.")
+                except Exception as e:
+                    print(
+                        f"Warning: Could not load LR scheduler state ({e}). Resetting."
+                    )
+                    self.scheduler = self._initialize_scheduler(self.dqn_config)
+            elif self.scheduler:
+                print("Warning: LR Scheduler state not found. Resetting.")
                 self.scheduler = self._initialize_scheduler(self.dqn_config)
-        elif self.scheduler:
-            print("Warning: LR Scheduler state not found. Resetting.")
-            self.scheduler = self._initialize_scheduler(self.dqn_config)
-        self.online_net.train()
-        self.target_net.eval()
-        print("[DQNAgent] load_state_dict complete.")
+
+            self.online_net.train()
+            self.target_net.eval()
+            print("[DQNAgent] load_state_dict complete.")
+
+        except Exception as e:
+            print(f"CRITICAL ERROR during DQNAgent.load_state_dict: {e}")
+            traceback.print_exc()
+            print("Attempting to reset agent state after load failure.")
+            self._reset_optimizer()
+            self.target_net.load_state_dict(self.online_net.state_dict())
+            self.online_net.train()
+            self.target_net.eval()
 
     def _reset_optimizer(self):
         self.optimizer = optim.AdamW(
@@ -6127,12 +6628,11 @@ class UniformReplayBuffer(ReplayBufferBase):
 
 File: agent/replay_buffer/buffer_utils.py
 # File: agent/replay_buffer/buffer_utils.py
-# (No structural changes, cleaner print statements)
 from config import BufferConfig, DQNConfig
 from .base_buffer import ReplayBufferBase
 from .uniform_buffer import UniformReplayBuffer
 from .prioritized_buffer import PrioritizedReplayBuffer
-from .nstep_buffer import NStepBufferWrapper
+from .nstep_buffer import NStepBufferWrapper  # Import the wrapper
 
 
 def create_replay_buffer(
@@ -6142,11 +6642,12 @@ def create_replay_buffer(
 
     print("[BufferFactory] Creating replay buffer...")
     print(f"  Type: {'Prioritized' if config.USE_PER else 'Uniform'}")
-    print(f"  Capacity: {config.REPLAY_BUFFER_SIZE / 1e6:.1f}M")
-    if config.USE_PER:
-        print(f"  PER alpha={config.PER_ALPHA}, eps={config.PER_EPSILON}")
+    print(f"  Capacity: {config.REPLAY_BUFFER_SIZE/1e6:.1f}M")
 
     if config.USE_PER:
+        print(
+            f"  PER alpha={config.PER_ALPHA}, eps={config.PER_EPSILON}, beta_start={config.PER_BETA_START}"
+        )
         core_buffer = PrioritizedReplayBuffer(
             capacity=config.REPLAY_BUFFER_SIZE,
             alpha=config.PER_ALPHA,
@@ -6155,6 +6656,7 @@ def create_replay_buffer(
     else:
         core_buffer = UniformReplayBuffer(capacity=config.REPLAY_BUFFER_SIZE)
 
+    # --- MODIFIED: Wrap with NStepBufferWrapper if enabled ---
     if config.USE_N_STEP and config.N_STEP > 1:
         print(
             f"  N-Step Wrapper: Enabled (N={config.N_STEP}, gamma={dqn_config.GAMMA})"
@@ -6167,6 +6669,7 @@ def create_replay_buffer(
     else:
         print(f"  N-Step Wrapper: Disabled")
         final_buffer = core_buffer
+    # --- END MODIFIED ---
 
     print(f"[BufferFactory] Final buffer type: {type(final_buffer).__name__}")
     return final_buffer
@@ -6189,12 +6692,11 @@ from environment.game_state import StateType  # Use the Dict type
 # --- END MODIFIED ---
 from utils.types import (
     Transition,
-    # StateType, # Removed
     ActionType,
     NumpyBatch,
-    PrioritizedNumpyBatch,
+    PrioritizedNumpyBatch,  # Added
     NumpyNStepBatch,
-    PrioritizedNumpyNStepBatch,
+    PrioritizedNumpyNStepBatch,  # Added
 )
 from utils.helpers import save_object, load_object
 
@@ -6207,8 +6709,8 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
         self.tree = SumTree(capacity)
         self.alpha = alpha
         self.epsilon = epsilon
-        self.beta = 0.0
-        self.max_priority = 1.0
+        self.beta = 0.0  # Initial beta, will be annealed by Trainer
+        self.max_priority = 1.0  # Initial max priority
 
     def push(
         self,
@@ -6227,12 +6729,12 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
         # Add with current max priority to ensure new samples get seen
         self.tree.add(self.max_priority, transition)
 
-    # --- MODIFIED: Sample returns dict states ---
     def sample(
         self, batch_size: int
     ) -> Optional[Union[PrioritizedNumpyBatch, PrioritizedNumpyNStepBatch]]:
         """Samples batch using priorities, calculates IS weights."""
         if len(self) < batch_size:
+            # print(f"PER Sample Warning: Not enough samples ({len(self)} < {batch_size})")
             return None
 
         batch_data: List[Transition] = []
@@ -6241,25 +6743,38 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
         segment = self.tree.total() / batch_size
 
         for i in range(batch_size):
+            # Sample uniformly from each segment
             s = random.uniform(segment * i, segment * (i + 1))
-            s = max(1e-9, s)  # Avoid zero
-            idx, p, data = self.tree.get(s)
+            # Ensure s is within valid range, slightly above 0
+            s = max(1e-9, min(s, self.tree.total()))
+
+            try:
+                idx, p, data = self.tree.get(s)
+            except Exception as e:
+                print(
+                    f"ERROR during SumTree.get(s={s}, total={self.tree.total()}): {e}"
+                )
+                return None  # Cannot proceed if sampling fails
 
             retries = 0
             max_retries = 5
+            # Handle cases where data might be invalid (e.g., None during fill)
             while not isinstance(data, Transition) and retries < max_retries:
-                print(
-                    f"Warning: PER sample retrieved invalid data (type: {type(data)}). Retrying..."
-                )
-                s = random.uniform(1e-9, self.tree.total())
-                idx, p, data = self.tree.get(s)
+                # print(f"Warning: PER sample retrieved invalid data (type: {type(data)}). Retrying...")
+                # Resample from the entire range if invalid data found
+                s_retry = random.uniform(1e-9, self.tree.total())
+                try:
+                    idx, p, data = self.tree.get(s_retry)
+                except Exception as e:
+                    print(f"ERROR during SumTree.get() retry: {e}")
+                    return None
                 retries += 1
 
             if not isinstance(data, Transition):
                 print(
                     f"ERROR: PER sample failed after {max_retries} retries. Skipping batch."
                 )
-                # This indicates a potential issue with the SumTree or data storage
+                # This could indicate a persistent issue with the SumTree or data storage
                 return None
 
             priorities[i] = p
@@ -6270,28 +6785,36 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
         sampling_probs = np.maximum(
             priorities / self.tree.total(), 1e-9
         )  # Avoid division by zero
-        is_weights = np.power(len(self) * sampling_probs, -self.beta)
-        # Normalize weights by max weight for stability
-        is_weights = (is_weights / (is_weights.max() + 1e-9)).astype(np.float32)
+        # is_weights = np.power(len(self) * sampling_probs, -self.beta)
+        # Use current number of entries (n_entries) instead of capacity (len(self))
+        num_entries = max(
+            1, len(self)
+        )  # Avoid division by zero if buffer is empty somehow
+        is_weights = np.power(num_entries * sampling_probs, -self.beta)
+
+        # Normalize weights by max weight for stability (clip weights for safety)
+        is_weights = is_weights / (is_weights.max() + 1e-9)
+        is_weights = np.clip(is_weights, 1e-6, 100.0).astype(np.float32)
 
         # Check if N-step based on first item
+        # Note: Assumes all items in batch are either N-step or 1-step consistently
         is_n_step = batch_data[0].n_step_discount is not None
         batch_tuple = self._unpack_batch(batch_data, is_n_step)  # Returns dict states
 
         return batch_tuple, indices, is_weights
 
-    # --- END MODIFIED ---
-
-    # --- MODIFIED: Unpack returns dict states ---
     def _unpack_batch(
         self, batch_data: List[Transition], is_n_step: bool
     ) -> Union[NumpyBatch, NumpyNStepBatch]:
         """Unpacks list of Transitions into numpy arrays, keeping states as dicts."""
+        # --- Keeps states as list of dictionaries ---
         states_dicts = [t.state for t in batch_data]
         actions_np = np.array([t.action for t in batch_data], dtype=np.int64)
         rewards_np = np.array([t.reward for t in batch_data], dtype=np.float32)
         next_states_dicts = [t.next_state for t in batch_data]
-        dones_np = np.array([t.done for t in batch_data], dtype=np.float32)
+        dones_np = np.array(
+            [t.done for t in batch_data], dtype=np.float32
+        )  # Use float32 for dones
 
         if is_n_step:
             discounts_np = np.array(
@@ -6306,9 +6829,7 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
                 discounts_np,
             )
         else:
-            return states_dicts, actions_np, rewards_np, next_states_dicts, dones_np
-
-    # --- END MODIFIED ---
+            return (states_dicts, actions_np, rewards_np, next_states_dicts, dones_np)
 
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
         """Updates priorities of experiences at given tree indices."""
@@ -6318,7 +6839,7 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
             )
             return
 
-        # Apply alpha transformation to TD errors
+        # Apply alpha transformation to TD errors before updating the tree
         priorities = np.power(np.abs(priorities) + self.epsilon, self.alpha)
         priorities = np.maximum(priorities, 1e-6)  # Ensure positive priorities
 
@@ -6328,11 +6849,11 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
                 # print(f"Warning: Invalid tree index {idx} provided to update_priorities. Skipping.")
                 continue
             self.tree.update(idx, priority)
-            self.max_priority = max(
-                self.max_priority, priority
-            )  # Update max priority seen
+            # Update max priority seen so far
+            self.max_priority = max(self.max_priority, priority)
 
     def set_beta(self, beta: float):
+        """Updates the beta exponent for IS weight calculation."""
         self.beta = beta
 
     def flush_pending(self):
@@ -6354,7 +6875,7 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
             "max_priority": self.max_priority,
             "alpha": self.alpha,
             "epsilon": self.epsilon,
-            # Beta is transient, no need to save
+            # Beta is transient, derived from training progress, no need to save
         }
 
     def load_state_from_data(self, state: Dict[str, Any]):
@@ -6375,15 +6896,17 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
             valid_data = [
                 d for d in state["tree_data"][:num_to_load] if isinstance(d, Transition)
             ]
+            # Populate the data array directly
             self.tree.data[: len(valid_data)] = valid_data
             self.tree.write_ptr = state.get("tree_write_ptr", 0) % self.capacity
             self.tree.n_entries = len(
                 valid_data
-            )  # Correct n_entries based on valid data
+            )  # Correct n_entries based on valid data loaded
             # Rebuild tree priorities from loaded data (expensive but necessary if capacity changed)
             print("Rebuilding SumTree priorities from loaded data...")
             self.tree.tree.fill(0)  # Clear existing tree sums
             self.max_priority = 1.0  # Reset max priority
+            # Re-calculate priorities based on existing data - assume max priority for loaded data
             for i in range(self.tree.n_entries):
                 # Assign default max priority during rebuild
                 self.tree.update(i + self.capacity - 1, self.max_priority)
@@ -6400,9 +6923,10 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
                     f"Warning: Filtered {len(state['tree_data']) - len(valid_data)} invalid items from PER data during load."
                 )
             self.tree.data = np.array(valid_data, dtype=object)  # Ensure numpy array
+
             self.tree.write_ptr = state.get("tree_write_ptr", 0)
             self.tree.n_entries = state.get("tree_n_entries", 0)
-            # Ensure n_entries is consistent with actual data
+            # Ensure n_entries is consistent with actual data after filtering
             actual_entries = sum(1 for d in self.tree.data if isinstance(d, Transition))
             if self.tree.n_entries != actual_entries:
                 print(
@@ -6413,8 +6937,10 @@ class PrioritizedReplayBuffer(ReplayBufferBase):
             self.max_priority = state.get("max_priority", 1.0)
             print(f"[PER] Loaded {self.tree.n_entries} transitions.")
 
+        # Load hyperparameters
         self.alpha = state.get("alpha", self.alpha)
         self.epsilon = state.get("epsilon", self.epsilon)
+        # Beta is set by Trainer based on current step, not loaded
 
     def save_state(self, filepath: str):
         save_object(self.get_state(), filepath)
@@ -6504,14 +7030,10 @@ File: agent/replay_buffer/nstep_buffer.py
 # File: agent/replay_buffer/nstep_buffer.py
 from collections import deque
 import numpy as np
-from typing import Deque, Tuple, Optional, Any, Dict, List
+from typing import Deque, Tuple, Optional, Any, Dict, List, Union
 from .base_buffer import ReplayBufferBase
-
-# --- MODIFIED: Import specific StateType ---
 from environment.game_state import StateType  # Use the Dict type
-
-# --- END MODIFIED ---
-from utils.types import Transition, ActionType
+from utils.types import Transition, ActionType, NumpyBatch, NumpyNStepBatch
 from utils.helpers import save_object, load_object
 
 
@@ -6529,6 +7051,7 @@ class NStepBufferWrapper(ReplayBufferBase):
         self.n_step_deque: Deque[
             Tuple[StateType, ActionType, float, StateType, bool]
         ] = deque(maxlen=n_step)
+        print(f"[NStepWrapper] Initialized with n={n_step}, gamma={gamma}")
 
     def _calculate_n_step_transition(
         self, current_deque_list: List[Tuple]
@@ -6543,14 +7066,14 @@ class NStepBufferWrapper(ReplayBufferBase):
         state_0, action_0 = (
             current_deque_list[0][0],
             current_deque_list[0][1],
-        )  # State is dict
+        )
 
         for i in range(effective_n):
-            s, a, r, ns, d = current_deque_list[i]
-            n_step_reward += discount_accum * r
-            if d:  # Episode terminated within N steps
-                # The next_state for the N-step transition is the state *after* the terminal action
-                n_step_next_state = ns
+            _s, _a, reward_i, next_state_i, done_i = current_deque_list[i]
+            n_step_reward += discount_accum * reward_i
+            if done_i:
+                # Episode terminated within N steps
+                n_step_next_state = next_state_i  # State after the terminal action
                 n_step_done = True
                 n_step_discount = self.gamma ** (i + 1)
                 return Transition(
@@ -6578,48 +7101,41 @@ class NStepBufferWrapper(ReplayBufferBase):
 
     def push(
         self,
-        state: StateType,  # State is dict
+        state: StateType,
         action: ActionType,
         reward: float,
-        next_state: StateType,  # Next state is dict
+        next_state: StateType,
         done: bool,
     ):
-        """Adds raw transition, processes N-step if possible, pushes to wrapped buffer."""
         self.n_step_deque.append((state, action, reward, next_state, done))
 
-        # If deque isn't full yet, only process if the *newly added* transition was terminal
         if len(self.n_step_deque) < self.n_step:
             if done:
-                self._flush_on_done()  # Process partial transitions ending here
-            return  # Don't process full N-step yet
+                self._flush_on_done()
+            return
 
         # Deque has N items, calculate N-step transition starting from the oldest
+        # Pass a copy to avoid modification if _flush_on_done is called concurrently
         n_step_transition = self._calculate_n_step_transition(list(self.n_step_deque))
         if n_step_transition:
-            # Push the calculated N-step transition to the underlying buffer
             self.wrapped_buffer.push(
                 state=n_step_transition.state,
                 action=n_step_transition.action,
                 reward=n_step_transition.reward,
                 next_state=n_step_transition.next_state,
                 done=n_step_transition.done,
-                n_step_discount=n_step_transition.n_step_discount,  # Pass discount factor
+                n_step_discount=n_step_transition.n_step_discount,
             )
 
-        # If the *newly added* transition was terminal, flush remaining partials
         if done:
             self._flush_on_done()
 
     def _flush_on_done(self):
         """Processes remaining partial transitions when an episode ends."""
-        # The deque contains transitions leading up to and including the 'done' one.
-        # We need to calculate N-step returns for sequences starting *before* the done transition.
         temp_deque = list(self.n_step_deque)
-        while len(temp_deque) > 1:  # Process until only the 'done' transition remains
-            # Calculate N-step starting from the current oldest
+        while len(temp_deque) > 1:
             n_step_transition = self._calculate_n_step_transition(temp_deque)
             if n_step_transition:
-                # Push if valid (should always be if temp_deque not empty)
                 self.wrapped_buffer.push(
                     state=n_step_transition.state,
                     action=n_step_transition.action,
@@ -6628,29 +7144,27 @@ class NStepBufferWrapper(ReplayBufferBase):
                     done=n_step_transition.done,
                     n_step_discount=n_step_transition.n_step_discount,
                 )
-            temp_deque.pop(0)  # Remove the starting state we just processed
-        self.n_step_deque.clear()  # Clear the deque after flushing
+            temp_deque.pop(0)
+        self.n_step_deque.clear()
 
     def sample(self, batch_size: int) -> Any:
-        # Sampling is delegated to the wrapped buffer
+        # Sampling is delegated, wrapped buffer returns N-step or 1-step batch
         return self.wrapped_buffer.sample(batch_size)
 
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
-        # Priority update is delegated
         self.wrapped_buffer.update_priorities(indices, priorities)
 
     def set_beta(self, beta: float):
-        # Beta setting is delegated
         if hasattr(self.wrapped_buffer, "set_beta"):
             self.wrapped_buffer.set_beta(beta)
 
     def __len__(self) -> int:
-        # Length is determined by the wrapped buffer
         return len(self.wrapped_buffer)
 
     def flush_pending(self):
-        """Processes and pushes any remaining transitions before exit/save."""
-        print(f"[NStepWrapper] Flushing {len(self.n_step_deque)} pending transitions.")
+        print(
+            f"[NStepWrapper] Flushing {len(self.n_step_deque)} pending transitions..."
+        )
         temp_deque = list(self.n_step_deque)
         while len(temp_deque) > 0:
             n_step_transition = self._calculate_n_step_transition(temp_deque)
@@ -6663,23 +7177,20 @@ class NStepBufferWrapper(ReplayBufferBase):
                     done=n_step_transition.done,
                     n_step_discount=n_step_transition.n_step_discount,
                 )
-            temp_deque.pop(0)  # Remove the processed start state
+            temp_deque.pop(0)
         self.n_step_deque.clear()
-        # Also flush the underlying buffer if it has its own pending mechanism
         if hasattr(self.wrapped_buffer, "flush_pending"):
             self.wrapped_buffer.flush_pending()
+        print("[NStepWrapper] Flushing complete.")
 
     def get_state(self) -> Dict[str, Any]:
-        # Save pending deque and wrapped buffer state
         return {
             "n_step_deque": list(self.n_step_deque),
             "wrapped_buffer_state": self.wrapped_buffer.get_state(),
         }
 
     def load_state_from_data(self, state: Dict[str, Any]):
-        # Load pending deque
         pending_deque_list = state.get("n_step_deque", [])
-        # Ensure loaded items are valid tuples before creating deque
         valid_pending = [
             t for t in pending_deque_list if isinstance(t, tuple) and len(t) == 5
         ]
@@ -6690,7 +7201,6 @@ class NStepBufferWrapper(ReplayBufferBase):
         self.n_step_deque = deque(valid_pending, maxlen=self.n_step)
         print(f"[NStepWrapper] Loaded {len(self.n_step_deque)} pending transitions.")
 
-        # Load wrapped buffer state
         wrapped_state = state.get("wrapped_buffer_state")
         if wrapped_state:
             self.wrapped_buffer.load_state_from_data(wrapped_state)
@@ -6706,15 +7216,25 @@ class NStepBufferWrapper(ReplayBufferBase):
             self.load_state_from_data(state_data)
         except Exception as e:
             print(f"[NStepWrapper] Load failed: {e}. Starting empty.")
-            # Reset state if load fails
             self.n_step_deque.clear()
-            # Optionally reset wrapped buffer too, depending on desired behavior
-            # self.wrapped_buffer = type(self.wrapped_buffer)(...) # Recreate wrapped buffer
+            # Recreate the wrapped buffer if load fails to ensure clean state
+            if hasattr(self.wrapped_buffer, "__class__"):
+                try:
+                    self.wrapped_buffer = self.wrapped_buffer.__class__(
+                        capacity=self.wrapped_buffer.capacity
+                    )
+                    print(
+                        "[NStepWrapper] Recreated empty wrapped buffer after load failure."
+                    )
+                except Exception as recreat_e:
+                    print(
+                        f"[NStepWrapper] Failed to recreate wrapped buffer: {recreat_e}"
+                    )
 
 
 File: agent/replay_buffer/sum_tree.py
 # File: agent/replay_buffer/sum_tree.py
-# File: agent/replay_buffer/sum_tree.py
+# (Content as provided by user, assuming it's correct and functional)
 import numpy as np
 
 
@@ -6724,6 +7244,9 @@ class SumTree:
     def __init__(self, capacity: int):
         if capacity <= 0 or not isinstance(capacity, int):
             raise ValueError("SumTree capacity must be positive integer")
+        # Ensure capacity is power of 2 for simpler implementation, or handle general case
+        # For simplicity here, we assume any capacity works with the logic.
+        # A more robust implementation might pad capacity to the next power of 2.
         self.capacity = capacity
         self.tree = np.zeros(2 * capacity - 1, dtype=np.float64)  # Use float64 for sums
         self.data = np.zeros(capacity, dtype=object)  # Holds Transition objects
@@ -6744,13 +7267,12 @@ class SumTree:
         if left >= len(self.tree):
             return idx  # Leaf node
 
-        # Use tolerance for float comparison
-        if s <= self.tree[left] + 1e-8:
+        # Use tolerance for float comparison if needed, but direct comparison often fine
+        if s <= self.tree[left] + 1e-8:  # Added tolerance
             return self._retrieve(left, s)
         else:
-            return self._retrieve(
-                right, max(0.0, s - self.tree[left])
-            )  # Ensure non-negative s
+            # Ensure non-negative s for recursive call
+            return self._retrieve(right, max(0.0, s - self.tree[left]))
 
     def total(self) -> float:
         return self.tree[0]
@@ -6759,40 +7281,54 @@ class SumTree:
         """Add new experience, overwriting oldest if full."""
         priority = max(abs(priority), 1e-6)  # Ensure positive priority
         tree_idx = self.write_ptr + self.capacity - 1
+
         self.data[self.write_ptr] = data
-        self.update(tree_idx, priority)
+        self.update(tree_idx, priority)  # Update priorities after inserting data
+
         self.write_ptr = (self.write_ptr + 1) % self.capacity
         if self.n_entries < self.capacity:
             self.n_entries += 1
 
     def update(self, tree_idx: int, priority: float):
         """Update priority of an experience at a given tree index."""
-        priority = max(abs(priority), 1e-6)
+        priority = max(abs(priority), 1e-6)  # Ensure positive priority
+
+        # Ensure the index is within the valid range for leaf nodes
         if not (self.capacity - 1 <= tree_idx < 2 * self.capacity - 1):
-            return  # Skip invalid index
+            # print(f"Warning: Invalid tree index {tree_idx} passed to update.")
+            return  # Silently ignore invalid indices or raise error
 
         change = priority - self.tree[tree_idx]
         self.tree[tree_idx] = priority
+        # Propagate change only if it's significant and not the root
         if abs(change) > 1e-9 and tree_idx > 0:
             self._propagate(tree_idx, change)
 
     def get(self, s: float) -> tuple[int, float, object]:
         """Sample an experience based on cumulative priority s. Returns: (tree_idx, priority, data)"""
         if self.total() <= 0 or self.n_entries == 0:
-            return 0, 0.0, None  # Handle empty tree
+            # Handle empty tree case gracefully
+            return 0, 0.0, None
 
-        s = np.clip(s, 1e-9, self.total())  # Clip s to valid range
-        idx = self._retrieve(0, s)  # Leaf node index in tree array
-        data_idx = idx - self.capacity + 1  # Corresponding index in data array
+        # Clip s to be within valid range [epsilon, total_priority]
+        s = np.clip(s, 1e-9, self.total())
 
-        # Validate data_idx before access (important if buffer not full)
+        idx = self._retrieve(0, s)  # Find leaf node index
+        data_idx = (
+            idx - self.capacity + 1
+        )  # Convert tree leaf index to data array index
+
+        # Validate data_idx before accessing self.data
         if not (0 <= data_idx < self.n_entries):
-            # Fallback: return last valid entry if index is out of bounds (rare)
+            # This case might happen if sampling occurs while buffer is filling,
+            # or due to floating point inaccuracies. Fallback strategy:
             if self.n_entries > 0:
+                # Sample the last valid entry as a fallback
                 last_valid_data_idx = (
                     self.write_ptr - 1 + self.capacity
                 ) % self.capacity
                 last_valid_tree_idx = last_valid_data_idx + self.capacity - 1
+                # Ensure fallback index is valid before accessing tree
                 priority = (
                     self.tree[last_valid_tree_idx]
                     if (
@@ -6800,10 +7336,12 @@ class SumTree:
                     )
                     else 0.0
                 )
+                # print(f"Warning: PER get() resulted in invalid data_idx {data_idx} for s={s}. Falling back to index {last_valid_data_idx}.")
                 return (last_valid_tree_idx, priority, self.data[last_valid_data_idx])
             else:
-                return 0, 0.0, None  # Truly empty
+                return 0, 0.0, None  # Return nothing if truly empty
 
+        # Return valid data
         return (idx, self.tree[idx], self.data[data_idx])
 
     def __len__(self) -> int:
@@ -6905,10 +7443,7 @@ import torch.nn.functional as F
 import numpy as np
 import math
 
-# --- MODIFIED: Import EnvConfig directly ---
 from config import ModelConfig, EnvConfig, DQNConfig, DEVICE
-
-# --- END MODIFIED ---
 from typing import Tuple, List, Type, Optional
 
 from .noisy_layer import NoisyLinear
@@ -6918,23 +7453,24 @@ class AgentNetwork(nn.Module):
     """
     Agent Network: CNN+MLP -> Fusion -> Dueling Heads -> Optional Distributional Output.
     Accepts separate grid and shape tensors as input.
+    Uses NoisyLinear layers in output heads if configured.
     """
 
     def __init__(
         self,
-        env_config: EnvConfig,  # Expecting instance
+        env_config: EnvConfig,
         action_dim: int,
         model_config: ModelConfig.Network,
         dqn_config: DQNConfig,
         dueling: bool,
-        use_noisy: bool,
+        use_noisy: bool,  # This flag controls NoisyLinear usage
     ):
         super().__init__()
         self.dueling = dueling
         self.action_dim = action_dim
-        self.env_config = env_config  # Store instance
-        self.config = model_config  # Store network sub-config
-        self.use_noisy = use_noisy
+        self.env_config = env_config
+        self.config = model_config
+        self.use_noisy = use_noisy  # Store the flag
         self.use_distributional = dqn_config.USE_DISTRIBUTIONAL
         self.num_atoms = dqn_config.NUM_ATOMS
         self.device = DEVICE
@@ -6944,22 +7480,17 @@ class AgentNetwork(nn.Module):
             f"[AgentNetwork] Distributional C51: {self.use_distributional} ({self.num_atoms} atoms)"
         )
 
-        # --- MODIFIED: Calculate dims from EnvConfig instance (now 2 channels) ---
         self.grid_c, self.grid_h, self.grid_w = self.env_config.GRID_STATE_SHAPE
-        # --- END MODIFIED ---
         self.shape_feat_dim = self.env_config.SHAPE_STATE_DIM
         self.num_shape_slots = self.env_config.NUM_SHAPE_SLOTS
         self.shape_feat_per_slot = self.env_config.SHAPE_FEATURES_PER_SHAPE
 
         print(f"[AgentNetwork] Initializing (Noisy Heads: {self.use_noisy}):")
-        # --- MODIFIED: Print updated grid shape ---
         print(f"  Input Grid Shape: [B, {self.grid_c}, {self.grid_h}, {self.grid_w}]")
-        # --- END MODIFIED ---
         print(
             f"  Input Shape Features Dim: {self.shape_feat_dim} ({self.num_shape_slots} slots x {self.shape_feat_per_slot} features)"
         )
 
-        # Build network branches (CNN input channels handled automatically by self.grid_c)
         self.conv_base, conv_out_h, conv_out_w, conv_out_c = self._build_cnn_branch()
         self.conv_out_size = self._get_conv_out_size(
             (self.grid_c, self.grid_h, self.grid_w)
@@ -6974,19 +7505,22 @@ class AgentNetwork(nn.Module):
         combined_features_dim = self.conv_out_size + self.shape_mlp_out_dim
         print(f"  Combined Features Dim: {combined_features_dim}")
 
+        # --- Modify Fusion MLP if needed (keeping it simple for now) ---
+        # If Noisy Nets are used, potentially the last fusion layer could also be noisy.
+        # Keeping fusion MLP with standard Linear layers unless specifically requested otherwise.
         self.fusion_mlp, self.head_input_dim = self._build_fusion_mlp_branch(
             combined_features_dim
         )
         print(f"  Fusion MLP Output Dim (Input to Heads): {self.head_input_dim}")
 
+        # --- Build heads using NoisyLinear conditionally ---
         self._build_output_heads()
-        head_type = NoisyLinear if self.use_noisy else nn.Linear
+        head_type = NoisyLinear if self.use_noisy else nn.Linear  # Determine head type
         output_type = "Distributional" if self.use_distributional else "Q-Value"
         print(
             f"  Using {'Dueling' if self.dueling else 'Single'} Heads ({head_type.__name__}), Output: {output_type} [{self.action_dim * (self.num_atoms if self.use_distributional else 1)} units]"
         )
 
-        # Final check
         if hasattr(self.conv_base, "0") and hasattr(self.conv_base[0], "weight"):
             print(
                 f"[AgentNetwork] Final check - conv_base device: {next(self.conv_base.parameters()).device}"
@@ -6998,7 +7532,6 @@ class AgentNetwork(nn.Module):
 
     def _build_cnn_branch(self) -> Tuple[nn.Sequential, int, int, int]:
         conv_layers: List[nn.Module] = []
-        # --- Uses self.grid_c (now 2) ---
         current_channels = self.grid_c
         h, w = self.grid_h, self.grid_w
         cfg = self.config
@@ -7019,7 +7552,6 @@ class AgentNetwork(nn.Module):
                 conv_layers.append(nn.BatchNorm2d(out_channels).to(self.device))
             conv_layers.append(cfg.CONV_ACTIVATION())
             current_channels = out_channels
-            # --- Adjust H, W calculation (still no pooling) ---
             h = (h + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
             w = (w + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
 
@@ -7029,10 +7561,8 @@ class AgentNetwork(nn.Module):
         return cnn_module, h, w, current_channels
 
     def _get_conv_out_size(self, shape: Tuple[int, int, int]) -> int:
-        # Ensure conv_base is on the correct device before creating dummy input
         self.conv_base.to(self.device)
         with torch.no_grad():
-            # Input shape uses current self.grid_c (which is 2)
             dummy_input = torch.zeros(1, *shape, device=self.device)
             self.conv_base.eval()
             try:
@@ -7041,29 +7571,25 @@ class AgentNetwork(nn.Module):
             except Exception as e:
                 print(f"Error calculating conv output size: {e}")
                 print(f"Input shape to CNN: {dummy_input.shape}")
-                out_size = 1  # Placeholder
+                out_size = 1
             return out_size
 
     def _build_shape_mlp_branch(self) -> Tuple[nn.Sequential, int]:
         shape_mlp_layers: List[nn.Module] = []
-        # Input dimension is NUM_SLOTS * FEAT_PER_SHAPE
         current_dim = self.env_config.SHAPE_STATE_DIM
         cfg = self.config
-
-        # MLP layers defined in config
         for hidden_dim in cfg.SHAPE_FEATURE_MLP_DIMS:
             lin_layer = nn.Linear(current_dim, hidden_dim).to(self.device)
             shape_mlp_layers.append(lin_layer)
             shape_mlp_layers.append(cfg.SHAPE_MLP_ACTIVATION())
             current_dim = hidden_dim
-
         return nn.Sequential(*shape_mlp_layers), current_dim
 
     def _build_fusion_mlp_branch(self, input_dim: int) -> Tuple[nn.Sequential, int]:
         fusion_layers: List[nn.Module] = []
         current_fusion_dim = input_dim
         cfg = self.config
-        fusion_linear_layer_class = nn.Linear
+        fusion_linear_layer_class = nn.Linear  # Keep fusion linear for now
         for i, hidden_dim in enumerate(cfg.COMBINED_FC_DIMS):
             linear_layer = fusion_linear_layer_class(
                 current_fusion_dim, hidden_dim, bias=not cfg.USE_BATCHNORM_FC
@@ -7078,6 +7604,7 @@ class AgentNetwork(nn.Module):
         return nn.Sequential(*fusion_layers), current_fusion_dim
 
     def _build_output_heads(self):
+        # Use NoisyLinear if self.use_noisy is True
         head_linear_layer_class = NoisyLinear if self.use_noisy else nn.Linear
         output_units_per_stream = (
             self.action_dim * self.num_atoms
@@ -7101,20 +7628,17 @@ class AgentNetwork(nn.Module):
     def forward(
         self, grid_tensor: torch.Tensor, shape_tensor: torch.Tensor
     ) -> torch.Tensor:
-        """Forward pass, accepts separate grid and shape tensors."""
         model_device = next(self.parameters()).device
         if grid_tensor.device != model_device:
             grid_tensor = grid_tensor.to(model_device)
         if shape_tensor.device != model_device:
             shape_tensor = shape_tensor.to(model_device)
 
-        # --- MODIFIED: Validate grid shape expects 2 channels ---
         expected_grid_shape = (self.grid_c, self.grid_h, self.grid_w)
         if grid_tensor.ndim != 4 or grid_tensor.shape[1:] != expected_grid_shape:
             raise ValueError(
                 f"AgentNetwork forward: Invalid grid_tensor shape {grid_tensor.shape}. Expected [B, {self.grid_c}, {self.grid_h}, {self.grid_w}]."
             )
-        # --- END MODIFIED ---
 
         batch_size = grid_tensor.size(0)
         expected_shape_flat_dim = self.num_shape_slots * self.shape_feat_per_slot
@@ -7126,26 +7650,21 @@ class AgentNetwork(nn.Module):
         elif (
             shape_tensor.ndim == 2 and shape_tensor.shape[1] == expected_shape_flat_dim
         ):
-            shape_tensor_flat = shape_tensor  # Already flattened
+            shape_tensor_flat = shape_tensor
         else:
             raise ValueError(
                 f"AgentNetwork forward: Invalid shape_tensor shape {shape_tensor.shape}. Expected [B, {self.num_shape_slots}, {self.shape_feat_per_slot}] or [B, {expected_shape_flat_dim}]."
             )
 
-        # Process features
         conv_output = self.conv_base(grid_tensor)
         conv_output_flat = conv_output.view(batch_size, -1)
-
         shape_output = self.shape_mlp(shape_tensor_flat)
-
         combined_features = torch.cat((conv_output_flat, shape_output), dim=1)
         fused_output = self.fusion_mlp(combined_features)
 
-        # Output Heads
         if self.dueling:
             value = self.value_head(fused_output)
             advantage = self.advantage_head(fused_output)
-
             if self.use_distributional:
                 value = value.view(batch_size, 1, self.num_atoms)
                 advantage = advantage.view(batch_size, self.action_dim, self.num_atoms)
@@ -7153,17 +7672,13 @@ class AgentNetwork(nn.Module):
                 dist_logits = value + (advantage - adv_mean)
             else:
                 adv_mean = advantage.mean(dim=1, keepdim=True)
-                dist_logits = value + (
-                    advantage - adv_mean
-                )  # Output shape [B, action_dim]
-
-        else:  # Non-Dueling
+                dist_logits = value + (advantage - adv_mean)
+        else:
             dist_logits = self.output_head(fused_output)
             if self.use_distributional:
                 dist_logits = dist_logits.view(
                     batch_size, self.action_dim, self.num_atoms
                 )
-            # Else: output shape [B, action_dim]
 
         return dist_logits
 
@@ -7205,10 +7720,11 @@ class GameState:
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
         self.line_clear_highlight_time: float = 0.0
+        self.game_over_flash_time: float = 0.0
         self.cleared_triangles_coords: List[Tuple[int, int]] = []
         self.game_over = False
         self._last_action_valid = True
-        self.rewards = RewardConfig()  # Instantiate RewardConfig
+        self.rewards = RewardConfig()
         self.demo_selected_shape_idx: int = 0
         self.demo_target_row: int = self.env_config.ROWS // 2
         self.demo_target_col: int = self.env_config.COLS // 2
@@ -7223,6 +7739,7 @@ class GameState:
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
         self.line_clear_highlight_time = 0.0
+        self.game_over_flash_time = 0.0
         self.cleared_triangles_coords = []
         self.game_over = False
         self._last_action_valid = True
@@ -7249,6 +7766,16 @@ class GameState:
                         acts.append(action_index)
         return acts
 
+    def _check_fundamental_game_over(self) -> bool:
+        for sh in self.shapes:
+            if not sh:
+                continue
+            for r in range(self.grid.rows):
+                for c in range(self.grid.cols):
+                    if self.grid.can_place(sh, r, c):
+                        return False
+        return True
+
     def is_over(self) -> bool:
         return self.game_over
 
@@ -7260,6 +7787,9 @@ class GameState:
 
     def is_highlighting_cleared(self) -> bool:
         return self.line_clear_highlight_time > 0
+
+    def is_game_over_flashing(self) -> bool:
+        return self.game_over_flash_time > 0
 
     def get_cleared_triangle_coords(self) -> List[Tuple[int, int]]:
         return self.cleared_triangles_coords
@@ -7280,6 +7810,7 @@ class GameState:
         self.blink_time = max(0, self.blink_time - dt)
         self.line_clear_flash_time = max(0, self.line_clear_flash_time - dt)
         self.line_clear_highlight_time = max(0, self.line_clear_highlight_time - dt)
+        self.game_over_flash_time = max(0, self.game_over_flash_time - dt)
         if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
             self.cleared_triangles_coords = []
 
@@ -7288,13 +7819,22 @@ class GameState:
         reward = self.rewards.PENALTY_INVALID_MOVE
         return reward
 
+    def _handle_game_over_state_change(self) -> float:
+        if self.game_over:
+            return 0.0
+        self.game_over = True
+        if self.freeze_time <= 0:
+            self.freeze_time = 1.0
+        # --- MODIFIED: Increase flash duration ---
+        self.game_over_flash_time = 0.6
+        # --- END MODIFIED ---
+        return self.rewards.PENALTY_GAME_OVER
+
     def _handle_valid_placement(
         self, shp: Shape, s_idx: int, rr: int, cc: int
     ) -> float:
         self._last_action_valid = True
-        # --- MODIFIED: Start with survival reward ---
         reward = self.rewards.REWARD_ALIVE_STEP
-        # --- END MODIFIED ---
 
         self.grid.place(shp, rr, cc)
         self.shapes[s_idx] = None
@@ -7345,10 +7885,8 @@ class GameState:
                 )
                 self.demo_selected_shape_idx = first_available
 
-        if not self.valid_actions():
-            self.game_over = True
-            self.freeze_time = 1.0
-            reward += self.rewards.PENALTY_GAME_OVER
+        if self._check_fundamental_game_over():
+            reward += self._handle_game_over_state_change()
 
         return reward
 
@@ -7357,23 +7895,20 @@ class GameState:
 
         if self.game_over:
             return (0.0, True)
-        if self.freeze_time > 0:
-            return (0.0, False)
 
         s_idx, rr, cc = self.decode_act(a)
         shp = self.shapes[s_idx] if 0 <= s_idx < len(self.shapes) else None
 
         is_valid_placement = shp is not None and self.grid.can_place(shp, rr, cc)
 
-        if is_valid_placement:
+        if self.is_frozen():
+            current_rl_reward = self._handle_invalid_placement()
+        elif is_valid_placement:
             current_rl_reward = self._handle_valid_placement(shp, s_idx, rr, cc)
         else:
             current_rl_reward = self._handle_invalid_placement()
-            if not self.valid_actions():
-                if not self.game_over:
-                    self.game_over = True
-                    self.freeze_time = 1.0
-                    current_rl_reward += self.rewards.PENALTY_GAME_OVER
+            if self._check_fundamental_game_over():
+                current_rl_reward += self._handle_game_over_state_change()
 
         self.score += current_rl_reward
         return (current_rl_reward, self.game_over)
@@ -7419,6 +7954,7 @@ class GameState:
     def get_shapes(self) -> List[Shape]:
         return [s for s in self.shapes if s is not None]
 
+    # --- Demo Mode Methods ---
     def cycle_shape(self, direction: int):
         if self.game_over or self.freeze_time > 0:
             return
@@ -7426,16 +7962,19 @@ class GameState:
         if num_slots <= 0:
             return
 
-        current_idx = self.demo_selected_shape_idx
-        for _ in range(num_slots):
-            current_idx = (current_idx + direction + num_slots) % num_slots
-            if (
-                0 <= current_idx < len(self.shapes)
-                and self.shapes[current_idx] is not None
-            ):
-                self.demo_selected_shape_idx = current_idx
-                return
-        # Keep current index if all slots are empty
+        available_indices = [
+            i for i, s in enumerate(self.shapes) if s is not None and 0 <= i < num_slots
+        ]
+        if not available_indices:
+            return
+
+        try:
+            current_list_idx = available_indices.index(self.demo_selected_shape_idx)
+        except ValueError:
+            current_list_idx = 0
+
+        new_list_idx = (current_list_idx + direction) % len(available_indices)
+        self.demo_selected_shape_idx = available_indices[new_list_idx]
 
     def move_target(self, dr: int, dc: int):
         if self.game_over or self.freeze_time > 0:
@@ -7731,7 +8270,7 @@ File: stats/aggregator.py
 # File: stats/aggregator.py
 import time
 from collections import deque
-from typing import Deque, Dict, Any, Optional
+from typing import Deque, Dict, Any, Optional, List
 import numpy as np
 from config import StatsConfig
 
@@ -7744,16 +8283,22 @@ class StatsAggregator:
 
     def __init__(
         self,
-        avg_window: int = StatsConfig.STATS_AVG_WINDOW,
+        avg_windows: List[int] = StatsConfig.STATS_AVG_WINDOW,
         plot_window: int = StatsConfig.PLOT_DATA_WINDOW,
     ):
-        if avg_window <= 0:
-            avg_window = 100
+        if not avg_windows or not all(
+            isinstance(w, int) and w > 0 for w in avg_windows
+        ):
+            print("Warning: Invalid avg_windows list. Using default [100].")
+            self.avg_windows = [100]
+        else:
+            self.avg_windows = sorted(list(set(avg_windows)))
+
         if plot_window <= 0:
             plot_window = 10000
-
-        self.avg_window = avg_window
         self.plot_window = plot_window
+
+        self.summary_avg_window = self.avg_windows[0]
 
         self.losses: Deque[float] = deque(maxlen=plot_window)
         self.grad_norms: Deque[float] = deque(maxlen=plot_window)
@@ -7762,9 +8307,7 @@ class StatsAggregator:
         self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
         self.game_scores: Deque[int] = deque(maxlen=plot_window)
         self.episode_lines_cleared: Deque[int] = deque(maxlen=plot_window)
-        self.sps_values: Deque[float] = deque(
-            maxlen=plot_window
-        )  # Stores calculated SPS
+        self.sps_values: Deque[float] = deque(maxlen=plot_window)
         self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
         self.beta_values: Deque[float] = deque(maxlen=plot_window)
         self.best_rl_score_history: Deque[float] = deque(maxlen=plot_window)
@@ -7778,7 +8321,7 @@ class StatsAggregator:
         self.current_beta: float = 0.0
         self.current_buffer_size: int = 0
         self.current_global_step: int = 0
-        self.current_sps: float = 0.0  # Current SPS value
+        self.current_sps: float = 0.0
         self.current_lr: float = 0.0
 
         self.best_score: float = -float("inf")
@@ -7794,7 +8337,7 @@ class StatsAggregator:
         self.best_loss_step: int = 0
 
         print(
-            f"[StatsAggregator] Initialized. Avg Window: {self.avg_window}, Plot Window: {self.plot_window}"
+            f"[StatsAggregator] Initialized. Avg Windows: {self.avg_windows}, Plot Window: {self.plot_window}"
         )
 
     def record_episode(
@@ -7832,11 +8375,12 @@ class StatsAggregator:
             self.best_game_score_step = current_step
             update_info["new_best_game"] = True
 
-        current_best_rl = self.best_score if self.best_score > -float("inf") else 0.0
+        # --- MODIFIED: Append actual best_score, even if negative ---
+        self.best_rl_score_history.append(self.best_score)
+        # --- END MODIFIED ---
         current_best_game = (
             int(self.best_game_score) if self.best_game_score > -float("inf") else 0
         )
-        self.best_rl_score_history.append(current_best_rl)
         self.best_game_score_history.append(current_best_game)
 
         return update_info
@@ -7874,13 +8418,11 @@ class StatsAggregator:
             self.current_epsilon = step_data["epsilon"]
             self.epsilon_values.append(self.current_epsilon)
 
-        # --- MODIFIED: Calculate and store SPS ---
         if "step_time" in step_data and step_data["step_time"] > 1e-9:
             num_steps = step_data.get("num_steps_processed", 1)
             sps = num_steps / step_data["step_time"]
             self.sps_values.append(sps)
-            self.current_sps = sps  # Update current SPS
-        # --- END MODIFIED ---
+            self.current_sps = sps
 
         return update_info
 
@@ -7888,8 +8430,10 @@ class StatsAggregator:
         if current_global_step is None:
             current_global_step = self.current_global_step
 
+        summary_window = self.summary_avg_window
+
         def safe_mean(q: Deque, default=0.0) -> float:
-            window_data = list(q)[-self.avg_window :]
+            window_data = list(q)[-summary_window:]
             return float(np.mean(window_data)) if window_data else default
 
         summary = {
@@ -7899,14 +8443,12 @@ class StatsAggregator:
             "avg_max_q_window": safe_mean(self.avg_max_qs),
             "avg_game_score_window": safe_mean(self.game_scores),
             "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
-            "avg_sps_window": safe_mean(
-                self.sps_values, default=self.current_sps
-            ),  # Use current_sps as default
+            "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
             "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
             "total_episodes": self.total_episodes,
             "beta": self.current_beta,
             "buffer_size": self.current_buffer_size,
-            "steps_per_second": self.current_sps,  # Report current SPS
+            "steps_per_second": self.current_sps,
             "global_step": current_global_step,
             "current_lr": self.current_lr,
             "best_score": self.best_score,
@@ -7920,6 +8462,7 @@ class StatsAggregator:
             "best_loss_step": self.best_loss_step,
             "num_ep_scores": len(self.episode_scores),
             "num_losses": len(self.losses),
+            "summary_avg_window_size": summary_window,
         }
         return summary
 
@@ -7931,7 +8474,7 @@ class StatsAggregator:
             "avg_max_qs": self.avg_max_qs.copy(),
             "game_scores": self.game_scores.copy(),
             "episode_lines_cleared": self.episode_lines_cleared.copy(),
-            "sps_values": self.sps_values.copy(),  # Return the SPS deque
+            "sps_values": self.sps_values.copy(),
             "buffer_sizes": self.buffer_sizes.copy(),
             "beta_values": self.beta_values.copy(),
             "best_rl_score_history": self.best_rl_score_history.copy(),
@@ -7987,8 +8530,14 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time: float = time.time()
         self.last_log_step: int = 0
         self.start_time: float = time.time()
+        # --- MODIFIED: Get the window size used for summary ---
+        self.summary_avg_window = self.aggregator.summary_avg_window
+        # --- END MODIFIED ---
         print(
             f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'}"
+        )
+        print(
+            f"[SimpleStatsRecorder] Console logs will use Avg Window: {self.summary_avg_window}"
         )
 
     def record_episode(
@@ -8000,7 +8549,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
     ):
-        """Passes episode data to the aggregator and checks for console logging."""
         update_info = self.aggregator.record_episode(
             episode_score,
             episode_length,
@@ -8036,21 +8584,17 @@ class SimpleStatsRecorder(StatsRecorderBase):
             )
 
     def record_step(self, step_data: Dict[str, Any]):
-        """Passes step data to the aggregator and triggers console logging."""
         _ = self.aggregator.record_step(step_data)
         g_step = step_data.get("global_step", self.aggregator.current_global_step)
         self.log_summary(g_step)
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        """Retrieves summary statistics from the aggregator."""
         return self.aggregator.get_summary(current_global_step)
 
     def get_plot_data(self) -> Dict[str, Deque]:
-        """Retrieves plot data deques from the aggregator."""
         return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
-        """Logs summary statistics to the console periodically."""
         if (
             self.console_log_interval <= 0
             or global_step < self.last_log_step + self.console_log_interval
@@ -8072,14 +8616,17 @@ class SimpleStatsRecorder(StatsRecorderBase):
             else "N/A"
         )
 
+        # --- MODIFIED: Indicate the window size used for averages ---
+        avg_window_size = summary.get("summary_avg_window_size", "?")
         log_str = (
             f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
             f"Ep: {summary['total_episodes']:<7} | SPS: {summary['steps_per_second']:<5.0f} | "
-            f"RLScore(Avg): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
-            f"Loss(Avg): {summary['avg_loss_window']:.4f} (Best: {best_loss_val}) | "
+            f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
+            f"Loss(Avg{avg_window_size}): {summary['avg_loss_window']:.4f} (Best: {best_loss_val}) | "
             f"LR: {summary['current_lr']:.1e} | "
             f"Buf: {summary['buffer_size']/1e6:.2f}M"
         )
+        # --- END MODIFIED ---
         if summary["beta"] > 0 and summary["beta"] < 1.0:
             log_str += f" | Beta: {summary['beta']:.3f}"
 
@@ -8088,7 +8635,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time = time.time()
         self.last_log_step = global_step
 
-    # --- No-op methods for non-console logging ---
     def record_histogram(
         self,
         tag: str,

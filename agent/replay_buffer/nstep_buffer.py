@@ -1,14 +1,10 @@
 # File: agent/replay_buffer/nstep_buffer.py
 from collections import deque
 import numpy as np
-from typing import Deque, Tuple, Optional, Any, Dict, List
+from typing import Deque, Tuple, Optional, Any, Dict, List, Union
 from .base_buffer import ReplayBufferBase
-
-# --- MODIFIED: Import specific StateType ---
 from environment.game_state import StateType  # Use the Dict type
-
-# --- END MODIFIED ---
-from utils.types import Transition, ActionType
+from utils.types import Transition, ActionType, NumpyBatch, NumpyNStepBatch
 from utils.helpers import save_object, load_object
 
 
@@ -26,6 +22,7 @@ class NStepBufferWrapper(ReplayBufferBase):
         self.n_step_deque: Deque[
             Tuple[StateType, ActionType, float, StateType, bool]
         ] = deque(maxlen=n_step)
+        print(f"[NStepWrapper] Initialized with n={n_step}, gamma={gamma}")
 
     def _calculate_n_step_transition(
         self, current_deque_list: List[Tuple]
@@ -40,14 +37,14 @@ class NStepBufferWrapper(ReplayBufferBase):
         state_0, action_0 = (
             current_deque_list[0][0],
             current_deque_list[0][1],
-        )  # State is dict
+        )
 
         for i in range(effective_n):
-            s, a, r, ns, d = current_deque_list[i]
-            n_step_reward += discount_accum * r
-            if d:  # Episode terminated within N steps
-                # The next_state for the N-step transition is the state *after* the terminal action
-                n_step_next_state = ns
+            _s, _a, reward_i, next_state_i, done_i = current_deque_list[i]
+            n_step_reward += discount_accum * reward_i
+            if done_i:
+                # Episode terminated within N steps
+                n_step_next_state = next_state_i  # State after the terminal action
                 n_step_done = True
                 n_step_discount = self.gamma ** (i + 1)
                 return Transition(
@@ -75,48 +72,41 @@ class NStepBufferWrapper(ReplayBufferBase):
 
     def push(
         self,
-        state: StateType,  # State is dict
+        state: StateType,
         action: ActionType,
         reward: float,
-        next_state: StateType,  # Next state is dict
+        next_state: StateType,
         done: bool,
     ):
-        """Adds raw transition, processes N-step if possible, pushes to wrapped buffer."""
         self.n_step_deque.append((state, action, reward, next_state, done))
 
-        # If deque isn't full yet, only process if the *newly added* transition was terminal
         if len(self.n_step_deque) < self.n_step:
             if done:
-                self._flush_on_done()  # Process partial transitions ending here
-            return  # Don't process full N-step yet
+                self._flush_on_done()
+            return
 
         # Deque has N items, calculate N-step transition starting from the oldest
+        # Pass a copy to avoid modification if _flush_on_done is called concurrently
         n_step_transition = self._calculate_n_step_transition(list(self.n_step_deque))
         if n_step_transition:
-            # Push the calculated N-step transition to the underlying buffer
             self.wrapped_buffer.push(
                 state=n_step_transition.state,
                 action=n_step_transition.action,
                 reward=n_step_transition.reward,
                 next_state=n_step_transition.next_state,
                 done=n_step_transition.done,
-                n_step_discount=n_step_transition.n_step_discount,  # Pass discount factor
+                n_step_discount=n_step_transition.n_step_discount,
             )
 
-        # If the *newly added* transition was terminal, flush remaining partials
         if done:
             self._flush_on_done()
 
     def _flush_on_done(self):
         """Processes remaining partial transitions when an episode ends."""
-        # The deque contains transitions leading up to and including the 'done' one.
-        # We need to calculate N-step returns for sequences starting *before* the done transition.
         temp_deque = list(self.n_step_deque)
-        while len(temp_deque) > 1:  # Process until only the 'done' transition remains
-            # Calculate N-step starting from the current oldest
+        while len(temp_deque) > 1:
             n_step_transition = self._calculate_n_step_transition(temp_deque)
             if n_step_transition:
-                # Push if valid (should always be if temp_deque not empty)
                 self.wrapped_buffer.push(
                     state=n_step_transition.state,
                     action=n_step_transition.action,
@@ -125,29 +115,27 @@ class NStepBufferWrapper(ReplayBufferBase):
                     done=n_step_transition.done,
                     n_step_discount=n_step_transition.n_step_discount,
                 )
-            temp_deque.pop(0)  # Remove the starting state we just processed
-        self.n_step_deque.clear()  # Clear the deque after flushing
+            temp_deque.pop(0)
+        self.n_step_deque.clear()
 
     def sample(self, batch_size: int) -> Any:
-        # Sampling is delegated to the wrapped buffer
+        # Sampling is delegated, wrapped buffer returns N-step or 1-step batch
         return self.wrapped_buffer.sample(batch_size)
 
     def update_priorities(self, indices: np.ndarray, priorities: np.ndarray):
-        # Priority update is delegated
         self.wrapped_buffer.update_priorities(indices, priorities)
 
     def set_beta(self, beta: float):
-        # Beta setting is delegated
         if hasattr(self.wrapped_buffer, "set_beta"):
             self.wrapped_buffer.set_beta(beta)
 
     def __len__(self) -> int:
-        # Length is determined by the wrapped buffer
         return len(self.wrapped_buffer)
 
     def flush_pending(self):
-        """Processes and pushes any remaining transitions before exit/save."""
-        print(f"[NStepWrapper] Flushing {len(self.n_step_deque)} pending transitions.")
+        print(
+            f"[NStepWrapper] Flushing {len(self.n_step_deque)} pending transitions..."
+        )
         temp_deque = list(self.n_step_deque)
         while len(temp_deque) > 0:
             n_step_transition = self._calculate_n_step_transition(temp_deque)
@@ -160,23 +148,20 @@ class NStepBufferWrapper(ReplayBufferBase):
                     done=n_step_transition.done,
                     n_step_discount=n_step_transition.n_step_discount,
                 )
-            temp_deque.pop(0)  # Remove the processed start state
+            temp_deque.pop(0)
         self.n_step_deque.clear()
-        # Also flush the underlying buffer if it has its own pending mechanism
         if hasattr(self.wrapped_buffer, "flush_pending"):
             self.wrapped_buffer.flush_pending()
+        print("[NStepWrapper] Flushing complete.")
 
     def get_state(self) -> Dict[str, Any]:
-        # Save pending deque and wrapped buffer state
         return {
             "n_step_deque": list(self.n_step_deque),
             "wrapped_buffer_state": self.wrapped_buffer.get_state(),
         }
 
     def load_state_from_data(self, state: Dict[str, Any]):
-        # Load pending deque
         pending_deque_list = state.get("n_step_deque", [])
-        # Ensure loaded items are valid tuples before creating deque
         valid_pending = [
             t for t in pending_deque_list if isinstance(t, tuple) and len(t) == 5
         ]
@@ -187,7 +172,6 @@ class NStepBufferWrapper(ReplayBufferBase):
         self.n_step_deque = deque(valid_pending, maxlen=self.n_step)
         print(f"[NStepWrapper] Loaded {len(self.n_step_deque)} pending transitions.")
 
-        # Load wrapped buffer state
         wrapped_state = state.get("wrapped_buffer_state")
         if wrapped_state:
             self.wrapped_buffer.load_state_from_data(wrapped_state)
@@ -203,7 +187,17 @@ class NStepBufferWrapper(ReplayBufferBase):
             self.load_state_from_data(state_data)
         except Exception as e:
             print(f"[NStepWrapper] Load failed: {e}. Starting empty.")
-            # Reset state if load fails
             self.n_step_deque.clear()
-            # Optionally reset wrapped buffer too, depending on desired behavior
-            # self.wrapped_buffer = type(self.wrapped_buffer)(...) # Recreate wrapped buffer
+            # Recreate the wrapped buffer if load fails to ensure clean state
+            if hasattr(self.wrapped_buffer, "__class__"):
+                try:
+                    self.wrapped_buffer = self.wrapped_buffer.__class__(
+                        capacity=self.wrapped_buffer.capacity
+                    )
+                    print(
+                        "[NStepWrapper] Recreated empty wrapped buffer after load failure."
+                    )
+                except Exception as recreat_e:
+                    print(
+                        f"[NStepWrapper] Failed to recreate wrapped buffer: {recreat_e}"
+                    )

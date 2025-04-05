@@ -27,10 +27,11 @@ class GameState:
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
         self.line_clear_highlight_time: float = 0.0
+        self.game_over_flash_time: float = 0.0
         self.cleared_triangles_coords: List[Tuple[int, int]] = []
         self.game_over = False
         self._last_action_valid = True
-        self.rewards = RewardConfig()  # Instantiate RewardConfig
+        self.rewards = RewardConfig()
         self.demo_selected_shape_idx: int = 0
         self.demo_target_row: int = self.env_config.ROWS // 2
         self.demo_target_col: int = self.env_config.COLS // 2
@@ -45,6 +46,7 @@ class GameState:
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
         self.line_clear_highlight_time = 0.0
+        self.game_over_flash_time = 0.0
         self.cleared_triangles_coords = []
         self.game_over = False
         self._last_action_valid = True
@@ -71,6 +73,16 @@ class GameState:
                         acts.append(action_index)
         return acts
 
+    def _check_fundamental_game_over(self) -> bool:
+        for sh in self.shapes:
+            if not sh:
+                continue
+            for r in range(self.grid.rows):
+                for c in range(self.grid.cols):
+                    if self.grid.can_place(sh, r, c):
+                        return False
+        return True
+
     def is_over(self) -> bool:
         return self.game_over
 
@@ -82,6 +94,9 @@ class GameState:
 
     def is_highlighting_cleared(self) -> bool:
         return self.line_clear_highlight_time > 0
+
+    def is_game_over_flashing(self) -> bool:
+        return self.game_over_flash_time > 0
 
     def get_cleared_triangle_coords(self) -> List[Tuple[int, int]]:
         return self.cleared_triangles_coords
@@ -102,6 +117,7 @@ class GameState:
         self.blink_time = max(0, self.blink_time - dt)
         self.line_clear_flash_time = max(0, self.line_clear_flash_time - dt)
         self.line_clear_highlight_time = max(0, self.line_clear_highlight_time - dt)
+        self.game_over_flash_time = max(0, self.game_over_flash_time - dt)
         if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
             self.cleared_triangles_coords = []
 
@@ -110,13 +126,22 @@ class GameState:
         reward = self.rewards.PENALTY_INVALID_MOVE
         return reward
 
+    def _handle_game_over_state_change(self) -> float:
+        if self.game_over:
+            return 0.0
+        self.game_over = True
+        if self.freeze_time <= 0:
+            self.freeze_time = 1.0
+        # --- MODIFIED: Increase flash duration ---
+        self.game_over_flash_time = 0.6
+        # --- END MODIFIED ---
+        return self.rewards.PENALTY_GAME_OVER
+
     def _handle_valid_placement(
         self, shp: Shape, s_idx: int, rr: int, cc: int
     ) -> float:
         self._last_action_valid = True
-        # --- MODIFIED: Start with survival reward ---
         reward = self.rewards.REWARD_ALIVE_STEP
-        # --- END MODIFIED ---
 
         self.grid.place(shp, rr, cc)
         self.shapes[s_idx] = None
@@ -167,10 +192,8 @@ class GameState:
                 )
                 self.demo_selected_shape_idx = first_available
 
-        if not self.valid_actions():
-            self.game_over = True
-            self.freeze_time = 1.0
-            reward += self.rewards.PENALTY_GAME_OVER
+        if self._check_fundamental_game_over():
+            reward += self._handle_game_over_state_change()
 
         return reward
 
@@ -179,23 +202,20 @@ class GameState:
 
         if self.game_over:
             return (0.0, True)
-        if self.freeze_time > 0:
-            return (0.0, False)
 
         s_idx, rr, cc = self.decode_act(a)
         shp = self.shapes[s_idx] if 0 <= s_idx < len(self.shapes) else None
 
         is_valid_placement = shp is not None and self.grid.can_place(shp, rr, cc)
 
-        if is_valid_placement:
+        if self.is_frozen():
+            current_rl_reward = self._handle_invalid_placement()
+        elif is_valid_placement:
             current_rl_reward = self._handle_valid_placement(shp, s_idx, rr, cc)
         else:
             current_rl_reward = self._handle_invalid_placement()
-            if not self.valid_actions():
-                if not self.game_over:
-                    self.game_over = True
-                    self.freeze_time = 1.0
-                    current_rl_reward += self.rewards.PENALTY_GAME_OVER
+            if self._check_fundamental_game_over():
+                current_rl_reward += self._handle_game_over_state_change()
 
         self.score += current_rl_reward
         return (current_rl_reward, self.game_over)
@@ -241,6 +261,7 @@ class GameState:
     def get_shapes(self) -> List[Shape]:
         return [s for s in self.shapes if s is not None]
 
+    # --- Demo Mode Methods ---
     def cycle_shape(self, direction: int):
         if self.game_over or self.freeze_time > 0:
             return
@@ -248,16 +269,19 @@ class GameState:
         if num_slots <= 0:
             return
 
-        current_idx = self.demo_selected_shape_idx
-        for _ in range(num_slots):
-            current_idx = (current_idx + direction + num_slots) % num_slots
-            if (
-                0 <= current_idx < len(self.shapes)
-                and self.shapes[current_idx] is not None
-            ):
-                self.demo_selected_shape_idx = current_idx
-                return
-        # Keep current index if all slots are empty
+        available_indices = [
+            i for i, s in enumerate(self.shapes) if s is not None and 0 <= i < num_slots
+        ]
+        if not available_indices:
+            return
+
+        try:
+            current_list_idx = available_indices.index(self.demo_selected_shape_idx)
+        except ValueError:
+            current_list_idx = 0
+
+        new_list_idx = (current_list_idx + direction) % len(available_indices)
+        self.demo_selected_shape_idx = available_indices[new_list_idx]
 
     def move_target(self, dr: int, dc: int):
         if self.game_over or self.freeze_time > 0:

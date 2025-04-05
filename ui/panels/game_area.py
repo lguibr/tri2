@@ -117,16 +117,18 @@ class GameAreaRenderer:
         if cell_w <= 0 or cell_h <= 0:
             return
 
-        # --- Background Color Logic (Flash takes precedence) ---
-        bg_color = VisConfig.GRAY
-        if env.is_line_clearing():  # Check flash first
+        # --- Background Color Logic (Order Matters!) ---
+        bg_color = VisConfig.GRAY  # Default
+        if env.is_line_clearing():  # Line clear flash has highest priority
             bg_color = VisConfig.LINE_CLEAR_FLASH_COLOR
-        elif env.is_blinking():
+        elif env.is_game_over_flashing():  # Game over flash is next
+            bg_color = VisConfig.GAME_OVER_FLASH_COLOR
+        elif env.is_blinking():  # Generic blink (currently unused but kept)
             bg_color = VisConfig.YELLOW
-        elif env.is_frozen() and not env.is_over():
+        elif env.is_over():  # Static game over (no flash)
+            bg_color = VisConfig.DARK_RED
+        elif env.is_frozen():  # Frozen Blue (only if not game over/line clearing)
             bg_color = (30, 30, 100)
-        elif env.is_over():
-            bg_color = (40, 20, 20)
         surf.fill(bg_color)
 
         shape_area_height_ratio = 0.20
@@ -154,7 +156,6 @@ class GameAreaRenderer:
                 pygame.draw.rect(surf, VisConfig.RED, shape_rect, 1)
 
         if grid_surf:
-            # --- Pass env to grid rendering for highlight check ---
             self._render_single_env_grid(grid_surf, env, env_config)
 
         if shape_surf:
@@ -171,10 +172,15 @@ class GameAreaRenderer:
         except Exception as e:
             print(f"Error rendering score: {e}")
 
+        # --- MODIFIED: Specific Overlay Logic ---
         if env.is_over():
+            # Always show GAME OVER text if the game is over
             self._render_overlay_text(surf, "GAME OVER", VisConfig.RED)
-        elif env.is_frozen() and not env.is_blinking() and not env.is_line_clearing():
-            self._render_overlay_text(surf, "Frozen", VisConfig.BLUE)
+        elif env.is_line_clearing():
+            # Show Line Clear! text only during the line clear flash
+            self._render_overlay_text(surf, "Line Clear!", VisConfig.BLUE)
+        # No generic "Frozen" message anymore
+        # --- END MODIFIED ---
 
     def _render_overlay_text(
         self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
@@ -185,14 +191,13 @@ class GameAreaRenderer:
                 text,
                 True,
                 VisConfig.WHITE,
-                (color[0] // 2, color[1] // 2, color[2] // 2, 200),
+                (color[0] // 2, color[1] // 2, color[2] // 2, 220),
             )
             text_rect = text_surf.get_rect(center=surf.get_rect().center)
             surf.blit(text_surf, text_rect)
         except Exception as e:
             print(f"Error rendering overlay text '{text}': {e}")
 
-    # --- MODIFIED: _render_single_env_grid handles highlighting ---
     def _render_single_env_grid(
         self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
     ):
@@ -221,13 +226,11 @@ class GameAreaRenderer:
             grid_ox = padding + (drawable_w - final_grid_pixel_w) / 2
             grid_oy = padding + (drawable_h - final_grid_pixel_h) / 2
 
-            # --- Get highlight state ---
             is_highlighting = env.is_highlighting_cleared()
             cleared_coords = (
                 set(env.get_cleared_triangle_coords()) if is_highlighting else set()
             )
             highlight_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
-            # --- End highlight state ---
 
             if hasattr(env, "grid") and hasattr(env.grid, "triangles"):
                 for r in range(env.grid.rows):
@@ -248,14 +251,12 @@ class GameAreaRenderer:
                                     cw=int(tri_cell_w),
                                     ch=int(tri_cell_h),
                                 )
-                                # --- Determine color with highlight ---
                                 if is_highlighting and (r, c) in cleared_coords:
                                     color = highlight_color
                                 elif t.is_occupied:
                                     color = t.color if t.color else VisConfig.RED
                                 else:
-                                    color = VisConfig.LIGHTG  # Default empty color
-                                # --- End color determination ---
+                                    color = VisConfig.LIGHTG
 
                                 pygame.draw.polygon(surf, color, pts)
                                 pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
@@ -272,8 +273,6 @@ class GameAreaRenderer:
             print(f"Unexpected Render Error in _render_single_env_grid: {e}")
             traceback.print_exc()
             pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
-
-    # --- END MODIFIED ---
 
     def _render_shape_previews(self, surf: pygame.Surface, env: GameState):
         available_shapes = env.get_shapes()

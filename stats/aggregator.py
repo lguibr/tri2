@@ -1,7 +1,7 @@
 # File: stats/aggregator.py
 import time
 from collections import deque
-from typing import Deque, Dict, Any, Optional
+from typing import Deque, Dict, Any, Optional, List
 import numpy as np
 from config import StatsConfig
 
@@ -14,16 +14,22 @@ class StatsAggregator:
 
     def __init__(
         self,
-        avg_window: int = StatsConfig.STATS_AVG_WINDOW,
+        avg_windows: List[int] = StatsConfig.STATS_AVG_WINDOW,
         plot_window: int = StatsConfig.PLOT_DATA_WINDOW,
     ):
-        if avg_window <= 0:
-            avg_window = 100
+        if not avg_windows or not all(
+            isinstance(w, int) and w > 0 for w in avg_windows
+        ):
+            print("Warning: Invalid avg_windows list. Using default [100].")
+            self.avg_windows = [100]
+        else:
+            self.avg_windows = sorted(list(set(avg_windows)))
+
         if plot_window <= 0:
             plot_window = 10000
-
-        self.avg_window = avg_window
         self.plot_window = plot_window
+
+        self.summary_avg_window = self.avg_windows[0]
 
         self.losses: Deque[float] = deque(maxlen=plot_window)
         self.grad_norms: Deque[float] = deque(maxlen=plot_window)
@@ -32,9 +38,7 @@ class StatsAggregator:
         self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
         self.game_scores: Deque[int] = deque(maxlen=plot_window)
         self.episode_lines_cleared: Deque[int] = deque(maxlen=plot_window)
-        self.sps_values: Deque[float] = deque(
-            maxlen=plot_window
-        )  # Stores calculated SPS
+        self.sps_values: Deque[float] = deque(maxlen=plot_window)
         self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
         self.beta_values: Deque[float] = deque(maxlen=plot_window)
         self.best_rl_score_history: Deque[float] = deque(maxlen=plot_window)
@@ -48,7 +52,7 @@ class StatsAggregator:
         self.current_beta: float = 0.0
         self.current_buffer_size: int = 0
         self.current_global_step: int = 0
-        self.current_sps: float = 0.0  # Current SPS value
+        self.current_sps: float = 0.0
         self.current_lr: float = 0.0
 
         self.best_score: float = -float("inf")
@@ -64,7 +68,7 @@ class StatsAggregator:
         self.best_loss_step: int = 0
 
         print(
-            f"[StatsAggregator] Initialized. Avg Window: {self.avg_window}, Plot Window: {self.plot_window}"
+            f"[StatsAggregator] Initialized. Avg Windows: {self.avg_windows}, Plot Window: {self.plot_window}"
         )
 
     def record_episode(
@@ -102,11 +106,12 @@ class StatsAggregator:
             self.best_game_score_step = current_step
             update_info["new_best_game"] = True
 
-        current_best_rl = self.best_score if self.best_score > -float("inf") else 0.0
+        # --- MODIFIED: Append actual best_score, even if negative ---
+        self.best_rl_score_history.append(self.best_score)
+        # --- END MODIFIED ---
         current_best_game = (
             int(self.best_game_score) if self.best_game_score > -float("inf") else 0
         )
-        self.best_rl_score_history.append(current_best_rl)
         self.best_game_score_history.append(current_best_game)
 
         return update_info
@@ -144,13 +149,11 @@ class StatsAggregator:
             self.current_epsilon = step_data["epsilon"]
             self.epsilon_values.append(self.current_epsilon)
 
-        # --- MODIFIED: Calculate and store SPS ---
         if "step_time" in step_data and step_data["step_time"] > 1e-9:
             num_steps = step_data.get("num_steps_processed", 1)
             sps = num_steps / step_data["step_time"]
             self.sps_values.append(sps)
-            self.current_sps = sps  # Update current SPS
-        # --- END MODIFIED ---
+            self.current_sps = sps
 
         return update_info
 
@@ -158,8 +161,10 @@ class StatsAggregator:
         if current_global_step is None:
             current_global_step = self.current_global_step
 
+        summary_window = self.summary_avg_window
+
         def safe_mean(q: Deque, default=0.0) -> float:
-            window_data = list(q)[-self.avg_window :]
+            window_data = list(q)[-summary_window:]
             return float(np.mean(window_data)) if window_data else default
 
         summary = {
@@ -169,14 +174,12 @@ class StatsAggregator:
             "avg_max_q_window": safe_mean(self.avg_max_qs),
             "avg_game_score_window": safe_mean(self.game_scores),
             "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
-            "avg_sps_window": safe_mean(
-                self.sps_values, default=self.current_sps
-            ),  # Use current_sps as default
+            "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
             "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
             "total_episodes": self.total_episodes,
             "beta": self.current_beta,
             "buffer_size": self.current_buffer_size,
-            "steps_per_second": self.current_sps,  # Report current SPS
+            "steps_per_second": self.current_sps,
             "global_step": current_global_step,
             "current_lr": self.current_lr,
             "best_score": self.best_score,
@@ -190,6 +193,7 @@ class StatsAggregator:
             "best_loss_step": self.best_loss_step,
             "num_ep_scores": len(self.episode_scores),
             "num_losses": len(self.losses),
+            "summary_avg_window_size": summary_window,
         }
         return summary
 
@@ -201,7 +205,7 @@ class StatsAggregator:
             "avg_max_qs": self.avg_max_qs.copy(),
             "game_scores": self.game_scores.copy(),
             "episode_lines_cleared": self.episode_lines_cleared.copy(),
-            "sps_values": self.sps_values.copy(),  # Return the SPS deque
+            "sps_values": self.sps_values.copy(),
             "buffer_sizes": self.buffer_sizes.copy(),
             "beta_values": self.beta_values.copy(),
             "best_rl_score_history": self.best_rl_score_history.copy(),

@@ -32,13 +32,10 @@ from agent.replay_buffer.base_buffer import ReplayBufferBase
 from agent.replay_buffer.buffer_utils import create_replay_buffer
 from training.trainer import Trainer
 
-# --- MODIFIED IMPORTS ---
 from stats.stats_recorder import StatsRecorderBase
 from stats.aggregator import StatsAggregator
 from stats.simple_stats_recorder import SimpleStatsRecorder
 from stats.tensorboard_logger import TensorBoardStatsRecorder
-
-# --- END MODIFIED ---
 
 
 def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
@@ -101,13 +98,17 @@ def initialize_agent_buffer(
     buffer_config: BufferConfig,
 ) -> Tuple[DQNAgent, ReplayBufferBase]:
     print("Initializing Agent and Buffer...")
-    agent = DQNAgent(config=model_config, dqn_config=dqn_config, env_config=env_config)
+    agent = DQNAgent(
+        config=model_config,
+        dqn_config=dqn_config,
+        env_config=env_config,
+        buffer_config=buffer_config,
+    )
     buffer = create_replay_buffer(config=buffer_config, dqn_config=dqn_config)
-    print("Agent and Buffer initialized.")
+    print("Agent and Initial Buffer structure initialized.")
     return agent, buffer
 
 
-# --- MODIFIED: initialize_stats_recorder ---
 def initialize_stats_recorder(
     stats_config: StatsConfig,
     tb_config: TensorBoardConfig,
@@ -115,28 +116,19 @@ def initialize_stats_recorder(
     agent: Optional[DQNAgent],
     env_config: EnvConfig,
 ) -> StatsRecorderBase:
-    """
-    Creates the StatsAggregator, SimpleStatsRecorder, and TensorBoardStatsRecorder.
-    Returns the final TensorBoardStatsRecorder instance.
-    """
     print(f"Initializing Statistics Components...")
-
-    # 1. Create the Aggregator
+    # --- MODIFIED: Use avg_windows keyword argument ---
     stats_aggregator = StatsAggregator(
-        avg_window=stats_config.STATS_AVG_WINDOW,
+        avg_windows=stats_config.STATS_AVG_WINDOW,  # Changed from avg_window
         plot_window=stats_config.PLOT_DATA_WINDOW,
     )
-
-    # 2. Create the Console Logger (uses the aggregator)
+    # --- END MODIFIED ---
     console_recorder = SimpleStatsRecorder(
         aggregator=stats_aggregator,
         console_log_interval=stats_config.CONSOLE_LOG_FREQ,
     )
 
-    # 3. Prepare for TensorBoard Logger (Graph, HParams)
-    dummy_grid_cpu = None
-    dummy_shapes_cpu = None
-    model_for_graph_cpu = None
+    dummy_grid_cpu, dummy_shapes_cpu, model_for_graph_cpu = None, None, None
     if agent and agent.online_net:
         try:
             expected_grid_shape = env_config.GRID_STATE_SHAPE
@@ -163,17 +155,15 @@ def initialize_stats_recorder(
                 dueling=agent.online_net.dueling,
                 use_noisy=agent.online_net.use_noisy,
             ).to("cpu")
+
             model_for_graph_cpu.load_state_dict(agent.online_net.state_dict())
             model_for_graph_cpu.eval()
             print("[Stats Init] Prepared model copy and dummy input on CPU for graph.")
         except Exception as e:
             print(f"Warning: Failed to prepare model/input for graph logging: {e}")
             traceback.print_exc()
-            dummy_grid_cpu = None
-            dummy_shapes_cpu = None
-            model_for_graph_cpu = None
+            dummy_grid_cpu, dummy_shapes_cpu, model_for_graph_cpu = None, None, None
 
-    # 4. Create the TensorBoard Logger (uses aggregator and console logger)
     print(f"Using TensorBoard Logger (Log Dir: {tb_config.LOG_DIR})")
     try:
         dummy_input_tuple = (
@@ -201,21 +191,18 @@ def initialize_stats_recorder(
             ),
         )
         print("Statistics Components initialized successfully.")
-        return tb_recorder  # Return the main recorder instance
+        return tb_recorder
     except Exception as e:
         print(f"FATAL: Error initializing TensorBoardStatsRecorder: {e}. Exiting.")
         traceback.print_exc()
         raise e
 
 
-# --- END MODIFIED ---
-
-
 def initialize_trainer(
     envs: List[GameState],
     agent: DQNAgent,
     buffer: ReplayBufferBase,
-    stats_recorder: StatsRecorderBase,  # This is now the TB recorder instance
+    stats_recorder: StatsRecorderBase,
     env_config: EnvConfig,
     dqn_config: DQNConfig,
     train_config: TrainConfig,

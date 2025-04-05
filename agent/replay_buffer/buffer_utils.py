@@ -2,8 +2,8 @@
 from config import BufferConfig, DQNConfig
 from .base_buffer import ReplayBufferBase
 from .uniform_buffer import UniformReplayBuffer
-from .prioritized_buffer import PrioritizedReplayBuffer  # Import PER
-from .nstep_buffer import NStepBufferWrapper
+from .prioritized_buffer import PrioritizedReplayBuffer
+from .nstep_buffer import NStepBufferWrapper  # Import the wrapper
 
 
 def create_replay_buffer(
@@ -15,7 +15,6 @@ def create_replay_buffer(
     print(f"  Type: {'Prioritized' if config.USE_PER else 'Uniform'}")
     print(f"  Capacity: {config.REPLAY_BUFFER_SIZE/1e6:.1f}M")
 
-    # --- MODIFIED: Instantiate core buffer based on USE_PER ---
     if config.USE_PER:
         print(
             f"  PER alpha={config.PER_ALPHA}, eps={config.PER_EPSILON}, beta_start={config.PER_BETA_START}"
@@ -27,8 +26,8 @@ def create_replay_buffer(
         )
     else:
         core_buffer = UniformReplayBuffer(capacity=config.REPLAY_BUFFER_SIZE)
-    # --- END MODIFIED ---
 
+    # --- MODIFIED: Wrap with NStepBufferWrapper if enabled ---
     if config.USE_N_STEP and config.N_STEP > 1:
         print(
             f"  N-Step Wrapper: Enabled (N={config.N_STEP}, gamma={dqn_config.GAMMA})"
@@ -41,6 +40,7 @@ def create_replay_buffer(
     else:
         print(f"  N-Step Wrapper: Disabled")
         final_buffer = core_buffer
+    # --- END MODIFIED ---
 
     print(f"[BufferFactory] Final buffer type: {type(final_buffer).__name__}")
     return final_buffer

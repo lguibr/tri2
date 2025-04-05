@@ -28,8 +28,14 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time: float = time.time()
         self.last_log_step: int = 0
         self.start_time: float = time.time()
+        # --- MODIFIED: Get the window size used for summary ---
+        self.summary_avg_window = self.aggregator.summary_avg_window
+        # --- END MODIFIED ---
         print(
             f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'}"
+        )
+        print(
+            f"[SimpleStatsRecorder] Console logs will use Avg Window: {self.summary_avg_window}"
         )
 
     def record_episode(
@@ -41,7 +47,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
     ):
-        """Passes episode data to the aggregator and checks for console logging."""
         update_info = self.aggregator.record_episode(
             episode_score,
             episode_length,
@@ -77,21 +82,17 @@ class SimpleStatsRecorder(StatsRecorderBase):
             )
 
     def record_step(self, step_data: Dict[str, Any]):
-        """Passes step data to the aggregator and triggers console logging."""
         _ = self.aggregator.record_step(step_data)
         g_step = step_data.get("global_step", self.aggregator.current_global_step)
         self.log_summary(g_step)
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        """Retrieves summary statistics from the aggregator."""
         return self.aggregator.get_summary(current_global_step)
 
     def get_plot_data(self) -> Dict[str, Deque]:
-        """Retrieves plot data deques from the aggregator."""
         return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
-        """Logs summary statistics to the console periodically."""
         if (
             self.console_log_interval <= 0
             or global_step < self.last_log_step + self.console_log_interval
@@ -113,14 +114,17 @@ class SimpleStatsRecorder(StatsRecorderBase):
             else "N/A"
         )
 
+        # --- MODIFIED: Indicate the window size used for averages ---
+        avg_window_size = summary.get("summary_avg_window_size", "?")
         log_str = (
             f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
             f"Ep: {summary['total_episodes']:<7} | SPS: {summary['steps_per_second']:<5.0f} | "
-            f"RLScore(Avg): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
-            f"Loss(Avg): {summary['avg_loss_window']:.4f} (Best: {best_loss_val}) | "
+            f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
+            f"Loss(Avg{avg_window_size}): {summary['avg_loss_window']:.4f} (Best: {best_loss_val}) | "
             f"LR: {summary['current_lr']:.1e} | "
             f"Buf: {summary['buffer_size']/1e6:.2f}M"
         )
+        # --- END MODIFIED ---
         if summary["beta"] > 0 and summary["beta"] < 1.0:
             log_str += f" | Beta: {summary['beta']:.3f}"
 
@@ -129,7 +133,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time = time.time()
         self.last_log_step = global_step
 
-    # --- No-op methods for non-console logging ---
     def record_histogram(
         self,
         tag: str,

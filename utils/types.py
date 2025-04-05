@@ -37,13 +37,12 @@ NumpyBatch = Tuple[
 NumpyNStepBatch = Tuple[
     NumpyStateBatch,
     NumpyActionBatch,
-    NumpyRewardBatch,
-    NumpyStateBatch,
-    NumpyDoneBatch,
-    NumpyDiscountBatch,
+    NumpyRewardBatch,  # N-step rewards
+    NumpyStateBatch,  # State after N steps
+    NumpyDoneBatch,  # Done flag after N steps
+    NumpyDiscountBatch,  # Effective discount gamma^n
 ]
 
-# --- MODIFIED: Added Prioritized Batch Types ---
 # Prioritized 1-step batch
 PrioritizedNumpyBatch = Tuple[
     NumpyBatch,  # (states_dicts, actions, rewards, next_states_dicts, dones)
@@ -57,7 +56,6 @@ PrioritizedNumpyNStepBatch = Tuple[
     np.ndarray,  # indices
     np.ndarray,  # is_weights
 ]
-# --- END MODIFIED ---
 
 
 # --- Batch Types (Tensor) ---

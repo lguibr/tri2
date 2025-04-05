@@ -5,9 +5,17 @@ import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import numpy as np
 import traceback
+import copy
 from typing import Tuple, List, Dict, Any, Optional, Union
 
-from config import ModelConfig, EnvConfig, DQNConfig, DEVICE, TensorBoardConfig
+from config import (
+    ModelConfig,
+    EnvConfig,
+    DQNConfig,
+    DEVICE,
+    TensorBoardConfig,
+    BufferConfig,
+)
 from environment.game_state import StateType
 from utils.types import ActionType, AgentStateDict, NumpyBatch, NumpyNStepBatch
 from agent.model_factory import create_network
@@ -20,13 +28,18 @@ class DQNAgent:
     """DQN Agent orchestrating network, action selection, and loss calculation."""
 
     def __init__(
-        self, config: ModelConfig, dqn_config: DQNConfig, env_config: EnvConfig
+        self,
+        config: ModelConfig,
+        dqn_config: DQNConfig,
+        env_config: EnvConfig,
+        buffer_config: BufferConfig,
     ):
         print("[DQNAgent] Initializing...")
         self.device = DEVICE
         self.env_config = env_config
         self.dqn_config = dqn_config
         self.tb_config = TensorBoardConfig()
+        self.buffer_config = buffer_config
         self.action_dim = env_config.ACTION_DIM
 
         self.online_net = create_network(
@@ -96,21 +109,36 @@ class DQNAgent:
     def select_action(
         self, state: StateType, epsilon: float, valid_actions_indices: List[ActionType]
     ) -> ActionType:
+        self.online_net.to(self.device)
+        # --- Epsilon is ignored by ActionSelector if USE_NOISY_NETS is true ---
         return self.action_selector.select_action(state, epsilon, valid_actions_indices)
 
     def compute_loss(
         self,
         batch: Union[NumpyBatch, NumpyNStepBatch],
-        is_n_step: bool,
         is_weights: Optional[np.ndarray] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        return self.loss_calculator.compute_loss(batch, is_n_step, is_weights)
+        is_n_step = self.buffer_config.USE_N_STEP and self.buffer_config.N_STEP > 1
+        # --- Set networks to train() for Noisy Nets before loss calculation ---
+        if self.dqn_config.USE_NOISY_NETS:
+            self.online_net.train()
+            self.target_net.train()  # Target also uses noise during loss calculation
+        else:
+            self.online_net.train()
+            self.target_net.eval()  # Standard eval mode for target net
+        loss, td_errors = self.loss_calculator.compute_loss(
+            batch, is_n_step, is_weights
+        )
+        # --- Restore target net eval mode if not noisy ---
+        if not self.dqn_config.USE_NOISY_NETS:
+            self.target_net.eval()
+        return loss, td_errors
 
     def update(self, loss: torch.Tensor) -> Optional[float]:
         grad_norm = None
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        self.online_net.train()
+        self.online_net.train()  # Keep online net in train mode
 
         if self.dqn_config.GRADIENT_CLIP_NORM > 0:
             try:
@@ -120,62 +148,67 @@ class DQNAgent:
                     error_if_nonfinite=True,
                 ).item()
             except RuntimeError as clip_err:
-                print(f"ERROR: Gradient clipping failed: {clip_err}")
+                print(
+                    f"ERROR: Gradient clipping failed: {clip_err}. Skipping optimizer step."
+                )
+                self.optimizer.zero_grad(set_to_none=True)
                 return None
             except Exception as clip_err:
-                print(f"Warning: Error during gradient clipping: {clip_err}")
+                print(f"Warning: Unexpected error during gradient clipping: {clip_err}")
                 grad_norm = None
 
-        self.optimizer.step()
+        try:
+            self.optimizer.step()
+        except Exception as optim_err:
+            print(f"ERROR: Optimizer step failed: {optim_err}")
+            traceback.print_exc()
+            return None
 
         if self.scheduler:
             self.scheduler.step()
+
+        # --- Reset noise after optimizer step ---
         if self.dqn_config.USE_NOISY_NETS:
             self.online_net.reset_noise()
             self.target_net.reset_noise()
+        # --- END Reset Noise ---
+
         return grad_norm
 
     def update_target_network(self):
         self.target_net.load_state_dict(self.online_net.state_dict())
-        self.target_net.eval()
+        self.target_net.eval()  # Standard eval mode after update
 
     def get_state_dict(self) -> AgentStateDict:
+        self.online_net.to(self.device)
+        self.target_net.to(self.device)
         self.online_net.cpu()
         self.target_net.cpu()
-        optim_state_cpu = {}
-        if hasattr(self.optimizer, "state") and self.optimizer.state:
-            for group in self.optimizer.param_groups:
-                for p in group["params"]:
-                    if p in self.optimizer.state:
-                        state = self.optimizer.state[p]
-                        for k, v in state.items():
-                            if isinstance(v, torch.Tensor):
-                                optim_state_cpu[id(p), k] = v.cpu()
-                                state[k] = v.cpu()
+
+        cpu_optimizer = optim.AdamW(
+            self.online_net.parameters(),
+            lr=self.dqn_config.LEARNING_RATE,
+            eps=self.dqn_config.ADAM_EPS,
+            weight_decay=1e-5,
+        )
+        cpu_optimizer.load_state_dict(self.optimizer.state_dict())
+        optimizer_state_dict_cpu = cpu_optimizer.state_dict()
+        del cpu_optimizer
+
         state = {
             "online_net_state_dict": self.online_net.state_dict(),
             "target_net_state_dict": self.target_net.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
+            "optimizer_state_dict": optimizer_state_dict_cpu,
             "scheduler_state_dict": (
                 self.scheduler.state_dict() if self.scheduler else None
             ),
         }
-        if hasattr(self.optimizer, "state") and self.optimizer.state:
-            for group in self.optimizer.param_groups:
-                for p in group["params"]:
-                    if p in self.optimizer.state:
-                        state_opt = self.optimizer.state[p]
-                        for k, v_cpu in state_opt.items():
-                            if (
-                                isinstance(v_cpu, torch.Tensor)
-                                and (id(p), k) in optim_state_cpu
-                            ):
-                                original_tensor = optim_state_cpu[(id(p), k)].to(
-                                    self.device
-                                )
-                                state_opt[k] = original_tensor
+
         self.online_net.to(self.device)
         self.target_net.to(self.device)
+        self.online_net.train()
+        self.target_net.eval()
+
         return state
 
     def load_state_dict(self, state_dict: AgentStateDict):
@@ -184,52 +217,53 @@ class DQNAgent:
             self.online_net.load_state_dict(
                 state_dict["online_net_state_dict"], strict=False
             )
-        except Exception as e:
-            print(f"ERROR loading online_net state_dict: {e}")
-            traceback.print_exc()
-            raise
-        if "target_net_state_dict" in state_dict:
-            try:
+            if "target_net_state_dict" in state_dict:
                 self.target_net.load_state_dict(
                     state_dict["target_net_state_dict"], strict=False
                 )
-            except Exception as e:
-                print(f"ERROR loading target_net state_dict: {e}. Copying from online.")
+            else:
+                print("Warning: Target net state missing, copying from online.")
                 self.target_net.load_state_dict(self.online_net.state_dict())
-        else:
-            print("Warning: Target net state missing, copying from online.")
-            self.target_net.load_state_dict(self.online_net.state_dict())
-        self.online_net.to(self.device)
-        self.target_net.to(self.device)
-        if "optimizer_state_dict" in state_dict:
-            try:
+
+            self.online_net.to(self.device)
+            self.target_net.to(self.device)
+
+            if "optimizer_state_dict" in state_dict:
                 self.optimizer.load_state_dict(state_dict["optimizer_state_dict"])
-                for state in self.optimizer.state.values():
-                    for k, v in state.items():
-                        if isinstance(v, torch.Tensor) and v.device != self.device:
-                            state[k] = v.to(self.device)
-            except Exception as e:
-                print(f"Warning: Could not load optimizer state ({e}). Resetting.")
+                print("[DQNAgent] Optimizer state loaded.")
+            else:
+                print("Warning: Optimizer state not found. Resetting optimizer.")
                 self._reset_optimizer()
-        else:
-            print("Warning: Optimizer state not found. Resetting.")
-            self._reset_optimizer()
-        if (
-            self.scheduler
-            and "scheduler_state_dict" in state_dict
-            and state_dict["scheduler_state_dict"] is not None
-        ):
-            try:
-                self.scheduler.load_state_dict(state_dict["scheduler_state_dict"])
-            except Exception as e:
-                print(f"Warning: Could not load LR scheduler state ({e}). Resetting.")
+
+            if (
+                self.scheduler
+                and "scheduler_state_dict" in state_dict
+                and state_dict["scheduler_state_dict"] is not None
+            ):
+                try:
+                    self.scheduler.load_state_dict(state_dict["scheduler_state_dict"])
+                    print("[DQNAgent] Scheduler state loaded.")
+                except Exception as e:
+                    print(
+                        f"Warning: Could not load LR scheduler state ({e}). Resetting."
+                    )
+                    self.scheduler = self._initialize_scheduler(self.dqn_config)
+            elif self.scheduler:
+                print("Warning: LR Scheduler state not found. Resetting.")
                 self.scheduler = self._initialize_scheduler(self.dqn_config)
-        elif self.scheduler:
-            print("Warning: LR Scheduler state not found. Resetting.")
-            self.scheduler = self._initialize_scheduler(self.dqn_config)
-        self.online_net.train()
-        self.target_net.eval()
-        print("[DQNAgent] load_state_dict complete.")
+
+            self.online_net.train()
+            self.target_net.eval()
+            print("[DQNAgent] load_state_dict complete.")
+
+        except Exception as e:
+            print(f"CRITICAL ERROR during DQNAgent.load_state_dict: {e}")
+            traceback.print_exc()
+            print("Attempting to reset agent state after load failure.")
+            self._reset_optimizer()
+            self.target_net.load_state_dict(self.online_net.state_dict())
+            self.online_net.train()
+            self.target_net.eval()
 
     def _reset_optimizer(self):
         self.optimizer = optim.AdamW(
