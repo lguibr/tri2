@@ -2,7 +2,7 @@ import pygame
 import math
 import traceback
 from typing import List, Tuple
-from config import VisConfig, EnvConfig, BLACK, BLUE  
+from config import VisConfig, EnvConfig, BLACK, BLUE
 from environment.game_state import GameState
 from environment.shape import Shape
 from environment.triangle import Triangle
@@ -36,18 +36,26 @@ class GameAreaRenderer:
         envs: List[GameState],
         num_envs: int,
         env_config: EnvConfig,
+        panel_width: int,  # Accept panel width
+        panel_x_offset: int,  # Accept x offset
     ):
-        current_width, current_height = self.screen.get_size()
-        lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
-        ga_rect = pygame.Rect(lp_width, 0, current_width - lp_width, current_height)
+        current_height = self.screen.get_height()
+        # Use the provided width and offset
+        ga_rect = pygame.Rect(panel_x_offset, 0, panel_width, current_height)
 
         if num_envs <= 0 or ga_rect.width <= 0 or ga_rect.height <= 0:
+            # Optionally draw a background or border for the empty area
+            pygame.draw.rect(self.screen, (10, 10, 10), ga_rect)  # Dark background
+            pygame.draw.rect(self.screen, (50, 50, 50), ga_rect, 1)  # Border
             return
 
         render_limit = self.vis_config.NUM_ENVS_TO_RENDER
         num_to_render = min(num_envs, render_limit) if render_limit > 0 else num_envs
 
         if num_to_render <= 0:
+            # Optionally draw a background or border for the empty area
+            pygame.draw.rect(self.screen, (10, 10, 10), ga_rect)  # Dark background
+            pygame.draw.rect(self.screen, (50, 50, 50), ga_rect, 1)  # Border
             return
 
         cols_env, rows_env, cell_w, cell_h = self._calculate_grid_layout(
@@ -60,7 +68,7 @@ class GameAreaRenderer:
                 envs,
                 num_to_render,
                 env_config,
-                ga_rect,
+                ga_rect,  # Pass the calculated rect
                 cols_env,
                 rows_env,
                 cell_w,
@@ -75,6 +83,9 @@ class GameAreaRenderer:
     def _calculate_grid_layout(
         self, ga_rect: pygame.Rect, num_to_render: int
     ) -> Tuple[int, int, int, int]:
+        # Calculate layout based on the provided game area rect
+        if ga_rect.width <= 0 or ga_rect.height <= 0:
+            return 0, 0, 0, 0
         aspect_ratio = ga_rect.width / max(1, ga_rect.height)
         cols_env = max(1, int(math.sqrt(num_to_render * aspect_ratio)))
         rows_env = max(1, math.ceil(num_to_render / cols_env))
@@ -89,7 +100,7 @@ class GameAreaRenderer:
         envs,
         num_to_render,
         env_config,
-        ga_rect,
+        ga_rect,  # Use the provided game area rect
         cols,
         rows,
         cell_w,
@@ -100,16 +111,19 @@ class GameAreaRenderer:
             for c in range(cols):
                 if env_idx >= num_to_render:
                     break
+                # Calculate position relative to ga_rect's top-left
                 env_x = ga_rect.x + self.vis_config.ENV_SPACING * (c + 1) + c * cell_w
                 env_y = ga_rect.y + self.vis_config.ENV_SPACING * (r + 1) + r * cell_h
                 env_rect = pygame.Rect(env_x, env_y, cell_w, cell_h)
 
+                # Clip against the screen, not just the game area, in case of overlap
                 clipped_env_rect = env_rect.clip(self.screen.get_rect())
                 if clipped_env_rect.width <= 0 or clipped_env_rect.height <= 0:
                     env_idx += 1
                     continue
 
                 try:
+                    # Subsurface from the main screen using the calculated rect
                     sub_surf = self.screen.subsurface(clipped_env_rect)
                     self._render_single_env(sub_surf, envs[env_idx], env_config)
 

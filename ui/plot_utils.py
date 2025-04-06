@@ -1,5 +1,5 @@
 import numpy as np
-from typing import  Optional, List, Union, Tuple
+from typing import Optional, List, Union, Tuple
 import matplotlib
 import traceback
 import math
@@ -25,12 +25,12 @@ try:
     plt.style.use("dark_background")
     plt.rcParams.update(
         {
-            "font.size": 8,
-            "axes.labelsize": 8,
-            "axes.titlesize": 9,
-            "xtick.labelsize": 7,
-            "ytick.labelsize": 7,
-            "legend.fontsize": 6,
+            "font.size": 9,  # Base font size slightly increased
+            "axes.labelsize": 9,  # Increased label size
+            "axes.titlesize": 11,  # Increased title size
+            "xtick.labelsize": 8,  # Increased tick label size
+            "ytick.labelsize": 8,  # Increased tick label size
+            "legend.fontsize": 8,  # Increased legend font size
             "figure.facecolor": "#262626",
             "axes.facecolor": "#303030",
             "axes.edgecolor": "#707070",
@@ -40,8 +40,11 @@ try:
             "grid.color": "#505050",
             "grid.linestyle": "--",
             "grid.alpha": 0.5,
-            "font.small_title_values": 7,
-            "axes.titlepad": 12,
+            "axes.titlepad": 6,  # Reduced title padding
+            "legend.frameon": True,  # Add frame to legend
+            "legend.framealpha": 0.85,  # Increased legend background alpha
+            "legend.facecolor": "#202020",  # Darker legend background
+            "legend.title_fontsize": 8,  # Increased legend title font size
         }
     )
 except Exception as e:
@@ -67,6 +70,10 @@ MIN_ALPHA = 0.4
 MAX_ALPHA = 1.0
 MIN_DATA_AVG_LINEWIDTH = 1
 MAX_DATA_AVG_LINEWIDTH = 2
+
+# Increased padding factors
+Y_PADDING_FACTOR = 0.20  # Increased from 0.1
+# X_PADDING_FACTOR = 0.05 # Removed horizontal padding factor
 
 
 def calculate_trend_line(data: np.ndarray) -> Optional[Tuple[float, float]]:
@@ -179,17 +186,19 @@ def render_single_plot(
     label: str,
     color: Tuple[float, float, float],
     rolling_window_sizes: List[int],
-    xlabel: Optional[str] = None,
+    # xlabel: Optional[str] = None, # Removed xlabel
     show_placeholder: bool = True,
     placeholder_text: Optional[str] = None,
     y_log_scale: bool = False,
 ):
     """
     Renders data with linearly scaled alpha/linewidth. Trend line is thin, white, dashed.
-    Title is two lines: Label, then compact value pairs.
+    Title is just the label. Detailed values moved to legend. Best value shown as legend title.
     Applies a background tint and border to the entire subplot based on trend desirability.
-    Legend now includes current values and trend slope.
+    Legend now includes current values and trend slope, placed at center-left.
     Handles empty data explicitly to show placeholder.
+    Increased vertical padding, removed horizontal padding and xlabel.
+    Increased title and legend font sizes, increased legend background alpha.
     """
     try:
         data_np = np.array(data, dtype=float)
@@ -240,53 +249,14 @@ def render_single_plot(
 
     current_val = valid_data[-1]
     best_val = np.min(valid_data) if is_lower_better else np.max(valid_data)
+    best_val_str = f"Best: {_format_value(best_val, is_lower_better)}"  # Calculate best value string
 
-    title_line1 = f"{label}"
-    value_pairs = []
-    value_pairs.append(
-        f"Now:{_format_value(current_val, is_lower_better)}|Best:{_format_value(best_val, is_lower_better)}"
-    )
-
-    avg_values = {}
-    for avg_window in plotted_windows:
-        try:
-            avg_values[avg_window] = np.mean(valid_data[-avg_window:])
-        except Exception:
-            avg_values[avg_window] = np.nan
-
-    avg_windows_sorted = sorted(avg_values.keys())
-    for i in range(0, len(avg_windows_sorted), 2):
-        win1 = avg_windows_sorted[i]
-        avg1 = avg_values.get(win1, np.nan)
-        pair_str = f"A{win1}:{_format_value(avg1, is_lower_better)}"
-
-        if i + 1 < len(avg_windows_sorted):
-            win2 = avg_windows_sorted[i + 1]
-            avg2 = avg_values.get(win2, np.nan)
-            pair_str += f"|A{win2}:{_format_value(avg2, is_lower_better)}"
-            if np.isfinite(avg1) and np.isfinite(avg2):
-                diff = avg1 - avg2
-                diff_sign = "+" if diff >= 0 else ""
-                pair_str += f"(D:{diff_sign}{_format_value(diff, is_lower_better)})"
-        value_pairs.append(pair_str)
-
-    title_line2 = " • ".join(value_pairs)
-
+    # Set only the main title
     ax.set_title(
-        title_line1,
+        label,
         loc="left",
         fontsize=plt.rcParams["axes.titlesize"],
         pad=plt.rcParams.get("axes.titlepad", 6),
-    )
-    ax.text(
-        0.01,
-        0.99,
-        title_line2,
-        transform=ax.transAxes,
-        ha="left",
-        va="top",
-        fontsize=plt.rcParams.get("font.small_title_values", 7),
-        color=plt.rcParams["axes.labelcolor"],
     )
 
     try:
@@ -304,6 +274,7 @@ def render_single_plot(
             MIN_DATA_AVG_LINEWIDTH,
             MAX_DATA_AVG_LINEWIDTH,
         )
+        # Updated label for legend (removed Best)
         raw_label = f"Raw: {_format_value(current_val, is_lower_better)}"
         ax.plot(
             x_coords,
@@ -333,6 +304,7 @@ def render_single_plot(
             linestyle = "-"
             if len(avg_x_coords) == len(rolling_avg):
                 last_avg_val = rolling_avg[-1] if len(rolling_avg) > 0 else np.nan
+                # Updated label for legend
                 avg_label = (
                     f"Avg {avg_window}: {_format_value(last_avg_val, is_lower_better)}"
                 )
@@ -352,6 +324,7 @@ def render_single_plot(
             slope, intercept = trend_params
             x_trend = np.array([0, n_points - 1])
             y_trend = slope * x_trend + intercept
+            # Updated label for legend
             trend_label = f"Trend: {_format_slope(slope)}"
             ax.plot(
                 x_trend,
@@ -365,41 +338,50 @@ def render_single_plot(
             )
             plotted_legend_items = True
 
+        # Removed Best Value Text Inside Plot
+
         ax.tick_params(axis="both", which="major")
-        if xlabel:
-            ax.set_xlabel(xlabel)
+        # Removed ax.set_xlabel(xlabel)
+
         ax.grid(
             True,
             linestyle=plt.rcParams["grid.linestyle"],
             alpha=plt.rcParams["grid.alpha"],
         )
 
+        # --- Adjust Y-axis limits for more padding ---
         min_val_plot = np.min(valid_data)
         max_val_plot = np.max(valid_data)
-        padding_factor = 0.1
         range_val = max_val_plot - min_val_plot
-        if abs(range_val) < 1e-6:
+        if abs(range_val) < 1e-6:  # Handle case where all values are the same
             padding = (
-                max(abs(max_val_plot * padding_factor), 0.5)
+                max(abs(max_val_plot * Y_PADDING_FACTOR), 0.5)
                 if max_val_plot != 0
                 else 0.5
             )
         else:
-            padding = range_val * padding_factor
-        padding = max(padding, 1e-6)
+            padding = range_val * Y_PADDING_FACTOR  # Use increased padding factor
+        padding = max(padding, 1e-6)  # Ensure padding is positive
         ax.set_ylim(min_val_plot - padding, max_val_plot + padding)
 
         if y_log_scale and min_val_plot > 1e-9:
             ax.set_yscale("log")
-            ax.set_ylim(bottom=max(min_val_plot * 0.9, 1e-9))
+            # Adjust log scale limits if needed, ensuring bottom is positive
+            current_bottom, current_top = ax.get_ylim()
+            new_bottom = max(current_bottom, 1e-9)  # Ensure bottom is positive
+            if new_bottom >= current_top:  # Prevent invalid limits
+                new_bottom = current_top / 10
+            ax.set_ylim(bottom=new_bottom, top=current_top)
         else:
             ax.set_yscale("linear")
 
+        # --- Adjust X-axis limits (remove padding) ---
         if n_points > 1:
-            ax.set_xlim(-0.02 * n_points, n_points - 1 + 0.02 * n_points)
+            ax.set_xlim(0, n_points - 1)  # Set limits tightly
         elif n_points == 1:
-            ax.set_xlim(-0.5, 0.5)
+            ax.set_xlim(-0.5, 0.5)  # Keep slight padding for single point
 
+        # --- X-axis Ticks Formatting ---
         if n_points > 1000:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=4))
 
@@ -415,8 +397,15 @@ def render_single_plot(
         elif n_points > 10:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
 
+        # --- Legend ---
         if plotted_legend_items:
-            ax.legend(loc="best", fontsize=plt.rcParams["legend.fontsize"])
+            # Place legend at the center-left of the axes and add Best value as title
+            ax.legend(
+                loc="center left",
+                bbox_to_anchor=(0, 0.5),
+                title=best_val_str,  # Use Best value as legend title
+                fontsize=plt.rcParams["legend.fontsize"],
+            )
 
     except Exception as plot_err:
         print(f"ERROR during render_single_plot for '{label}': {plot_err}")

@@ -35,7 +35,9 @@ class Plotter:
             "entropy": normalize_color_for_matplotlib((150, 150, 150)),
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
             "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
-            "best_game": normalize_color_for_matplotlib((255, 165, 0)),
+            "tris_cleared": normalize_color_for_matplotlib(
+                VisConfig.YELLOW
+            ),  # Added color
             "lr": normalize_color_for_matplotlib((255, 0, 255)),
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
@@ -49,7 +51,7 @@ class Plotter:
 
         data_keys = [
             "game_scores",
-            "best_game_score_history",
+            "episode_triangles_cleared",  # Changed from best_game_score_history
             "episode_scores",
             "episode_lengths",
             "sps_values",
@@ -75,20 +77,18 @@ class Plotter:
                 fig, axes = plt.subplots(
                     3, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
+                # Adjust spacing to make plots closer
                 fig.subplots_adjust(
-                    hspace=0.30,
-                    wspace=0.15,
+                    hspace=0.15,  # Reduced vertical space
+                    wspace=0.10,  # Reduced horizontal space
                     left=0.08,
                     right=0.98,
-                    bottom=0.10,
-                    top=0.92,
+                    bottom=0.05,  # Reduced bottom margin
+                    top=0.95,  # Reduced top margin
                 )
                 axes_flat = axes.flatten()
 
-                max_len = max((len(d) for d in data_lists.values() if d), default=0)
-                plot_window_label = (
-                    f"Latest {min(self.plot_data_window, max_len)} Updates"
-                )
+                # Removed plot_window_label as xlabel is removed from render_single_plot
 
                 # Row 1
                 render_single_plot(
@@ -97,17 +97,18 @@ class Plotter:
                     "Game Score",
                     self.colors["game_score"],
                     self.rolling_window_sizes,
-                    xlabel=plot_window_label,
+                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Game Score",
                 )
+                # Replaced Best Game Score History with Triangles Cleared
                 render_single_plot(
                     axes_flat[1],
-                    data_lists["best_game_score_history"],
-                    "Best Game Score",
-                    self.colors["best_game"],
-                    [],  # No rolling average for best score history
-                    xlabel=plot_window_label,
-                    placeholder_text="Best Game Score",
+                    data_lists["episode_triangles_cleared"],
+                    "Tris Cleared / Ep",
+                    self.colors["tris_cleared"],
+                    self.rolling_window_sizes,
+                    # xlabel=plot_window_label, # Removed
+                    placeholder_text="Triangles Cleared",
                 )
                 render_single_plot(
                     axes_flat[2],
@@ -115,7 +116,7 @@ class Plotter:
                     "RL Score",
                     self.colors["rl_score"],
                     self.rolling_window_sizes,
-                    xlabel=plot_window_label,
+                    # xlabel=plot_window_label, # Removed
                     placeholder_text="RL Score",
                 )
 
@@ -126,7 +127,7 @@ class Plotter:
                     "Ep Length",
                     self.colors["len"],
                     self.rolling_window_sizes,
-                    xlabel=plot_window_label,
+                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Episode Length",
                 )
                 render_single_plot(
@@ -135,7 +136,7 @@ class Plotter:
                     "Steps/Sec",
                     self.colors["sps"],
                     self.rolling_window_sizes,
-                    xlabel=plot_window_label,
+                    # xlabel=plot_window_label, # Removed
                     placeholder_text="SPS",
                 )
                 render_single_plot(
@@ -144,7 +145,7 @@ class Plotter:
                     "Learning Rate",
                     self.colors["lr"],
                     [],  # No rolling average for LR
-                    xlabel=plot_window_label,
+                    # xlabel=plot_window_label, # Removed
                     y_log_scale=True,
                     placeholder_text="Learning Rate",
                 )
@@ -156,7 +157,7 @@ class Plotter:
                     "Value Loss",
                     self.colors["value_loss"],
                     self.rolling_window_sizes,
-                    xlabel=plot_window_label,
+                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Value Loss",
                 )
                 render_single_plot(
@@ -165,7 +166,7 @@ class Plotter:
                     "Policy Loss",
                     self.colors["policy_loss"],
                     self.rolling_window_sizes,
-                    xlabel=plot_window_label,
+                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Policy Loss",
                 )
                 render_single_plot(
@@ -174,12 +175,16 @@ class Plotter:
                     "Entropy",
                     self.colors["entropy"],
                     self.rolling_window_sizes,
-                    xlabel=plot_window_label,
+                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Entropy",
                 )
 
-                for ax in axes_flat:
-                    ax.tick_params(axis="x", rotation=0)
+                # Remove x-axis labels/ticks for inner plots to reduce clutter
+                for i, ax in enumerate(axes_flat):
+                    if i < 6:  # Keep x-axis only for bottom row
+                        ax.set_xticklabels([])
+                        ax.set_xlabel("")
+                    ax.tick_params(axis="x", rotation=0)  # Keep rotation 0
 
                 buf = BytesIO()
                 fig.savefig(

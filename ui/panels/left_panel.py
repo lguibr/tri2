@@ -6,7 +6,7 @@ from config import (
     RNNConfig,
     TransformerConfig,
 )
-from config.general import  DEVICE
+from config.general import DEVICE
 
 from ui.plotter import Plotter
 from ui.input_handler import InputHandler  # Import InputHandler for type hint
@@ -15,6 +15,7 @@ from .left_panel_components import (
     InfoTextRenderer,
     TBStatusRenderer,
     PlotAreaRenderer,
+    # Removed NotificationRenderer import as best values are now in PlotAreaRenderer
 )
 
 TOOLTIP_TEXTS_BASE = {
@@ -63,10 +64,10 @@ class LeftPanelRenderer:
             "status": 28,
             "logdir": 16,
             "plot_placeholder": 20,
-            "notification_label": 16,
+            "notification_label": 16,  # Keep for plot area best values
             "plot_title_values": 8,
             "progress_bar": 14,
-            "notification": 18,
+            "notification": 18,  # Keep for plot area best values
         }
         for key, size in font_configs.items():
             try:
@@ -79,6 +80,7 @@ class LeftPanelRenderer:
 
     def render(
         self,
+        panel_width: int,  # Accept panel_width
         is_process_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
@@ -87,9 +89,10 @@ class LeftPanelRenderer:
         app_state: str,
         update_progress_details: Dict[str, Any],
     ):
-        """Renders the entire left panel."""
-        current_width, current_height = self.screen.get_size()
-        lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
+        """Renders the entire left panel within the given width."""
+        current_height = self.screen.get_height()
+        # Use the provided panel_width
+        lp_width = panel_width
         lp_rect = pygame.Rect(0, 0, lp_width, current_height)
 
         status_color_map = {
@@ -112,7 +115,7 @@ class LeftPanelRenderer:
         # Render Buttons, Status, and Update Progress
         next_y, rects_bs = self.button_status_renderer.render(
             y_start=current_y,
-            panel_width=lp_width,
+            panel_width=lp_width,  # Pass width
             app_state=app_state,
             is_process_running=is_process_running,
             status=status,
@@ -169,23 +172,27 @@ class LeftPanelRenderer:
 
         # Render Info Text Block
         next_y, rects_info = self.info_text_renderer.render(
-            current_y + 5, stats_summary, lp_width
+            current_y + 5, stats_summary, lp_width  # Pass width
         )
         self.stat_rects.update(rects_info)
         current_y = next_y
 
         # Render TensorBoard Status
         next_y, rects_tb = self.tb_status_renderer.render(
-            current_y + 10, tensorboard_log_dir, lp_width
+            current_y + 10, tensorboard_log_dir, lp_width  # Pass width
         )
         self.stat_rects.update(rects_tb)
         current_y = next_y
 
-        # Render Plot Area
+        # Render Plot Area (pass stats_summary for best values)
         self.plot_area_renderer.render(
-            current_y + 15, lp_width, current_height, plot_data, status
+            y_start=current_y + 5,  # Use current_y directly
+            panel_width=lp_width,
+            screen_height=current_height,
+            plot_data=plot_data,
+            # stats_summary=stats_summary, # Removed stats_summary
+            status=status,
         )
-
 
     def get_stat_rects(self) -> Dict[str, pygame.Rect]:
         """Returns the dictionary of rectangles for tooltip detection."""

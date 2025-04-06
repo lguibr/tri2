@@ -140,11 +140,24 @@ class UIRenderer:
         update_progress_details: Dict[str, Any],
         app_state: str,
     ):
-        """Renders the main training dashboard view."""
+        """Renders the main training dashboard view with adjusted panel widths."""
         self.screen.fill(VisConfig.BLACK)
+        current_width, current_height = self.screen.get_size()
 
-        # Render Left Panel
+        # Calculate panel widths: Game Area max 20%, Left Panel min 80%
+        ga_max_width = int(current_width * 0.20)
+        lp_width = current_width - ga_max_width
+        ga_width = current_width - lp_width  # Actual width for game area
+
+        # Ensure minimum width for left panel if needed
+        min_lp_width = 300  # Example minimum width
+        if lp_width < min_lp_width:
+            lp_width = min_lp_width
+            ga_width = max(0, current_width - lp_width)
+
+        # Render Left Panel (now takes calculated width)
         self.left_panel.render(
+            panel_width=lp_width,  # Pass calculated width
             is_process_running=is_process_running,
             status=status,
             stats_summary=stats_summary,
@@ -154,8 +167,14 @@ class UIRenderer:
             update_progress_details=update_progress_details,
         )
 
-        # Render Game Area
-        self.game_area.render(envs, num_envs, env_config)
+        # Render Game Area (now takes calculated width and offset)
+        self.game_area.render(
+            envs=envs,
+            num_envs=num_envs,
+            env_config=env_config,
+            panel_width=ga_width,  # Pass calculated width
+            panel_x_offset=lp_width,  # Pass left panel width as offset
+        )
 
     def _render_debug_mode(self, demo_env: GameState, env_config: EnvConfig):
         """Renders the UI specifically for Debug mode."""
