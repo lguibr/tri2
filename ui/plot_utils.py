@@ -1,16 +1,13 @@
-import pygame
 import numpy as np
-from typing import Dict, Optional, Deque, List, Union, Tuple
+from typing import  Optional, List, Union, Tuple
 import matplotlib
-import warnings
-from io import BytesIO
 import traceback
 import math
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from config import VisConfig, StatsConfig
+from config import VisConfig
 
 
 def normalize_color_for_matplotlib(
@@ -52,8 +49,8 @@ except Exception as e:
 
 
 TREND_SLOPE_TOLERANCE = 1e-5
-TREND_MIN_LINEWIDTH = 1.5
-TREND_MAX_LINEWIDTH = 3.5
+TREND_MIN_LINEWIDTH = 1
+TREND_MAX_LINEWIDTH = 2
 TREND_COLOR_STABLE = normalize_color_for_matplotlib(VisConfig.YELLOW)
 TREND_COLOR_INCREASING = normalize_color_for_matplotlib((0, 200, 0))
 TREND_COLOR_DECREASING = normalize_color_for_matplotlib((200, 0, 0))
@@ -66,10 +63,10 @@ TREND_LINE_WIDTH = 0.75
 TREND_LINE_ALPHA = 0.7
 TREND_LINE_ZORDER = 10
 
-MIN_ALPHA = 0.3
+MIN_ALPHA = 0.4
 MAX_ALPHA = 1.0
 MIN_DATA_AVG_LINEWIDTH = 1
-MAX_DATA_AVG_LINEWIDTH = 3
+MAX_DATA_AVG_LINEWIDTH = 2
 
 
 def calculate_trend_line(data: np.ndarray) -> Optional[Tuple[float, float]]:
