@@ -1,13 +1,10 @@
-# File: environment/game_state.py
 import time
 import numpy as np
-from typing import List, Optional, Tuple, Dict, Union, Deque
+from typing import List, Optional, Tuple, Dict
 import copy
 
-# --- MOVED IMPORT TO TOP LEVEL ---
-from config import EnvConfig, RewardConfig, PPOConfig
+from config import EnvConfig, RewardConfig, PPOConfig, VisConfig 
 
-# --- END MOVED IMPORT ---
 
 from .grid import Grid
 from .shape import Shape
@@ -23,12 +20,13 @@ class GameState:
         self.env_config = EnvConfig()
         self.rewards = RewardConfig()
         self.ppo_config = PPOConfig()  # Needed for gamma in PBRS
+        self.vis_config = VisConfig()  # Needed for colors
 
         self.grid = Grid(self.env_config)  # Pass env_config to Grid
         self.shapes: List[Optional[Shape]] = []
         self.score: float = 0.0  # Cumulative RL score for the episode
         self.game_score: int = 0  # In-game score metric
-        self.lines_cleared_this_episode: int = 0
+        self.triangles_cleared_this_episode: int = 0
         self.pieces_placed_this_episode: int = 0
 
         # Timers for visual effects
@@ -40,13 +38,18 @@ class GameState:
         self.game_over_flash_time: float = 0.0
         self.cleared_triangles_coords: List[Tuple[int, int]] = []
 
+        self.last_line_clear_info: Optional[Tuple[int, int, float]] = None
+
         self.game_over: bool = False
         self._last_action_valid: bool = True
 
-        # Demo mode state
-        self.demo_selected_shape_idx: int = 0
-        self.demo_target_row: int = self.env_config.ROWS // 2
-        self.demo_target_col: int = self.env_config.COLS // 2
+        self.demo_selected_shape_idx: int = 0  # Index of shape highlighted in preview
+        self.demo_dragged_shape_idx: Optional[int] = (
+            None  # Index of shape being dragged
+        )
+        self.demo_snapped_position: Optional[Tuple[int, int]] = (
+            None  # (row, col) if snapped
+        )
 
         # State for PBRS
         self._last_potential: float = 0.0
@@ -59,7 +62,7 @@ class GameState:
         self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
         self.score = 0.0
         self.game_score = 0
-        self.lines_cleared_this_episode = 0
+        self.triangles_cleared_this_episode = 0
         self.pieces_placed_this_episode = 0
 
         self.blink_time = 0.0
@@ -69,13 +72,15 @@ class GameState:
         self.game_over_flash_time = 0.0
         self.cleared_triangles_coords = []
 
+        self.last_line_clear_info = None
+
         self.game_over = False
         self._last_action_valid = True
         self.last_time = time.time()
 
         self.demo_selected_shape_idx = 0
-        self.demo_target_row = self.env_config.ROWS // 2
-        self.demo_target_col = self.env_config.COLS // 2
+        self.demo_dragged_shape_idx = None
+        self.demo_snapped_position = None
 
         self._last_potential = self._calculate_potential()
 
@@ -170,18 +175,15 @@ class GameState:
         self.game_over_flash_time = max(0, self.game_over_flash_time - delta_time)
         if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
             self.cleared_triangles_coords = []  # Clear coords after highlight fades
+        if self.line_clear_flash_time <= 0:
+            self.last_line_clear_info = None
 
     def _calculate_placement_reward(self, placed_shape: Shape) -> float:
         return self.rewards.REWARD_PLACE_PER_TRI * len(placed_shape.triangles)
 
-    def _calculate_line_clear_reward(self, lines_cleared: int) -> float:
-        if lines_cleared == 1:
-            return self.rewards.REWARD_CLEAR_1
-        if lines_cleared == 2:
-            return self.rewards.REWARD_CLEAR_2
-        if lines_cleared >= 3:
-            return self.rewards.REWARD_CLEAR_3PLUS
-        return 0.0
+    def _calculate_line_clear_reward(self, triangles_cleared: int) -> float:
+        """Calculates reward based on the number of triangles cleared."""
+        return triangles_cleared * self.rewards.REWARD_PER_CLEARED_TRIANGLE
 
     def _calculate_state_penalty(self) -> float:
         """Calculates penalties based on grid state (height, holes, bumpiness)."""
@@ -228,9 +230,10 @@ class GameState:
         self.game_score += len(shape_to_place.triangles)
         self.pieces_placed_this_episode += 1
 
-        lines_cleared, triangles_cleared, cleared_coords = self.grid.clear_filled_rows()
-        self.lines_cleared_this_episode += lines_cleared
-        step_reward += self._calculate_line_clear_reward(lines_cleared)
+        lines_cleared, triangles_cleared, cleared_coords = self.grid.clear_lines()
+        line_clear_reward = self._calculate_line_clear_reward(triangles_cleared)
+        step_reward += line_clear_reward
+        self.triangles_cleared_this_episode += triangles_cleared
 
         if triangles_cleared > 0:
             self.game_score += triangles_cleared * 2  # Bonus for cleared triangles
@@ -239,6 +242,11 @@ class GameState:
             self.line_clear_flash_time = 0.3
             self.line_clear_highlight_time = 0.5
             self.cleared_triangles_coords = cleared_coords
+            self.last_line_clear_info = (
+                lines_cleared,
+                triangles_cleared,
+                line_clear_reward,
+            )
 
         holes_after = self.grid.count_holes()
         new_holes_created = max(0, holes_after - holes_before)
@@ -319,17 +327,17 @@ class GameState:
         return (total_reward, self.game_over)
 
     def _calculate_potential_placement_outcomes(self) -> Dict[str, float]:
-        """Calculates potential outcomes (lines, holes, height, bumpiness) for valid moves."""
+        """Calculates potential outcomes (tris cleared, holes, height, bumpiness) for valid moves."""
         valid_actions = self.valid_actions()
         if not valid_actions:
             return {
-                "max_lines": 0.0,
+                "max_tris_cleared": 0.0,
                 "min_holes": 0.0,
                 "min_height": float(self.grid.get_max_height()),
                 "min_bump": float(self.grid.get_bumpiness()),
             }
 
-        max_lines_cleared = 0
+        max_triangles_cleared = 0
         min_new_holes = float("inf")
         min_resulting_height = float("inf")
         min_resulting_bumpiness = float("inf")
@@ -343,18 +351,17 @@ class GameState:
 
             temp_grid = copy.deepcopy(self.grid)
             temp_grid.place(shape_to_place, target_row, target_col)
-            lines_cleared, _, _ = temp_grid.clear_filled_rows()
+            _, triangles_cleared, _ = temp_grid.clear_lines()
             holes_after = temp_grid.count_holes()
             height_after = temp_grid.get_max_height()
             bumpiness_after = temp_grid.get_bumpiness()
             new_holes_created = max(0, holes_after - initial_holes)
 
-            max_lines_cleared = max(max_lines_cleared, lines_cleared)
+            max_triangles_cleared = max(max_triangles_cleared, triangles_cleared)
             min_new_holes = min(min_new_holes, new_holes_created)
             min_resulting_height = min(min_resulting_height, height_after)
             min_resulting_bumpiness = min(min_resulting_bumpiness, bumpiness_after)
 
-        # Handle cases where no valid moves were found despite valid_actions list
         if min_new_holes == float("inf"):
             min_new_holes = 0.0
         if min_resulting_height == float("inf"):
@@ -363,7 +370,7 @@ class GameState:
             min_resulting_bumpiness = float(self.grid.get_bumpiness())
 
         return {
-            "max_lines": float(max_lines_cleared),
+            "max_tris_cleared": float(max_triangles_cleared),
             "min_holes": float(min_new_holes),
             "min_height": float(min_resulting_height),
             "min_bump": float(min_resulting_bumpiness),
@@ -379,7 +386,7 @@ class GameState:
         shape_feature_matrix = np.zeros(
             (num_shapes_expected, shape_features_per), dtype=np.float32
         )
-        max_tris_norm = 6.0  # Normalize features based on expected max values
+        max_tris_norm = 6.0
         max_h_norm = float(self.grid.rows)
         max_w_norm = float(self.grid.cols)
         for i in range(num_shapes_expected):
@@ -438,8 +445,8 @@ class GameState:
             bumpiness / max(1, max_possible_bumpiness), 0.0, 1.0
         )
         explicit_features_vector[4] = np.clip(
-            self.lines_cleared_this_episode / 100.0, 0.0, 1.0
-        )  # Normalize episode stats
+            self.triangles_cleared_this_episode / 500.0, 0.0, 1.0
+        )
         explicit_features_vector[5] = np.clip(
             self.pieces_placed_this_episode / 500.0, 0.0, 1.0
         )
@@ -447,10 +454,13 @@ class GameState:
         # Optional: Potential Placement Outcomes
         if self.env_config.CALCULATE_POTENTIAL_OUTCOMES_IN_STATE:
             potential_outcomes = self._calculate_potential_placement_outcomes()
-            max_possible_lines = self.env_config.ROWS
+            max_possible_tris_cleared = self.env_config.ROWS * self.env_config.COLS
             max_possible_new_holes = max_possible_holes
             explicit_features_vector[6] = np.clip(
-                potential_outcomes["max_lines"] / max(1, max_possible_lines), 0.0, 1.0
+                potential_outcomes["max_tris_cleared"]
+                / max(1, max_possible_tris_cleared),
+                0.0,
+                1.0,
             )
             explicit_features_vector[7] = np.clip(
                 potential_outcomes["min_holes"] / max(1, max_possible_new_holes),
@@ -466,13 +476,11 @@ class GameState:
                 1.0,
             )
         else:
-            explicit_features_vector[6:10] = 0.0  # Zero out if not calculated
+            explicit_features_vector[6:10] = 0.0
 
         state_dict: StateType = {
             "grid": grid_state.astype(np.float32),
-            "shapes": shape_feature_matrix.reshape(-1).astype(
-                np.float32
-            ),  # Flatten shape features
+            "shapes": shape_feature_matrix.reshape(-1).astype(np.float32),
             "shape_availability": shape_availability_vector.astype(np.float32),
             "explicit_features": explicit_features_vector.astype(np.float32),
         }
@@ -487,79 +495,155 @@ class GameState:
         num_slots = self.env_config.NUM_SHAPE_SLOTS
         if num_slots <= 0:
             return
-        next_idx = (placed_slot_index + 1) % num_slots
-        for _ in range(num_slots):
-            if 0 <= next_idx < len(self.shapes) and self.shapes[next_idx] is not None:
-                self.demo_selected_shape_idx = next_idx
-                return
-            next_idx = (next_idx + 1) % num_slots
-        # If all became None (e.g., after refill), find the first available one
-        if all(s is None for s in self.shapes):
-            first_available = next(
-                (i for i, s in enumerate(self.shapes) if s is not None), 0
-            )
-            self.demo_selected_shape_idx = first_available
-
-    def cycle_shape(self, direction: int):
-        """Cycles the selected shape in demo mode among available shapes."""
-        if self.game_over or self.freeze_time > 0:
-            return
-        num_slots = self.env_config.NUM_SHAPE_SLOTS
-        if num_slots <= 0:
-            return
-        available_indices = [
-            i for i, s in enumerate(self.shapes) if s is not None and 0 <= i < num_slots
-        ]
+        available_indices = [i for i, s in enumerate(self.shapes) if s is not None]
         if not available_indices:
-            return
-        try:
-            current_list_idx = available_indices.index(self.demo_selected_shape_idx)
-        except ValueError:
-            current_list_idx = 0  # Default if current selection is somehow invalid
-        if self.demo_selected_shape_idx not in available_indices:
-            self.demo_selected_shape_idx = available_indices[0]
-        new_list_idx = (current_list_idx + direction) % len(available_indices)
-        self.demo_selected_shape_idx = available_indices[new_list_idx]
+            self.demo_selected_shape_idx = (
+                0  # Default if none available (should refill)
+            )
+        else:
+            self.demo_selected_shape_idx = available_indices[
+                0
+            ]  # Select the first available
 
-    def move_target(self, delta_row: int, delta_col: int):
-        """Moves the placement target cursor in demo mode."""
+
+    def select_shape_for_drag(self, shape_index: int):
+        """Selects a shape to be dragged by the mouse."""
         if self.game_over or self.freeze_time > 0:
             return
-        self.demo_target_row = np.clip(
-            self.demo_target_row + delta_row, 0, self.grid.rows - 1
-        )
-        self.demo_target_col = np.clip(
-            self.demo_target_col + delta_col, 0, self.grid.cols - 1
-        )
+        if 0 <= shape_index < len(self.shapes) and self.shapes[shape_index] is not None:
+            self.demo_dragged_shape_idx = shape_index
+            self.demo_selected_shape_idx = (
+                shape_index  # Also update selection highlight
+            )
+            self.demo_snapped_position = None  # Clear snap on new drag
+            print(f"[Demo] Dragging shape index: {shape_index}")
+        else:
+            self.demo_dragged_shape_idx = None
+            print(f"[Demo] Invalid shape index {shape_index} or shape is None.")
 
-    def get_action_for_current_selection(self) -> Optional[int]:
-        """Gets the action index corresponding to the current demo selection, if valid."""
+    def deselect_dragged_shape(self):
+        """Deselects the currently dragged shape."""
+        if self.demo_dragged_shape_idx is not None:
+            print(f"[Demo] Deselected shape index: {self.demo_dragged_shape_idx}")
+            self.demo_dragged_shape_idx = None
+            self.demo_snapped_position = None
+
+    def update_snapped_position(self, grid_pos: Optional[Tuple[int, int]]):
+        """Updates the snapped position if the dragged shape can be placed there."""
+        if self.demo_dragged_shape_idx is None:
+            self.demo_snapped_position = None
+            return
+
+        shape_to_check = self.shapes[self.demo_dragged_shape_idx]
+        if shape_to_check is None:
+            self.demo_snapped_position = None
+            return
+
+        if grid_pos is not None:
+            target_row, target_col = grid_pos
+            if self.grid.can_place(shape_to_check, target_row, target_col):
+                if self.demo_snapped_position != grid_pos:
+                    self.demo_snapped_position = grid_pos
+            else:
+                # If current grid pos is invalid, clear snap
+                self.demo_snapped_position = None
+        else:
+            # If mouse is not over grid, clear snap
+            self.demo_snapped_position = None
+
+    def place_dragged_shape(self) -> bool:
+        """Attempts to place the currently dragged and snapped shape."""
         if self.game_over or self.freeze_time > 0:
-            return None
-        shape_slot_index = self.demo_selected_shape_idx
-        current_shape = (
-            self.shapes[shape_slot_index]
-            if 0 <= shape_slot_index < len(self.shapes)
-            else None
-        )
-        if current_shape is None:
-            return None
-        target_row, target_col = self.demo_target_row, self.demo_target_col
-        if self.grid.can_place(current_shape, target_row, target_col):
+            return False
+        if self.demo_dragged_shape_idx is None or self.demo_snapped_position is None:
+            print("[Demo] Cannot place: No shape dragged or not snapped.")
+            return False
+
+        shape_slot_index = self.demo_dragged_shape_idx
+        target_row, target_col = self.demo_snapped_position
+        shape_to_place = self.shapes[shape_slot_index]
+
+        if shape_to_place is not None and self.grid.can_place(
+            shape_to_place, target_row, target_col
+        ):
+            print(
+                f"[Demo] Placing shape {shape_slot_index} at {target_row},{target_col}"
+            )
+            # Use the existing step logic via action index
             locations_per_shape = self.grid.rows * self.grid.cols
             action_index = shape_slot_index * locations_per_shape + (
                 target_row * self.grid.cols + target_col
             )
-            return action_index
-        else:
-            return None  # Invalid placement
+            _, _ = self.step(action_index)  # Ignore reward/done in demo
 
-    def get_current_selection_info(self) -> Tuple[Optional[Shape], int, int]:
-        """Returns the currently selected shape object and target coordinates for demo rendering."""
-        shape_slot_index = self.demo_selected_shape_idx
-        current_shape = (
-            self.shapes[shape_slot_index]
-            if 0 <= shape_slot_index < len(self.shapes)
-            else None
+            # Deselect after placement
+            self.demo_dragged_shape_idx = None
+            self.demo_snapped_position = None
+            return True
+        else:
+            print(f"[Demo] Invalid placement attempt at {target_row},{target_col}")
+            # Optionally provide feedback (e.g., flash red) - handled by renderer
+            return False
+
+    def get_dragged_shape_info(
+        self,
+    ) -> Tuple[Optional[Shape], Optional[Tuple[int, int]]]:
+        """Returns the currently dragged shape object and its snapped position."""
+        if self.demo_dragged_shape_idx is None:
+            return None, None
+        shape = self.shapes[self.demo_dragged_shape_idx]
+        return shape, self.demo_snapped_position
+
+    def toggle_triangle_debug(self, row: int, col: int):
+        """Toggles the state of a triangle for debugging and checks for lines."""
+        if not self.grid.valid(row, col):
+            print(f"[Debug] Invalid coords: ({row}, {col})")
+            return
+
+        triangle = self.grid.triangles[row][col]
+        if triangle.is_death:
+            print(f"[Debug] Cannot toggle death cell: ({row}, {col})")
+            return
+
+        # Toggle state
+        triangle.is_occupied = not triangle.is_occupied
+        if triangle.is_occupied:
+            # Assign a default debug color if needed
+            triangle.color = self.vis_config.YELLOW
+        else:
+            triangle.color = None
+        print(
+            f"[Debug] Toggled ({row}, {col}) to {'Occupied' if triangle.is_occupied else 'Empty'}"
         )
-        return current_shape, self.demo_target_row, self.demo_target_col
+
+        # Check for lines immediately
+        lines_cleared, triangles_cleared, cleared_coords = self.grid.clear_lines()
+        line_clear_reward = self._calculate_line_clear_reward(triangles_cleared)
+
+        if triangles_cleared > 0:
+            print(
+                f"[Debug] Cleared {triangles_cleared} triangles in {lines_cleared} lines."
+            )
+            self.game_score += triangles_cleared * 2  # Update score for visual feedback
+            self.triangles_cleared_this_episode += triangles_cleared
+            # Trigger visual effects
+            self.blink_time = 0.5
+            self.freeze_time = 0.5
+            self.line_clear_flash_time = 0.3
+            self.line_clear_highlight_time = 0.5
+            self.cleared_triangles_coords = cleared_coords
+            self.last_line_clear_info = (
+                lines_cleared,
+                triangles_cleared,
+                line_clear_reward,
+            )
+        else:
+            # Ensure highlight clears if no lines were made
+            if self.line_clear_highlight_time <= 0:
+                self.cleared_triangles_coords = []
+            self.last_line_clear_info = None
+
+        # Reset game over state if it was set, as debug toggling might resolve it
+        self.game_over = False
+        self.game_over_flash_time = 0.0
+

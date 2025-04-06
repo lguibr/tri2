@@ -1,4 +1,3 @@
-# File: agent/ppo_agent.py
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,15 +13,11 @@ from config import (
     PPOConfig,
     RNNConfig,
     TransformerConfig,
-    ObsNormConfig,  # Keep import for context, though not used directly here
-    # DEVICE, # Removed direct import
     TensorBoardConfig,
-    TOTAL_TRAINING_STEPS,
 )
-from environment.game_state import StateType  # StateType uses raw numpy arrays
+from environment.game_state import StateType 
 from utils.types import ActionType, AgentStateDict
 from agent.model_factory import create_network
-from agent.networks.agent_network import ActorCriticNetwork
 
 
 class PPOAgent:
@@ -38,17 +33,15 @@ class PPOAgent:
         rnn_config: RNNConfig,
         env_config: EnvConfig,
         transformer_config: TransformerConfig,
-        device: torch.device,  # --- MODIFIED: Added device ---
-        # ObsNormConfig is used by collector, not directly by agent logic here
+        device: torch.device, 
     ):
-        self.device = device  # --- MODIFIED: Use passed device ---
+        self.device = device 
         self.env_config = env_config
         self.ppo_config = ppo_config
         self.rnn_config = rnn_config
         self.transformer_config = transformer_config
-        self.tb_config = TensorBoardConfig()  # For potential future use
+        self.tb_config = TensorBoardConfig()  
         self.action_dim = env_config.ACTION_DIM
-        self.update_progress: float = 0.0  # Tracks progress within agent.update()
 
         self.network = create_network(
             env_config=self.env_config,
@@ -56,7 +49,7 @@ class PPOAgent:
             model_config=model_config,
             rnn_config=self.rnn_config,
             transformer_config=self.transformer_config,
-            device=self.device,  # --- MODIFIED: Pass device ---
+            device=self.device, 
         ).to(self.device)
 
         self.optimizer = optim.AdamW(
@@ -82,7 +75,6 @@ class PPOAgent:
     @torch.no_grad()
     def select_action(
         self,
-        # State received here is assumed to be ALREADY NORMALIZED if ObsNorm enabled
         state: StateType,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         deterministic: bool = False,
@@ -91,7 +83,6 @@ class PPOAgent:
         """Selects an action based on the (potentially normalized) state."""
         self.network.eval()
 
-        # Convert numpy arrays from state dict to tensors
         grid_t = torch.from_numpy(state["grid"]).float().unsqueeze(0).to(self.device)
         shapes_t = (
             torch.from_numpy(state["shapes"]).float().unsqueeze(0).to(self.device)
@@ -123,7 +114,6 @@ class PPOAgent:
                     hidden_state[1][:, 0:1, :].contiguous(),
                 )
 
-        # Pass padding mask (None for single step)
         policy_logits, value, next_hidden_state = self.network(
             grid_t,
             shapes_t,
@@ -285,34 +275,7 @@ class PPOAgent:
         """Evaluates actions for loss calculation, handling sequences for RNN/Transformer."""
         self.network.train()
 
-        # --- MODIFIED: Removed incorrect reshaping based on full rollout dims ---
-        # The input tensors (grid_tensor, etc.) are already the minibatch tensors.
-        # The network's forward pass handles sequence dimensions internally if present.
-        # is_sequence = self.rnn_config.USE_RNN or self.transformer_config.USE_TRANSFORMER
-        # batch_size = dones_tensor.shape[0] if dones_tensor is not None else -1
-        # seq_len = (
-        #     dones_tensor.shape[1] if dones_tensor is not None and batch_size > 0 else -1
-        # )
-        # if is_sequence:
-        #     if batch_size <= 0 or seq_len <= 0:
-        #         raise ValueError(
-        #             "Cannot determine batch_size/seq_len for sequence evaluation."
-        #         )
-        #     grid_tensor = grid_tensor.view(
-        #         batch_size, seq_len, *self.env_config.GRID_STATE_SHAPE
-        #     ) # REMOVED
-        #     # ... other reshapes removed ...
-        #     actions = actions.view(batch_size, seq_len) # REMOVED
-        # --- END MODIFIED ---
-
-        # --- MODIFIED: Removed padding mask calculation based on full rollout dones ---
-        # Padding mask should ideally be generated during minibatch creation if needed.
-        # For standard PPO, it's typically None here.
         padding_mask = None
-        # if self.transformer_config.USE_TRANSFORMER and is_sequence:
-        #     # ... padding mask calculation removed ...
-        # --- END MODIFIED ---
-
         # Network Forward Pass - receives potentially flat minibatch tensors
         # The network's forward handles internal reshaping if needed based on input dims
         policy_logits, value, _ = self.network(
@@ -324,13 +287,6 @@ class PPOAgent:
             padding_mask=padding_mask,  # Pass potentially None mask
         )
 
-        # --- MODIFIED: Removed output reshaping ---
-        # Outputs should already match the input structure (likely flat minibatch)
-        # if is_sequence:
-        #     policy_logits = policy_logits.view(batch_size * seq_len, -1) # REMOVED
-        #     value = value.view(batch_size * seq_len, -1) # REMOVED
-        #     actions = actions.view(batch_size * seq_len) # REMOVED
-        # --- END MODIFIED ---
 
         policy_logits = torch.nan_to_num(policy_logits, nan=-1e9)
         distribution = Categorical(logits=policy_logits)
@@ -341,136 +297,76 @@ class PPOAgent:
 
         return action_log_probs, value, entropy
 
-    def update(self, rollout_data: Dict[str, Any]) -> Dict[str, float]:
-        """Performs PPO update using (potentially normalized) data from storage."""
+    def update_minibatch(
+        self, minibatch_data: Dict[str, torch.Tensor]
+    ) -> Dict[str, float]:
+        """
+        Performs a PPO update step on a SINGLE minibatch.
+        Assumes input data is already on the correct device.
+        """
         self.network.train()
-        self.update_progress = 0.0
 
-        # Get potentially normalized observations from storage
-        obs_grid_flat = rollout_data["obs_grid"]
-        obs_shapes_flat = rollout_data["obs_shapes"]
-        obs_availability_flat = rollout_data["obs_availability"]
-        obs_explicit_features_flat = rollout_data["obs_explicit_features"]
-        # Standard PPO data
-        actions_flat = rollout_data["actions"]
-        old_log_probs_flat = rollout_data["log_probs"]
-        returns_flat = rollout_data["returns"]
-        advantages_flat = rollout_data["advantages"]
-        # RNN/Transformer specific
-        initial_lstm_state = rollout_data.get("initial_lstm_state")  # Might be None
-        dones_batch_seq = rollout_data.get("dones")  # Shape (B, T)
-
-        # Normalize advantages
-        advantages_flat = (advantages_flat - advantages_flat.mean()) / (
-            advantages_flat.std() + 1e-8
+        mb_obs_grid = minibatch_data["obs_grid"]
+        mb_obs_shapes = minibatch_data["obs_shapes"]
+        mb_obs_availability = minibatch_data["obs_availability"]
+        mb_obs_explicit_features = minibatch_data["obs_explicit_features"]
+        mb_actions = minibatch_data["actions"]
+        mb_old_log_probs = minibatch_data["log_probs"]
+        mb_returns = minibatch_data["returns"]
+        mb_advantages = minibatch_data["advantages"]
+        new_log_probs, predicted_values, entropy = self.evaluate_actions(
+            mb_obs_grid,
+            mb_obs_shapes,
+            mb_obs_availability,
+            mb_obs_explicit_features,
+            mb_actions,
+            None,  # Pass None for standard PPO minibatch hidden state
+            None,  # Pass None for standard PPO minibatch dones
         )
 
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_entropy = 0.0
-        num_updates = 0
-        grad_norm_val = None  # Store last grad norm
+        # PPO Loss Calculation
+        logratio = new_log_probs - mb_old_log_probs
+        ratio = torch.exp(logratio)
+        surr1 = ratio * mb_advantages
+        surr2 = (
+            torch.clamp(
+                ratio,
+                1.0 - self.ppo_config.CLIP_PARAM,
+                1.0 + self.ppo_config.CLIP_PARAM,
+            )
+            * mb_advantages
+        )
+        policy_loss = -torch.min(surr1, surr2).mean()
+        value_loss = F.mse_loss(predicted_values, mb_returns)
+        entropy_loss = -entropy.mean()
 
-        num_samples = actions_flat.shape[0]
-        batch_size = self.ppo_config.MINIBATCH_SIZE
-        indices = np.arange(num_samples)
-        total_minibatches = (num_samples + batch_size - 1) // batch_size
-        total_update_steps = self.ppo_config.PPO_EPOCHS * total_minibatches
+        loss = (
+            policy_loss
+            + self.ppo_config.VALUE_LOSS_COEF * value_loss
+            + self.ppo_config.ENTROPY_COEF * entropy_loss
+        )
 
-        for epoch in range(self.ppo_config.PPO_EPOCHS):
-            np.random.shuffle(indices)
-            for i, start_idx in enumerate(range(0, num_samples, batch_size)):
-                end_idx = start_idx + batch_size
-                minibatch_indices = indices[start_idx:end_idx]
+        # Optimization Step
+        self.optimizer.zero_grad()
+        loss.backward()
+        grad_norm_val = None
+        if self.ppo_config.MAX_GRAD_NORM > 0:
+            grad_norm = nn.utils.clip_grad_norm_(
+                self.network.parameters(), self.ppo_config.MAX_GRAD_NORM
+            )
+            grad_norm_val = grad_norm.item()  # Store value
+        self.optimizer.step()
 
-                # Get minibatch data (already flat)
-                mb_obs_grid = obs_grid_flat[minibatch_indices]
-                mb_obs_shapes = obs_shapes_flat[minibatch_indices]
-                mb_obs_availability = obs_availability_flat[minibatch_indices]
-                mb_obs_explicit_features = obs_explicit_features_flat[minibatch_indices]
-                mb_actions = actions_flat[minibatch_indices]
-                mb_old_log_probs = old_log_probs_flat[minibatch_indices]
-                mb_returns = returns_flat[minibatch_indices]
-                mb_advantages = advantages_flat[minibatch_indices]
-
-                # --- MODIFIED: Pass appropriate state/dones to evaluate_actions ---
-                # For standard PPO minibatching, initial_lstm_state and dones are tricky.
-                # If RNN state needs to be handled *during* update, it usually involves
-                # iterating through sequences within the minibatch or carrying state
-                # between minibatches. Passing the full rollout's initial state and dones
-                # here is likely incorrect if the minibatch is randomly sampled & flat.
-                # For now, we pass None for state/dones, assuming evaluate_actions
-                # and the network handle flat inputs correctly.
-                # If sequence-aware updates are needed, storage/minibatching needs rework.
-                mb_initial_hidden = None  # Pass None for standard PPO minibatch
-                mb_dones = None  # Pass None for standard PPO minibatch
-                # --- END MODIFIED ---
-
-                new_log_probs, predicted_values, entropy = self.evaluate_actions(
-                    mb_obs_grid,
-                    mb_obs_shapes,
-                    mb_obs_availability,
-                    mb_obs_explicit_features,
-                    mb_actions,
-                    mb_initial_hidden,  # Pass potentially None state
-                    mb_dones,  # Pass potentially None dones
-                )
-
-                # PPO Loss Calculation
-                logratio = new_log_probs - mb_old_log_probs
-                ratio = torch.exp(logratio)
-                surr1 = ratio * mb_advantages
-                surr2 = (
-                    torch.clamp(
-                        ratio,
-                        1.0 - self.ppo_config.CLIP_PARAM,
-                        1.0 + self.ppo_config.CLIP_PARAM,
-                    )
-                    * mb_advantages
-                )
-                policy_loss = -torch.min(surr1, surr2).mean()
-                value_loss = F.mse_loss(predicted_values, mb_returns)
-                entropy_loss = -entropy.mean()
-
-                loss = (
-                    policy_loss
-                    + self.ppo_config.VALUE_LOSS_COEF * value_loss
-                    + self.ppo_config.ENTROPY_COEF * entropy_loss
-                )
-
-                # Optimization Step
-                self.optimizer.zero_grad()
-                loss.backward()
-                if self.ppo_config.MAX_GRAD_NORM > 0:
-                    grad_norm = nn.utils.clip_grad_norm_(
-                        self.network.parameters(), self.ppo_config.MAX_GRAD_NORM
-                    )
-                    grad_norm_val = grad_norm.item()  # Store value
-                self.optimizer.step()
-
-                # Accumulate stats
-                total_policy_loss += policy_loss.item()
-                total_value_loss += value_loss.item()
-                total_entropy += -entropy_loss.item()  # Store positive entropy
-                num_updates += 1
-
-                # Update progress tracking
-                current_update_step = epoch * total_minibatches + (i + 1)
-                self.update_progress = current_update_step / total_update_steps
-
-        avg_policy_loss = total_policy_loss / max(1, num_updates)
-        avg_value_loss = total_value_loss / max(1, num_updates)
-        avg_entropy = total_entropy / max(1, num_updates)
-        self.update_progress = 1.0  # Mark as complete
-
+        # Return metrics for this minibatch
         metrics = {
-            "policy_loss": avg_policy_loss,
-            "value_loss": avg_value_loss,
-            "entropy": avg_entropy,
+            "policy_loss": policy_loss.item(),
+            "value_loss": value_loss.item(),
+            "entropy": -entropy_loss.item(),  # Store positive entropy
         }
         if grad_norm_val is not None:
             metrics["grad_norm"] = grad_norm_val
         return metrics
+
 
     def get_state_dict(self) -> AgentStateDict:
         """Returns the agent's state dictionary for checkpointing."""
@@ -538,6 +434,3 @@ class PPOAgent:
             return None
         return self.network.get_initial_hidden_state(num_envs)
 
-    def get_update_progress(self) -> float:
-        """Returns the progress of the current agent update cycle (0.0 to 1.0)."""
-        return self.update_progress

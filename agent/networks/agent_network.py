@@ -1,18 +1,13 @@
-# File: agent/networks/agent_network.py
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
-import math
-from typing import Tuple, List, Type, Optional
+from typing import Tuple, List, Optional
 
 from config import (
     ModelConfig,
     EnvConfig,
-    PPOConfig,
     RNNConfig,
     TransformerConfig,
-    # DEVICE, # Removed direct import
 )
 
 
@@ -31,7 +26,7 @@ class ActorCriticNetwork(nn.Module):
         model_config: ModelConfig.Network,
         rnn_config: RNNConfig,
         transformer_config: TransformerConfig,
-        device: torch.device,  # --- MODIFIED: Added device ---
+        device: torch.device, 
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -39,7 +34,7 @@ class ActorCriticNetwork(nn.Module):
         self.config = model_config
         self.rnn_config = rnn_config
         self.transformer_config = transformer_config
-        self.device = device  # --- MODIFIED: Use passed device ---
+        self.device = device 
 
         print(f"[ActorCriticNetwork] Target device set to: {self.device}")
         print(f"[ActorCriticNetwork] Using RNN: {self.rnn_config.USE_RNN}")
@@ -240,9 +235,7 @@ class ActorCriticNetwork(nn.Module):
         Forward pass through the network. Handles single step and sequence inputs.
         """
         # --- Ensure inputs are on the correct device ---
-        # --- MODIFIED: Use self.device instead of inferring from parameters ---
         model_device = self.device
-        # --- END MODIFIED ---
         grid_tensor = grid_tensor.to(model_device)
         shape_feature_tensor = shape_feature_tensor.to(model_device)
         shape_availability_tensor = shape_availability_tensor.to(model_device)
@@ -347,9 +340,7 @@ class ActorCriticNetwork(nn.Module):
         """Returns the initial hidden state for the LSTM layer."""
         if not self.rnn_config.USE_RNN or self.lstm_layer is None:
             return None
-        # --- MODIFIED: Use self.device ---
         model_device = self.device
-        # --- END MODIFIED ---
         num_layers = self.rnn_config.LSTM_NUM_LAYERS
         hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
         # Shape: (num_layers, batch_size, hidden_size)

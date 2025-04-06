@@ -1,5 +1,4 @@
-# File: config/constants.py
-# NEW FILE
+
 """
 Defines constants shared across different modules, primarily visual elements,
 to avoid circular imports and keep configuration clean.

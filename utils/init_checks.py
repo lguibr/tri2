@@ -1,17 +1,13 @@
-# File: utils/init_checks.py
 import sys
 import traceback
 import numpy as np
 
-# --- MOVED IMPORT INSIDE FUNCTION ---
-# from config import EnvConfig
-# --- END MOVED IMPORT ---
+
 from environment.game_state import GameState
 
 
 def run_pre_checks() -> bool:
     """Performs basic checks on GameState and configuration compatibility."""
-    # --- IMPORT MOVED HERE ---
     try:
         from config import EnvConfig
     except ImportError as e:
@@ -20,7 +16,6 @@ def run_pre_checks() -> bool:
             "This might indicate an issue with the config package structure or an ongoing import cycle."
         )
         sys.exit(1)
-    # --- END IMPORT MOVED HERE ---
 
     print("--- Pre-Run Checks ---")
     try:
@@ -121,11 +116,12 @@ def run_pre_checks() -> bool:
         if not hasattr(gs_test, "game_score"):
             raise AttributeError("GameState missing 'game_score' attribute!")
         print("GameState 'game_score' attribute check PASSED.")
-        if not hasattr(gs_test, "lines_cleared_this_episode"):
+
+        if not hasattr(gs_test, "triangles_cleared_this_episode"):
             raise AttributeError(
-                "GameState missing 'lines_cleared_this_episode' attribute!"
+                "GameState missing 'triangles_cleared_this_episode' attribute!"
             )
-        print("GameState 'lines_cleared_this_episode' attribute check PASSED.")
+        print("GameState 'triangles_cleared_this_episode' attribute check PASSED.")
 
         del gs_test
         print("--- Pre-Run Checks Complete ---")

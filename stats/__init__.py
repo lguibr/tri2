@@ -1,4 +1,3 @@
-# File: stats/__init__.py
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
 from .simple_stats_recorder import SimpleStatsRecorder

@@ -1,5 +1,3 @@
-# File: ui/tooltips.py
-# (No significant changes needed, this file was already focused)
 import pygame
 from typing import Tuple, Dict, Optional
 from config import VisConfig

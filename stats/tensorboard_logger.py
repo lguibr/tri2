@@ -1,4 +1,3 @@
-# File: stats/tensorboard_logger.py
 import time
 import traceback
 from collections import deque
@@ -19,7 +18,6 @@ from config import (
     RNNConfig,
     VisConfig,
     StatsConfig,
-    # DEVICE, # Removed direct import
 )
 
 # Import ActorCriticNetwork for type hinting graph model
@@ -65,9 +63,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         self.vis_config = VisConfig()  # Needed for image rendering utils potentially
         self.summary_avg_window = self.aggregator.summary_avg_window
 
-        # --- MODIFIED: Add counter for TB logging frequency ---
         self.rollouts_since_last_tb_log = 0
-        # --- END MODIFIED ---
 
         print(f"[TensorBoardStatsRecorder] Initialized. Logging to: {self.log_dir}")
         print(f"  Histogram Log Interval: {self.histogram_log_interval} rollouts")
@@ -113,7 +109,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
-        lines_cleared: Optional[int] = None,
+        triangles_cleared: Optional[int] = None,  # Use triangles_cleared
     ):
         """Records episode stats to TensorBoard and delegates to console recorder."""
         # Call aggregator first to update internal state and get update_info
@@ -123,7 +119,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             episode_num,
             global_step,
             game_score,
-            lines_cleared,
+            triangles_cleared,  # Pass renamed parameter
         )
         g_step = (
             global_step
@@ -136,8 +132,10 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         self.writer.add_scalar("Episode/Length", episode_length, g_step)
         if game_score is not None:
             self.writer.add_scalar("Episode/Game Score", game_score, g_step)
-        if lines_cleared is not None:
-            self.writer.add_scalar("Episode/Lines Cleared", lines_cleared, g_step)
+        if triangles_cleared is not None:
+            self.writer.add_scalar(
+                "Episode/Triangles Cleared", triangles_cleared, g_step
+            )
         self.writer.add_scalar("Progress/Total Episodes", episode_num, g_step)
 
         # Log best scores if they were updated
@@ -157,7 +155,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             episode_num,
             global_step,
             game_score,
-            lines_cleared,
+            triangles_cleared,  # Pass renamed parameter
         )
 
     def record_step(self, step_data: Dict[str, Any]):
@@ -200,12 +198,9 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         # Delegate to console recorder AFTER aggregator and TB logging
         self.console_recorder.record_step(step_data)
 
-        # --- MODIFIED: Use internal counter for TB logging frequency ---
-        # Check if histograms/images should be logged (based on rollouts/updates)
-        if (
-            "policy_loss" in step_data
-        ):  # Use loss presence as proxy for update completion
-            self.rollouts_since_last_tb_log += 1  # Increment internal counter
+        # Use internal counter for TB logging frequency
+        if "policy_loss" in step_data:
+            self.rollouts_since_last_tb_log += 1
 
             # Check histogram logging
             if (
@@ -213,11 +208,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 and self.rollouts_since_last_tb_log >= self.histogram_log_interval
             ):
                 if g_step > self.last_histogram_log_step:
-                    # Add histogram logging calls here if needed, e.g., for weights/grads
-                    # self.record_histogram("Agent/Actor Weights", agent.actor.parameters(), g_step)
-                    self.last_histogram_log_step = g_step  # Update last log step
-                    # Reset counter only if histograms were logged
-                    # self.rollouts_since_last_tb_log = 0 # Resetting here might skip image logging
+                    self.last_histogram_log_step = g_step
 
             # Check image logging
             if (
@@ -225,14 +216,8 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 and self.rollouts_since_last_tb_log >= self.image_log_interval
             ):
                 if g_step > self.last_image_log_step:
-                    # Add image logging calls here if needed
-                    # self.record_image("Environment/Sample", get_env_image(...), g_step)
-                    self.last_image_log_step = g_step  # Update last log step
-                    # Reset counter only if images were logged
-                    # self.rollouts_since_last_tb_log = 0 # Resetting here might skip histogram logging
+                    self.last_image_log_step = g_step
 
-            # Reset counter if either histogram or image interval was met and logging occurred
-            # This ensures the counter resets correctly even if intervals differ.
             if (
                 self.histogram_log_interval > 0
                 and self.rollouts_since_last_tb_log >= self.histogram_log_interval
@@ -240,13 +225,11 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 self.image_log_interval > 0
                 and self.rollouts_since_last_tb_log >= self.image_log_interval
             ):
-                # Check if actual logging happened for either (based on step)
                 if (
                     g_step == self.last_histogram_log_step
                     or g_step == self.last_image_log_step
                 ):
-                    self.rollouts_since_last_tb_log = 0  # Reset counter
-        # --- END MODIFIED ---
+                    self.rollouts_since_last_tb_log = 0
 
     def record_histogram(
         self,
@@ -255,8 +238,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         global_step: int,
     ):
         """Records a histogram to TensorBoard."""
-        # This method is now primarily called internally based on interval,
-        # but can still be called externally if needed.
         try:
             self.writer.add_histogram(tag, values, global_step)
         except Exception as e:
@@ -266,29 +247,24 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
     ):
         """Records an image to TensorBoard, ensuring correct data format."""
-        # This method is now primarily called internally based on interval,
-        # but can still be called externally if needed.
         try:
-            # Ensure image has channel-first format (C, H, W) or (N, C, H, W)
             if isinstance(image, np.ndarray):
                 if image.ndim == 3 and image.shape[-1] in [1, 3, 4]:
-                    image_tensor = torch.from_numpy(image).permute(
-                        2, 0, 1
-                    )  # HWC -> CHW
+                    image_tensor = torch.from_numpy(image).permute(2, 0, 1)
                 elif image.ndim == 2:
-                    image_tensor = torch.from_numpy(image).unsqueeze(0)  # HW -> CHW
+                    image_tensor = torch.from_numpy(image).unsqueeze(0)
                 else:
-                    image_tensor = torch.from_numpy(image)  # Assume CHW or NCHW
+                    image_tensor = torch.from_numpy(image)
             elif isinstance(image, torch.Tensor):
-                if image.ndim == 3 and image.shape[0] not in [1, 3, 4]:  # HWC? -> CHW
+                if image.ndim == 3 and image.shape[0] not in [1, 3, 4]:
                     if image.shape[-1] in [1, 3, 4]:
                         image_tensor = image.permute(2, 0, 1)
                     else:
-                        image_tensor = image  # Assume CHW
+                        image_tensor = image
                 elif image.ndim == 2:
-                    image_tensor = image.unsqueeze(0)  # HW -> CHW
+                    image_tensor = image.unsqueeze(0)
                 else:
-                    image_tensor = image  # Assume CHW or NCHW
+                    image_tensor = image
             else:
                 print(f"Warning: Unsupported image type for tag '{tag}': {type(image)}")
                 return
@@ -300,7 +276,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
     def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
         """Records final hyperparameters and metrics."""
         try:
-            # Filter hparams and metrics to loggable types
             filtered_hparams = {
                 k: v
                 for k, v in hparam_dict.items()
@@ -323,19 +298,15 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print("Warning: Cannot record graph without dummy input.")
             return
         try:
-            # Ensure model and input are on CPU for graph tracing
             original_device = next(model.parameters()).device
             model.cpu()
             dummy_input_cpu: Any
             if isinstance(input_to_model, tuple):
-                # Ensure all tensors in the tuple are moved to CPU
                 dummy_input_cpu_list = []
                 for item in input_to_model:
                     if isinstance(item, torch.Tensor):
                         dummy_input_cpu_list.append(item.cpu())
-                    elif isinstance(
-                        item, tuple
-                    ):  # Handle nested tuples (like LSTM state)
+                    elif isinstance(item, tuple):
                         dummy_input_cpu_list.append(
                             tuple(
                                 t.cpu() if isinstance(t, torch.Tensor) else t
@@ -348,15 +319,14 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             elif isinstance(input_to_model, torch.Tensor):
                 dummy_input_cpu = input_to_model.cpu()
             else:
-                dummy_input_cpu = input_to_model  # Assume non-tensor input is fine
+                dummy_input_cpu = input_to_model
 
             self.writer.add_graph(model, dummy_input_cpu, verbose=False)
             print("[TensorBoardStatsRecorder] Model graph logged.")
-            model.to(original_device)  # Move model back
+            model.to(original_device)
         except Exception as e:
             print(f"Error logging model graph: {e}. Graph logging can be tricky.")
             traceback.print_exc()
-            # Attempt to move model back even if logging failed
             try:
                 model.to(original_device)
             except:
@@ -378,7 +348,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         """Closes the TensorBoard writer and logs final hparams."""
         print("[TensorBoardStatsRecorder] Closing writer...")
         try:
-            # Log final metrics using the latest summary
             final_summary = self.get_summary(self.aggregator.current_global_step)
             final_metrics = {
                 "hparam/final_best_rl_score": final_summary.get(
@@ -403,5 +372,4 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         except Exception as e:
             print(f"Error during TensorBoard writer close: {e}")
             traceback.print_exc()
-        # Close console recorder as well
         self.console_recorder.close()

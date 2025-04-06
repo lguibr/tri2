@@ -1,9 +1,7 @@
-# File: training/rollout_storage.py
 import torch
-from typing import Optional, Tuple, Dict, List, Any
-import numpy as np
+from typing import Optional, Tuple, Dict, Any
 
-from config import EnvConfig, PPOConfig, RNNConfig, DEVICE
+from config import EnvConfig, RNNConfig
 
 
 class RolloutStorage:

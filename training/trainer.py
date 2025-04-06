@@ -1,11 +1,13 @@
-# File: training/trainer.py
 import time
 import torch
 import numpy as np
 import traceback
 import random
-import math  # Added for cosine annealing
-from typing import List, Optional, Dict, Any, Union
+import math
+from typing import List, Optional, Dict, Any, Union, Tuple, Deque
+import gc
+
+from collections import defaultdict
 
 from config import (
     EnvConfig,
@@ -14,18 +16,15 @@ from config import (
     TrainConfig,
     ModelConfig,
     ObsNormConfig,
-    TransformerConfig,  # Added configs
-    # DEVICE, # Removed direct import
+    TransformerConfig,
     TensorBoardConfig,
     VisConfig,
     RewardConfig,
     TOTAL_TRAINING_STEPS,
 )
-from environment.game_state import GameState, StateType
+from environment.game_state import GameState
 from agent.ppo_agent import PPOAgent
 from stats.stats_recorder import StatsRecorderBase
-from utils.helpers import ensure_numpy
-from .rollout_storage import RolloutStorage
 from .rollout_collector import RolloutCollector
 from .checkpoint_manager import CheckpointManager
 from .training_utils import get_env_image_as_numpy
@@ -47,29 +46,26 @@ class Trainer:
         obs_norm_config: ObsNormConfig,
         transformer_config: TransformerConfig,
         model_save_path: str,
-        device: torch.device,  # --- MODIFIED: Moved device parameter ---
-        load_checkpoint_path: Optional[
-            str
-        ] = None,  # Default parameter now comes after non-default
+        device: torch.device,
+        load_checkpoint_path: Optional[str] = None,
     ):
         print("[Trainer-PPO] Initializing...")
         self.envs = envs
         self.agent = agent
         self.stats_recorder = stats_recorder
         self.num_envs = env_config.NUM_ENVS
-        self.device = device  # --- MODIFIED: Use passed device ---
+        self.device = device
         self.env_config = env_config
         self.ppo_config = ppo_config
         self.rnn_config = rnn_config
         self.train_config = train_config
         self.model_config = model_config
-        self.obs_norm_config = obs_norm_config  # Store config
-        self.transformer_config = transformer_config  # Store config
+        self.obs_norm_config = obs_norm_config
+        self.transformer_config = transformer_config
         self.reward_config = RewardConfig()
         self.tb_config = TensorBoardConfig()
         self.vis_config = VisConfig()
 
-        # Initialize Rollout Collector (which initializes RMS if enabled)
         self.rollout_collector = RolloutCollector(
             envs=self.envs,
             agent=self.agent,
@@ -79,44 +75,88 @@ class Trainer:
             rnn_config=self.rnn_config,
             reward_config=self.reward_config,
             tb_config=self.tb_config,
-            obs_norm_config=self.obs_norm_config,  # Pass config
-            device=self.device,  # --- MODIFIED: Pass device ---
+            obs_norm_config=self.obs_norm_config,
+            device=self.device,
         )
         self.rollout_storage = self.rollout_collector.rollout_storage
 
-        # Initialize Checkpoint Manager (AFTER collector to get RMS instances)
         self.checkpoint_manager = CheckpointManager(
             agent=self.agent,
             model_save_path=model_save_path,
             load_checkpoint_path=load_checkpoint_path,
             device=self.device,
-            obs_rms_dict=self.rollout_collector.get_obs_rms_dict(),  # Pass RMS dict
+            obs_rms_dict=self.rollout_collector.get_obs_rms_dict(),
         )
         self.global_step, initial_episode_count = (
             self.checkpoint_manager.get_initial_state()
         )
-        self.rollout_collector.episode_count = (
-            initial_episode_count  # Sync episode count
-        )
+        self.rollout_collector.episode_count = initial_episode_count
 
+        self.current_update_epoch = 0
+        self.current_minibatch_index = 0
+        self.update_indices: Optional[np.ndarray] = None
+        self.update_metrics_accumulator: Dict[str, float] = defaultdict(float)
+        self.num_minibatches_per_epoch = 0
+        self.total_update_steps = 0
+        self.num_updates_this_epoch = 0
+        self.current_update_data: Optional[Dict[str, torch.Tensor]] = None
+        self.update_start_time: float = 0.0
+
+        # --- General State ---
         self.last_image_log_step = -1
-        self.last_checkpoint_step = self.global_step  # Initialize based on loaded step
+        self.last_checkpoint_step = self.global_step
         self.rollouts_completed_since_last_checkpoint = 0
         self.steps_collected_this_rollout = 0
-        self.current_phase = "Collecting"  # Initial phase
+        self.current_phase = "Collecting"  # Start directly in collecting phase
 
         self._log_initial_state()
         print("[Trainer-PPO] Initialization complete.")
 
+
     def get_current_phase(self) -> str:
         """Returns the current phase ('Collecting' or 'Updating')."""
+        if self.current_phase == "Updating":
+            progress_details = self.get_update_progress_details()
+            epoch = progress_details.get("current_epoch", 0)
+            total_epochs = progress_details.get("total_epochs", 0)
+            return f"Updating (Epoch {epoch}/{total_epochs})"
         return self.current_phase
 
-    def get_update_progress(self) -> float:
-        """Returns the progress of the agent update phase (0.0 to 1.0)."""
+    def get_update_progress_details(self) -> Dict[str, Any]:
+        """Returns detailed progress information for the current update phase."""
+        details = {
+            "overall_progress": 0.0,
+            "epoch_progress": 0.0,
+            "current_epoch": 0,
+            "total_epochs": 0,
+            "phase": "Idle", 
+        }
         if self.current_phase == "Updating":
-            return self.agent.get_update_progress()
-        return 0.0
+            total_epochs = self.ppo_config.PPO_EPOCHS
+            total_steps_in_epoch = self.num_minibatches_per_epoch
+            current_step_in_epoch = self.current_minibatch_index
+            # Ensure total_update_steps is calculated correctly
+            if self.total_update_steps == 0 and total_steps_in_epoch > 0:
+                self.total_update_steps = total_steps_in_epoch * total_epochs
+
+            current_total_step = (
+                self.current_update_epoch * total_steps_in_epoch
+            ) + current_step_in_epoch
+            overall_progress = current_total_step / max(1, self.total_update_steps)
+            epoch_progress = current_step_in_epoch / max(1, total_steps_in_epoch)
+            details.update(
+                {
+                    "overall_progress": overall_progress,
+                    "epoch_progress": epoch_progress,
+                    "current_epoch": self.current_update_epoch
+                    + 1,  # 1-based for display
+                    "total_epochs": total_epochs,
+                    "phase": "Train Update",
+                }
+            )
+        elif self.current_phase == "Collecting":
+            details["phase"] = "Collecting"
+        return details
 
     def _log_initial_state(self):
         """Logs the initial state after potential checkpoint loading."""
@@ -135,150 +175,243 @@ class Trainer:
     def _get_current_lr(self) -> float:
         """Safely gets the current learning rate from the optimizer."""
         try:
-            # Ensure optimizer and param_groups exist
             if hasattr(self.agent, "optimizer") and self.agent.optimizer.param_groups:
                 return self.agent.optimizer.param_groups[0]["lr"]
             else:
-                print(
-                    "Warning: Optimizer or param_groups not found, returning default LR."
-                )
                 return self.ppo_config.LEARNING_RATE
-        except (AttributeError, IndexError, TypeError) as e:
-            print(f"Warning: Error getting LR ({e}), returning default LR.")
-            return self.ppo_config.LEARNING_RATE  # Fallback
+        except Exception:
+            return self.ppo_config.LEARNING_RATE
 
-    # --- MODIFIED: Learning Rate Scheduler ---
     def _update_learning_rate(self):
         """Updates the learning rate based on the configured schedule."""
         if not self.ppo_config.USE_LR_SCHEDULER:
             return
-
         total_steps = max(1, TOTAL_TRAINING_STEPS)
         current_progress = self.global_step / total_steps
         initial_lr = self.ppo_config.LEARNING_RATE
-
-        # --- MODIFIED: Check for LR_SCHEDULE_TYPE before accessing ---
-        schedule_type = getattr(
-            self.ppo_config, "LR_SCHEDULE_TYPE", "linear"
-        )  # Default to linear if missing
+        schedule_type = getattr(self.ppo_config, "LR_SCHEDULE_TYPE", "linear")
 
         if schedule_type == "linear":
-            end_fraction = getattr(
-                self.ppo_config, "LR_LINEAR_END_FRACTION", 0.0
-            )  # Default if missing
+            end_fraction = getattr(self.ppo_config, "LR_LINEAR_END_FRACTION", 0.0)
             decay_fraction = max(0.0, 1.0 - current_progress)
             new_lr = initial_lr * (end_fraction + (1.0 - end_fraction) * decay_fraction)
         elif schedule_type == "cosine":
-            min_factor = getattr(
-                self.ppo_config, "LR_COSINE_MIN_FACTOR", 0.01
-            )  # Default if missing
-            # Cosine annealing formula: lr = min_lr + 0.5 * (max_lr - min_lr) * (1 + cos(pi * progress))
+            min_factor = getattr(self.ppo_config, "LR_COSINE_MIN_FACTOR", 0.01)
             min_lr = initial_lr * min_factor
             new_lr = min_lr + 0.5 * (initial_lr - min_lr) * (
                 1 + math.cos(math.pi * current_progress)
             )
         else:
-            # Default or unknown type: No change
-            print(
-                f"Warning: Unknown LR_SCHEDULE_TYPE '{schedule_type}'. Using current LR."
-            )
             new_lr = self._get_current_lr()
-        # --- END MODIFIED ---
 
-        # Ensure LR doesn't drop below min (using cosine min factor as a general floor)
         min_factor_floor = getattr(self.ppo_config, "LR_COSINE_MIN_FACTOR", 0.0)
         new_lr = max(new_lr, initial_lr * min_factor_floor)
 
-        # Apply the new learning rate to the optimizer
         try:
-            # Ensure optimizer and param_groups exist before trying to update
             if hasattr(self.agent, "optimizer") and self.agent.optimizer.param_groups:
                 for param_group in self.agent.optimizer.param_groups:
                     param_group["lr"] = new_lr
-            else:
-                print(
-                    "Warning: Could not update LR, optimizer or param_groups not found."
-                )
-        except AttributeError:
-            print("Warning: Could not update LR, optimizer attribute missing.")
         except Exception as e:
             print(f"Warning: Unexpected error updating LR: {e}")
 
-    # --- END MODIFIED ---
+    # --- Regular Training Methods ---
+
+    def _prepare_regular_update(self):
+        """Prepares data and state for the regular PPO update phase."""
+        self.current_phase = "Updating"
+        self.update_start_time = time.time()  # Start timer here
+        self.rollout_collector.compute_advantages_for_storage()
+        self.rollout_storage.to(self.agent.device)
+        self.current_update_data = self.rollout_storage.get_data_for_update()
+
+        if not self.current_update_data:
+            print("[Trainer Warning] No data retrieved from storage for update.")
+            self.current_phase = "Collecting"
+            self.steps_collected_this_rollout = 0
+            return False
+
+        # Normalize advantages (do it once per rollout)
+        advantages = self.current_update_data["advantages"]
+        self.current_update_data["advantages"] = (advantages - advantages.mean()) / (
+            advantages.std() + 1e-8
+        )
+
+        num_samples = self.current_update_data["actions"].shape[0]
+        batch_size = self.ppo_config.MINIBATCH_SIZE
+        # Calculate effective number of minibatches, excluding those < 2
+        self.num_minibatches_per_epoch = 0
+        for i in range(0, num_samples, batch_size):
+            if i + batch_size <= num_samples:  # Full minibatch
+                self.num_minibatches_per_epoch += 1
+            elif num_samples - i >= 2:  # Partial minibatch with size >= 2
+                self.num_minibatches_per_epoch += 1
+            # else: skip last minibatch if size < 2
+
+        self.total_update_steps = (
+            self.num_minibatches_per_epoch * self.ppo_config.PPO_EPOCHS
+        )
+        self.update_indices = np.arange(num_samples)
+        self.current_update_epoch = 0
+        self.current_minibatch_index = 0
+        self.update_metrics_accumulator = defaultdict(float)
+        self.num_updates_this_epoch = 0
+        return True
+
+    def _iterate_regular_update(self):
+        """Performs one MINIBATCH update step of the regular training phase."""
+        if self.current_update_data is None or self.update_indices is None:
+            print("Error: Regular update called without data.")
+            self.current_phase = "Collecting"
+            return
+
+        # Check if starting a new epoch
+        if self.current_minibatch_index == 0:
+            np.random.shuffle(self.update_indices)
+            self.update_metrics_accumulator = defaultdict(float)
+            self.num_updates_this_epoch = 0
+
+        # Get minibatch indices
+        start_idx = self.current_minibatch_index * self.ppo_config.MINIBATCH_SIZE
+        end_idx = start_idx + self.ppo_config.MINIBATCH_SIZE
+        minibatch_indices = self.update_indices[start_idx:end_idx]
+
+        if len(minibatch_indices) < 2:
+            # print(f"Skipping regular minibatch {self.current_minibatch_index} (size {len(minibatch_indices)} < 2)")
+            self.current_minibatch_index += 1  # Still increment index
+            # Check if this skipped minibatch finishes the epoch
+            if self.current_minibatch_index >= self.num_minibatches_per_epoch:
+                self.current_update_epoch += 1
+                self.current_minibatch_index = 0
+                if self.current_update_epoch >= self.ppo_config.PPO_EPOCHS:
+                    # Update finished even if last mb was skipped
+                    update_duration = time.time() - self.update_start_time
+                    # Average metrics over all minibatches processed in the update phase
+                    total_updates_in_phase = (
+                        self.num_updates_this_epoch
+                    )  # Use actual count
+                    avg_metrics = {
+                        k: v / max(1, total_updates_in_phase)
+                        for k, v in self.update_metrics_accumulator.items()
+                    }
+                    step_record_data_update = {
+                        "update_time": update_duration,
+                        "lr": self._get_current_lr(),
+                        "global_step": self.global_step,
+                    }
+                    step_record_data_update.update(avg_metrics)
+                    self.stats_recorder.record_step(step_record_data_update)
+                    self.rollout_storage.after_update()
+                    self.steps_collected_this_rollout = 0
+                    self.rollouts_completed_since_last_checkpoint += 1
+                    self.current_phase = "Collecting"
+                    self._update_learning_rate()
+                    self.maybe_save_checkpoint()
+                    self._maybe_log_image()
+                    self.current_update_data = None
+                    gc.collect()
+            return  # Skip the rest of the loop for this small minibatch
+
+        # Extract minibatch data
+        minibatch_tensors = {
+            key: self.current_update_data[key][minibatch_indices]
+            for key in [
+                "obs_grid",
+                "obs_shapes",
+                "obs_availability",
+                "obs_explicit_features",
+                "actions",
+                "log_probs",
+                "returns",
+                "advantages",
+            ]
+        }
+
+        # Perform one minibatch update
+        try:
+            minibatch_metrics = self.agent.update_minibatch(minibatch_tensors)
+            for k, v in minibatch_metrics.items():
+                self.update_metrics_accumulator[k] += v
+            self.num_updates_this_epoch += 1
+        except Exception as e:
+            print(
+                f"CRITICAL ERROR during agent.update_minibatch (Epoch {self.current_update_epoch+1}, MB {self.current_minibatch_index}): {e}"
+            )
+            traceback.print_exc()
+            self.current_phase = "Collecting"
+            self.steps_collected_this_rollout = 0
+            self.current_update_data = None
+            self.rollout_storage.after_update()
+            return
+
+        # Increment minibatch index
+        self.current_minibatch_index += 1
+
+        # Check if epoch is finished
+        if self.current_minibatch_index >= self.num_minibatches_per_epoch:
+            self.current_update_epoch += 1
+            self.current_minibatch_index = 0
+
+            # Check if all epochs are done
+            if self.current_update_epoch >= self.ppo_config.PPO_EPOCHS:
+                # --- Update finished ---
+                update_duration = time.time() - self.update_start_time
+                # Average metrics over all minibatches processed in the update phase
+                total_updates_in_phase = self.num_updates_this_epoch  # Use actual count
+                avg_metrics = {
+                    k: v / max(1, total_updates_in_phase)
+                    for k, v in self.update_metrics_accumulator.items()
+                }
+                step_record_data_update = {
+                    "update_time": update_duration,
+                    "lr": self._get_current_lr(),
+                    "global_step": self.global_step,
+                }
+                step_record_data_update.update(avg_metrics)
+                self.stats_recorder.record_step(step_record_data_update)
+
+                self.rollout_storage.after_update()
+                self.steps_collected_this_rollout = 0
+                self.rollouts_completed_since_last_checkpoint += 1
+                self.current_phase = "Collecting"
+                self._update_learning_rate()
+                self.maybe_save_checkpoint()
+                self._maybe_log_image()
+                self.current_update_data = None
+                gc.collect()
+
+    # --- Main Loop Logic ---
 
     def perform_training_iteration(self):
-        """Performs one iteration of collection and potential update."""
+        """Performs one iteration: one step of collection OR one minibatch of update."""
         step_start_time = time.time()
-        if self.current_phase != "Collecting":
-            self.current_phase = "Collecting"
 
-        # Collect one step from all environments
-        steps_collected_this_iter = self.rollout_collector.collect_one_step(
-            self.global_step
-        )
-        self.global_step += steps_collected_this_iter
-        self.steps_collected_this_rollout += 1
+        # --- Regular Training Logic ---
+        if self.current_phase == "Collecting":
+            steps_collected_this_iter = self.rollout_collector.collect_one_step(
+                self.global_step
+            )
+            self.global_step += steps_collected_this_iter
+            self.steps_collected_this_rollout += 1
 
-        update_metrics = {}
-        # Check if rollout buffer is full
-        if self.steps_collected_this_rollout >= self.ppo_config.NUM_STEPS_PER_ROLLOUT:
-            self.current_phase = "Updating"
-            update_start_time = time.time()
+            if (
+                self.steps_collected_this_rollout
+                >= self.ppo_config.NUM_STEPS_PER_ROLLOUT
+            ):
+                if not self._prepare_regular_update():
+                    self.steps_collected_this_rollout = 0
+                # else: update_start_time is set in _prepare_regular_update
 
-            # Compute advantages using the collected rollout
-            self.rollout_collector.compute_advantages_for_storage()
-            self.rollout_storage.to(
-                self.agent.device
-            )  # Move storage to agent device for update
-            update_data = self.rollout_storage.get_data_for_update()
-
-            if update_data:
-                try:
-                    update_metrics = self.agent.update(update_data)
-                except Exception as agent_update_err:
-                    print(f"CRITICAL ERROR during agent.update: {agent_update_err}")
-                    traceback.print_exc()
-                    update_metrics = {}  # Prevent crash, continue loop
-            else:
-                print(
-                    "[Trainer Warning] No data retrieved from rollout storage for update."
-                )
-                update_metrics = {}
-
-            self.rollout_storage.after_update()  # Reset storage, keep last obs/state
-            self.steps_collected_this_rollout = 0
-            self.rollouts_completed_since_last_checkpoint += 1
-            self.current_phase = "Collecting"  # Switch back after update
-            update_duration = time.time() - update_start_time
-
-            # Update LR *after* the agent update
-            self._update_learning_rate()
-            # Checkpoint and log images based on completed rollouts
-            self.maybe_save_checkpoint()
-            self._maybe_log_image()
-
-            # Record update-specific metrics
-            step_record_data_update = {
-                "update_time": update_duration,
-                "lr": self._get_current_lr(),
+            step_duration = time.time() - step_start_time
+            step_record_data_timing = {
+                "step_time": step_duration,
+                "num_steps_processed": steps_collected_this_iter,
                 "global_step": self.global_step,
+                "lr": self._get_current_lr(),
             }
-            if isinstance(update_metrics, dict):
-                step_record_data_update.update(update_metrics)
-            self.stats_recorder.record_step(step_record_data_update)
-
-        # Record timing and basic info for every step (collection or update)
-        step_end_time = time.time()
-        step_duration = step_end_time - step_start_time
-        step_record_data_timing = {
-            "step_time": step_duration,
-            "num_steps_processed": steps_collected_this_iter,
-            "global_step": self.global_step,
-            "lr": self._get_current_lr(),
-        }
-        # Avoid double-logging if an update happened this iteration
-        if not update_metrics:
             self.stats_recorder.record_step(step_record_data_timing)
+
+        elif self.current_phase == "Updating":
+            self._iterate_regular_update()
 
     def maybe_save_checkpoint(self, force_save=False):
         """Saves a checkpoint based on frequency or if forced."""
@@ -287,7 +420,6 @@ class Trainer:
             save_freq_rollouts > 0
             and self.rollouts_completed_since_last_checkpoint >= save_freq_rollouts
         )
-
         if force_save or should_save_freq:
             print(
                 f"[Trainer] Saving checkpoint. Force: {force_save}, FreqMet: {should_save_freq}, Rollouts Since Last: {self.rollouts_completed_since_last_checkpoint}"
@@ -295,21 +427,18 @@ class Trainer:
             self.checkpoint_manager.save_checkpoint(
                 self.global_step, self.rollout_collector.get_episode_count()
             )
-            self.rollouts_completed_since_last_checkpoint = 0  # Reset counter
+            self.rollouts_completed_since_last_checkpoint = 0
             self.last_checkpoint_step = self.global_step
 
     def _maybe_log_image(self):
         """Logs a sample environment image to TensorBoard based on frequency."""
         if not self.tb_config.LOG_IMAGES or self.tb_config.IMAGE_LOG_FREQ <= 0:
             return
-
         image_log_freq_rollouts = self.tb_config.IMAGE_LOG_FREQ
-        # Use rollouts completed since *last* checkpoint for frequency check
-        current_rollout_num_since_chkpt = self.rollouts_completed_since_last_checkpoint
-        # Log if frequency is met AND we haven't logged for this exact step already
         if (
-            current_rollout_num_since_chkpt > 0
-            and current_rollout_num_since_chkpt % image_log_freq_rollouts == 0
+            self.rollouts_completed_since_last_checkpoint > 0
+            and self.rollouts_completed_since_last_checkpoint % image_log_freq_rollouts
+            == 0
         ):
             if self.global_step > self.last_image_log_step:
                 print(f"[Trainer] Logging image at step {self.global_step}")
@@ -319,39 +448,26 @@ class Trainer:
                         self.envs[env_idx], self.env_config, self.vis_config
                     )
                     if img_array is not None:
-                        # Convert HWC to CHW for TensorBoard
                         img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)
                         self.stats_recorder.record_image(
                             f"Environment/Sample State Env {env_idx}",
                             img_tensor,
                             self.global_step,
                         )
-                        self.last_image_log_step = (
-                            self.global_step
-                        )  # Update last log step
+                        self.last_image_log_step = self.global_step
                 except Exception as e:
                     print(f"Error logging environment image: {e}")
                     traceback.print_exc()
 
     def train_loop(self):
-        """Main training loop."""
-        print("[Trainer-PPO] Starting training loop...")
-        try:
-            while self.global_step < TOTAL_TRAINING_STEPS:
-                self.perform_training_iteration()
-        except KeyboardInterrupt:
-            print("\n[Trainer-PPO] Training loop interrupted by user (Ctrl+C).")
-        except Exception as e:
-            print(f"\n[Trainer-PPO] CRITICAL ERROR in training loop: {e}")
-            traceback.print_exc()
-        finally:
-            print("[Trainer-PPO] Training loop finished or terminated.")
-            self.cleanup(save_final=True)  # Attempt cleanup and final save
+        """Main training loop (DEPRECATED - logic moved to MainApp._update)."""
+        print("[Trainer-PPO] train_loop() is deprecated. Use MainApp loop.")
 
     def cleanup(self, save_final: bool = True):
         """Cleans up resources, optionally saving a final checkpoint."""
         print("[Trainer-PPO] Cleaning up resources...")
-        if save_final:
+        should_save = save_final and self.global_step > 0
+        if should_save:
             print("[Trainer-PPO] Saving final checkpoint...")
             self.checkpoint_manager.save_checkpoint(
                 self.global_step,
@@ -359,9 +475,9 @@ class Trainer:
                 is_final=True,
             )
         else:
-            print("[Trainer-PPO] Skipping final save as requested.")
-
-        # Close stats recorder (which closes TensorBoard writer)
+            print(
+                f"[Trainer-PPO] Skipping final save (SaveFinal={save_final}, GlobalStep={self.global_step})."
+            )
         if hasattr(self.stats_recorder, "close"):
             try:
                 self.stats_recorder.close()

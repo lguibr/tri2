@@ -1,4 +1,3 @@
-# File: training/checkpoint_manager.py
 import os
 import torch
 import traceback
@@ -6,10 +5,7 @@ from typing import Optional, Dict, Any, Tuple
 
 from agent.ppo_agent import PPOAgent
 
-# --- MODIFIED: Import RunningMeanStd ---
 from utils.running_mean_std import RunningMeanStd
-
-# --- END MODIFIED ---
 
 
 class CheckpointManager:
@@ -21,16 +17,12 @@ class CheckpointManager:
         model_save_path: str,
         load_checkpoint_path: Optional[str],
         device: torch.device,
-        # --- MODIFIED: Accept optional RunningMeanStd instances ---
         obs_rms_dict: Optional[Dict[str, RunningMeanStd]] = None,
-        # --- END MODIFIED ---
     ):
         self.agent = agent
         self.model_save_path = model_save_path
         self.device = device
-        # --- MODIFIED: Store Obs RMS dict ---
         self.obs_rms_dict = obs_rms_dict if obs_rms_dict else {}
-        # --- END MODIFIED ---
 
         self.global_step = 0
         self.episode_count = 0
@@ -69,7 +61,6 @@ class CheckpointManager:
                 f"  -> Resuming from Step: {self.global_step}, Ep: {self.episode_count}"
             )
 
-            # --- MODIFIED: Load observation normalization stats ---
             if "obs_rms_state_dict" in checkpoint and self.obs_rms_dict:
                 rms_state_dict = checkpoint["obs_rms_state_dict"]
                 loaded_keys = set()
@@ -92,7 +83,6 @@ class CheckpointManager:
                 print(
                     "  -> WARNING: Obs RMS state dict not found in checkpoint, using initial RMS."
                 )
-            # --- END MODIFIED ---
 
         except KeyError as e:
             print(
@@ -124,12 +114,10 @@ class CheckpointManager:
         try:
             agent_save_data = self.agent.get_state_dict()
 
-            # --- MODIFIED: Prepare Obs RMS state ---
             obs_rms_save_data = {}
             if self.obs_rms_dict:
                 for key, rms_instance in self.obs_rms_dict.items():
                     obs_rms_save_data[key] = rms_instance.state_dict()
-            # --- END MODIFIED ---
 
             # Combine into a single checkpoint dictionary
             checkpoint_data = {

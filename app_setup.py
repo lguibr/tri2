@@ -1,19 +1,9 @@
-# File: app_setup.py
 import os
 import pygame
 from typing import Tuple, Dict, Any
 
 from config import (
     VisConfig,
-    EnvConfig,
-    RewardConfig,
-    PPOConfig,
-    RNNConfig,
-    TrainConfig,
-    ModelConfig,
-    StatsConfig,
-    TensorBoardConfig,
-    DemoConfig,
     RUN_CHECKPOINT_DIR,
     RUN_LOG_DIR,
     get_config_dict,

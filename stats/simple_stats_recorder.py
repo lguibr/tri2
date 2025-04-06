@@ -1,4 +1,3 @@
-# File: stats/simple_stats_recorder.py
 import time
 from collections import deque
 from typing import Deque, Dict, Any, Optional, Union, List
@@ -45,7 +44,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
-        lines_cleared: Optional[int] = None,
+        triangles_cleared: Optional[int] = None,  # Use triangles_cleared
     ):
         """Records episode stats and prints new bests to console."""
         update_info = self.aggregator.record_episode(
@@ -54,7 +53,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
             episode_num,
             global_step,
             game_score,
-            lines_cleared,
+            triangles_cleared,  # Pass renamed parameter
         )
         current_step = (
             global_step
@@ -146,16 +145,14 @@ class SimpleStatsRecorder(StatsRecorderBase):
             else "N/A"
         )
 
-        # --- CORRECTED: Use 'value_loss' key for the average loss display ---
         avg_window_size = summary.get("summary_avg_window_size", "?")
         log_str = (
             f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
             f"Ep: {summary['total_episodes']:<7} | SPS: {summary['steps_per_second']:<5.0f} | "
             f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
-            f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "  # Corrected key
+            f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "
             f"LR: {summary['current_lr']:.1e}"
         )
-        # --- END CORRECTED ---
 
         # Add optional fields if present
         epsilon = summary.get("epsilon")
@@ -167,13 +164,15 @@ class SimpleStatsRecorder(StatsRecorderBase):
         buffer_size = summary.get("buffer_size")
         if buffer_size is not None and buffer_size > 0:
             log_str += f" | Buf: {buffer_size/1e6:.2f}M"
+        # Add cleared triangles info
+        avg_tris_cleared = summary.get("avg_triangles_cleared_window", 0.0)
+        log_str += f" | TrisClr(Avg{avg_window_size}): {avg_tris_cleared:.1f}"
 
         print(log_str)
 
         self.last_log_time = time.time()
         self.rollouts_since_last_log = 0  # Reset counter after logging
 
-    # --- No-op methods for other logging types ---
     def record_histogram(
         self,
         tag: str,

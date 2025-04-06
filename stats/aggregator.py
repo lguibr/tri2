@@ -1,6 +1,3 @@
-# File: stats/aggregator.py
-# No changes needed here, the debug prints were already removed in the previous step.
-# Keep the file as it was after the previous modification.
 import time
 from collections import deque
 from typing import Deque, Dict, Any, Optional, List
@@ -41,7 +38,7 @@ class StatsAggregator:
         self.episode_scores: Deque[float] = deque(maxlen=plot_window)
         self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
         self.game_scores: Deque[int] = deque(maxlen=plot_window)
-        self.episode_lines_cleared: Deque[int] = deque(maxlen=plot_window)
+        self.episode_triangles_cleared: Deque[int] = deque(maxlen=plot_window)
         self.sps_values: Deque[float] = deque(maxlen=plot_window)
         self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
         self.beta_values: Deque[float] = deque(maxlen=plot_window)
@@ -51,7 +48,7 @@ class StatsAggregator:
         self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
 
         self.total_episodes = 0
-        self.total_lines_cleared = 0
+        self.total_triangles_cleared = 0
         self.current_epsilon: float = 0.0
         self.current_beta: float = 0.0
         self.current_buffer_size: int = 0
@@ -82,7 +79,7 @@ class StatsAggregator:
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
-        lines_cleared: Optional[int] = None,
+        triangles_cleared: Optional[int] = None, 
     ) -> Dict[str, Any]:
         current_step = (
             global_step if global_step is not None else self.current_global_step
@@ -93,9 +90,9 @@ class StatsAggregator:
         self.episode_lengths.append(episode_length)
         if game_score is not None:
             self.game_scores.append(game_score)
-        if lines_cleared is not None:
-            self.episode_lines_cleared.append(lines_cleared)
-            self.total_lines_cleared += lines_cleared
+        if triangles_cleared is not None:
+            self.episode_triangles_cleared.append(triangles_cleared)
+            self.total_triangles_cleared += triangles_cleared
         self.total_episodes = episode_num
 
         if episode_score > self.best_score:
@@ -129,7 +126,6 @@ class StatsAggregator:
             loss_val = step_data["policy_loss"]
             if np.isfinite(loss_val):
                 self.policy_losses.append(loss_val)
-                # print(f"[Aggregator Debug] Appended Policy Loss...") # Removed
             else:
                 print(
                     f"[Aggregator Warning] Received non-finite Policy Loss: {loss_val}"
@@ -139,7 +135,6 @@ class StatsAggregator:
             current_value_loss = step_data["value_loss"]
             if np.isfinite(current_value_loss):
                 self.value_losses.append(current_value_loss)
-                # print(f"[Aggregator Debug] Appended Value Loss...") # Removed
                 if current_value_loss < self.best_value_loss and g_step > 0:
                     self.previous_best_value_loss = self.best_value_loss
                     self.best_value_loss = current_value_loss
@@ -154,7 +149,6 @@ class StatsAggregator:
             entropy_val = step_data["entropy"]
             if np.isfinite(entropy_val):
                 self.entropies.append(entropy_val)
-                # print(f"[Aggregator Debug] Appended Entropy...") # Removed
             else:
                 print(
                     f"[Aggregator Warning] Received non-finite Entropy: {entropy_val}"
@@ -204,7 +198,9 @@ class StatsAggregator:
             "entropy": safe_mean(self.entropies),
             "avg_max_q_window": safe_mean(self.avg_max_qs),
             "avg_game_score_window": safe_mean(self.game_scores),
-            "avg_lines_cleared_window": safe_mean(self.episode_lines_cleared),
+            "avg_triangles_cleared_window": safe_mean(
+                self.episode_triangles_cleared
+            ),  # Renamed key
             "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
             "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
             "total_episodes": self.total_episodes,
@@ -223,9 +219,7 @@ class StatsAggregator:
             "previous_best_loss": self.previous_best_value_loss,
             "best_loss_step": self.best_value_loss_step,
             "num_ep_scores": len(self.episode_scores),
-            "num_losses": len(
-                self.value_losses
-            ),  # Keep track of how many loss updates happened
+            "num_losses": len(self.value_losses),
             "summary_avg_window_size": summary_window,
         }
         return summary
@@ -239,7 +233,7 @@ class StatsAggregator:
             "entropy": self.entropies.copy(),
             "avg_max_qs": self.avg_max_qs.copy(),
             "game_scores": self.game_scores.copy(),
-            "episode_lines_cleared": self.episode_lines_cleared.copy(),
+            "episode_triangles_cleared": self.episode_triangles_cleared.copy(), 
             "sps_values": self.sps_values.copy(),
             "buffer_sizes": self.buffer_sizes.copy(),
             "beta_values": self.beta_values.copy(),
@@ -248,3 +242,4 @@ class StatsAggregator:
             "lr_values": self.lr_values.copy(),
             "epsilon_values": self.epsilon_values.copy(),
         }
+

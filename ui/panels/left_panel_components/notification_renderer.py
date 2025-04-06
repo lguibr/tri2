@@ -1,7 +1,6 @@
-# File: ui/panels/left_panel_components/notification_renderer.py
 import pygame
 import time
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 from config import VisConfig, StatsConfig
 import numpy as np
 
@@ -52,17 +51,13 @@ class NotificationRenderer:
         current_x = label_rect.right + 4
 
         current_val_str = "N/A"
-        # --- Convert to float *before* checking ---
         val_as_float: Optional[float] = None
-        if isinstance(
-            current_val, (int, float, np.number)
-        ):  # Check against np.number too
+        if isinstance(current_val, (int, float, np.number)):
             try:
                 val_as_float = float(current_val)
             except (ValueError, TypeError):
-                val_as_float = None  # Conversion failed
+                val_as_float = None
 
-        # --- Use the converted float for checks and formatting ---
         if val_as_float is not None and np.isfinite(val_as_float):
             try:
                 current_val_str = val_format.format(val_as_float)
@@ -75,7 +70,6 @@ class NotificationRenderer:
         current_x = val_rect.right + 4
 
         prev_val_str = "(N/A)"
-        # --- Convert prev_val to float before checking ---
         prev_val_as_float: Optional[float] = None
         if isinstance(prev_val, (int, float, np.number)):
             try:
@@ -127,7 +121,6 @@ class NotificationRenderer:
         current_step = stats_summary.get("global_step", 0)
         y = area_rect.top + padding
 
-        # --- Pass values from summary, _render_line handles conversion/check ---
         rect_rl = self._render_line(
             area_rect,
             y,

@@ -1,4 +1,3 @@
-# File: ui/panels/left_panel_components/tb_status_renderer.py
 import pygame
 import os
 from typing import Dict, Optional, Tuple

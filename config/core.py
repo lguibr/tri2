@@ -1,9 +1,6 @@
-# File: config/core.py
 import torch
-from typing import Deque, Dict, Any, List, Type, Tuple, Optional
+from typing import List, Tuple, Optional
 
-# --- MODIFIED: Import from constants ---
-from .general import TOTAL_TRAINING_STEPS
 from .constants import (
     WHITE,
     BLACK,
@@ -19,20 +16,17 @@ from .constants import (
     GAME_OVER_FLASH_COLOR,
 )
 
-# --- END MODIFIED ---
-
 
 class VisConfig:
     NUM_ENVS_TO_RENDER = 4
+    FPS = 0
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
     LEFT_PANEL_WIDTH = int(SCREEN_WIDTH * 0.8)
     ENV_SPACING = 0
     ENV_GRID_PADDING = 0
-    FPS = 0  # Set to 0 for max speed, or > 0 to cap FPS
 
-    # --- MODIFIED: Use imported constants ---
     WHITE = WHITE
     BLACK = BLACK
     LIGHTG = LIGHTG
@@ -45,14 +39,10 @@ class VisConfig:
     LINE_CLEAR_FLASH_COLOR = LINE_CLEAR_FLASH_COLOR
     LINE_CLEAR_HIGHLIGHT_COLOR = LINE_CLEAR_HIGHLIGHT_COLOR
     GAME_OVER_FLASH_COLOR = GAME_OVER_FLASH_COLOR
-    # --- END MODIFIED ---
-
-
-# ... (rest of the file remains the same) ...
 
 
 class EnvConfig:
-    NUM_ENVS = 256
+    NUM_ENVS = 128
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2
@@ -80,9 +70,7 @@ class EnvConfig:
 
 class RewardConfig:
     REWARD_PLACE_PER_TRI = 0.01
-    REWARD_CLEAR_1 = 1.5
-    REWARD_CLEAR_2 = 4.0
-    REWARD_CLEAR_3PLUS = 8.0
+    REWARD_PER_CLEARED_TRIANGLE = 0.15  # Adjust value as needed
     REWARD_ALIVE_STEP = 0.001
     PENALTY_INVALID_MOVE = -0.1
     PENALTY_GAME_OVER = -1.5
@@ -97,26 +85,24 @@ class RewardConfig:
 
 
 class PPOConfig:
-    LEARNING_RATE = 1e-4
+    LEARNING_RATE = 2.5e-4
     ADAM_EPS = 1e-5
-    NUM_STEPS_PER_ROLLOUT = 128  # Reduced for testing/debugging if needed
-    PPO_EPOCHS = 6
-    NUM_MINIBATCHES = 64
-    CLIP_PARAM = 0.1
+    NUM_STEPS_PER_ROLLOUT = 4096  # Much larger rollout -> less frequent updates
+    PPO_EPOCHS = 6  # Keep epochs reasonable
+    NUM_MINIBATCHES = (
+        512  # Increased to keep minibatch size manageable (512*4096/512 = 4096)
+    )
+    CLIP_PARAM = 0.2
     GAMMA = 0.995
     GAE_LAMBDA = 0.95
     VALUE_LOSS_COEF = 0.5
     ENTROPY_COEF = 0.01
     MAX_GRAD_NORM = 0.5
 
-    # --- MODIFIED: Added LR Scheduler Config ---
     USE_LR_SCHEDULER = True
-    LR_SCHEDULE_TYPE = "linear"  # Options: "linear", "cosine"
-    LR_LINEAR_END_FRACTION = (
-        0.0  # For linear schedule: fraction of initial LR at the end
-    )
-    LR_COSINE_MIN_FACTOR = 0.01  # For cosine schedule: min LR = initial_lr * min_factor
-    # --- END MODIFIED ---
+    LR_SCHEDULE_TYPE = "cosine"
+    LR_LINEAR_END_FRACTION = 0.0
+    LR_COSINE_MIN_FACTOR = 0.01
 
     @property
     def MINIBATCH_SIZE(self) -> int:
@@ -130,22 +116,22 @@ class PPOConfig:
         else:
             num_minibatches = self.NUM_MINIBATCHES
         batch_size = total_data_per_update // num_minibatches
-        min_recommended_size = 128
-        if batch_size < min_recommended_size and batch_size > 0:  # Added check > 0
-            print(
-                f"Warning: Calculated minibatch size ({batch_size}) is < {min_recommended_size}. Consider adjusting NUM_STEPS_PER_ROLLOUT or NUM_MINIBATCHES."
-            )
+        min_recommended_size = 32
+        if batch_size < min_recommended_size and batch_size > 0:
+            pass
         elif batch_size <= 0:
+            local_env_config = EnvConfig()
             print(
-                f"ERROR: Calculated minibatch size is <= 0 ({batch_size}). Check NUM_ENVS({env_config_instance.NUM_ENVS}), NUM_STEPS_PER_ROLLOUT({self.NUM_STEPS_PER_ROLLOUT}), NUM_MINIBATCHES({self.NUM_MINIBATCHES}). Defaulting to 1."
+                f"ERROR: Calculated minibatch size is <= 0 ({batch_size}). Check NUM_ENVS({local_env_config.NUM_ENVS}), NUM_STEPS_PER_ROLLOUT({self.NUM_STEPS_PER_ROLLOUT}), NUM_MINIBATCHES({self.NUM_MINIBATCHES}). Defaulting to 1."
             )
+            del local_env_config
             return 1
         return max(1, batch_size)
 
 
 class RNNConfig:
     USE_RNN = True
-    LSTM_HIDDEN_SIZE = 1024
+    LSTM_HIDDEN_SIZE = 1024  # Increased LSTM size
     LSTM_NUM_LAYERS = 1
 
 
@@ -161,16 +147,16 @@ class ObsNormConfig:
 
 class TransformerConfig:
     USE_TRANSFORMER = True
-    TRANSFORMER_D_MODEL = 896
-    TRANSFORMER_NHEAD = 8
-    TRANSFORMER_DIM_FEEDFORWARD = 1024
-    TRANSFORMER_NUM_LAYERS = 2
+    TRANSFORMER_D_MODEL = 1024  # Increased transformer size
+    TRANSFORMER_NHEAD = 16  # Ensure divisibility
+    TRANSFORMER_DIM_FEEDFORWARD = 1024  # Increased feedforward size
+    TRANSFORMER_NUM_LAYERS = 2  # Increased layers
     TRANSFORMER_DROPOUT = 0.1
     TRANSFORMER_ACTIVATION = "relu"
 
 
 class TrainConfig:
-    CHECKPOINT_SAVE_FREQ = 20
+    CHECKPOINT_SAVE_FREQ = 100  # Save every 100 rollouts (less frequent in steps)
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
@@ -181,23 +167,26 @@ class ModelConfig:
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [96, 192, 192]
+        CONV_CHANNELS = [128, 256, 512]  # Increased final CNN layer
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
 
-        SHAPE_FEATURE_MLP_DIMS = [192]
+        SHAPE_FEATURE_MLP_DIMS = [256]
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
 
         _transformer_cfg = TransformerConfig()
         _last_fc_dim = (
-            _transformer_cfg.TRANSFORMER_D_MODEL
+            _transformer_cfg.TRANSFORMER_D_MODEL  # Should be 1024
             if _transformer_cfg.USE_TRANSFORMER
-            else 896
+            else 1024  # Fallback if transformer disabled later
         )
-        COMBINED_FC_DIMS = [1792, _last_fc_dim]
+        COMBINED_FC_DIMS = [
+            2048,
+            _last_fc_dim,
+        ]  # Increased first FC layer, match last to transformer
         del _transformer_cfg
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
@@ -205,25 +194,32 @@ class ModelConfig:
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [50, 100, 500, 1_000, 5_000, 10_000]
-    CONSOLE_LOG_FREQ = 5
+    STATS_AVG_WINDOW: List[int] = [
+        50,
+        100,
+        500,
+        1_000,
+        5_000,
+        10_000,
+        50_000,
+    ]
+    CONSOLE_LOG_FREQ = 25  # Log every 25 rollouts (less frequent in steps)
     PLOT_DATA_WINDOW = 100_000
 
 
 class TensorBoardConfig:
-    LOG_HISTOGRAMS = True
-    HISTOGRAM_LOG_FREQ = 20
-    LOG_IMAGES = True
-    IMAGE_LOG_FREQ = 50
+    LOG_HISTOGRAMS = False
+    HISTOGRAM_LOG_FREQ = 1000
+    LOG_IMAGES = False
+    IMAGE_LOG_FREQ = 1000
     LOG_DIR: Optional[str] = None
     LOG_SHAPE_PLACEMENT_Q_VALUES = False
 
 
 class DemoConfig:
-    # --- MODIFIED: Use imported constants ---
-    BACKGROUND_COLOR = (10, 10, 20)  # Keep specific demo color here
+    BACKGROUND_COLOR = (10, 10, 20)
     SELECTED_SHAPE_HIGHLIGHT_COLOR = BLUE
     HUD_FONT_SIZE = 24
     HELP_FONT_SIZE = 18
     HELP_TEXT = "[Arrows]=Move | [Q/E]=Cycle Shape | [Space]=Place | [ESC]=Exit"
-    # --- END MODIFIED ---
+    DEBUG_HELP_TEXT = "[Click]=Toggle Triangle | [R]=Reset Grid | [ESC]=Exit"

@@ -1,4 +1,3 @@
-# File: training/training_utils.py
 import pygame
 import numpy as np
 from typing import Optional

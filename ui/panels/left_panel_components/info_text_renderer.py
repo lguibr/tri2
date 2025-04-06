@@ -1,19 +1,13 @@
-# File: ui/panels/left_panel_components/info_text_renderer.py
 import pygame
 from typing import Dict, Any, Tuple
 
-# --- MODIFIED: Import DEVICE directly ---
 from config import (
-    VisConfig,
-    StatsConfig,
-    PPOConfig,
-    RNNConfig,  # Keep other necessary configs if used
+    RNNConfig,
+    TransformerConfig,
     WHITE,
-    LIGHTG,  # Import colors
+    LIGHTG,
 )
-from config.general import DEVICE  # Import DEVICE from config.general
-
-# --- END MODIFIED ---
+from config.general import DEVICE
 
 
 class InfoTextRenderer:
@@ -22,38 +16,47 @@ class InfoTextRenderer:
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
         self.fonts = fonts
+        self.rnn_config = RNNConfig()
+        self.transformer_config = TransformerConfig()
+
+    def _get_network_description(self) -> str:
+        """Builds a description string based on network components."""
+        parts = ["CNN+MLP Fusion"]
+        if self.transformer_config.USE_TRANSFORMER:
+            parts.append("Transformer")
+        if self.rnn_config.USE_RNN:
+            parts.append("LSTM")
+        if len(parts) == 1:  # Only Fusion
+            return "Actor-Critic (CNN+MLP Fusion)"
+        else:
+            return f"Actor-Critic ({' -> '.join(parts)})"
 
     def render(
         self,
         y_start: int,
-        stats_summary: Dict[str, Any],  # Keep stats_summary for potential future use
+        stats_summary: Dict[str, Any],
         panel_width: int,
     ) -> Tuple[int, Dict[str, pygame.Rect]]:
         """Renders the info text block. Returns next_y and stat_rects."""
         stat_rects: Dict[str, pygame.Rect] = {}
         ui_font = self.fonts.get("ui")
         if not ui_font:
-            return y_start, stat_rects  # Return 0 height if no font
+            return y_start, stat_rects
 
         line_height = ui_font.get_linesize()
 
-        # --- MODIFIED: Get device type dynamically ---
         device_type_str = "UNKNOWN"
         if DEVICE and hasattr(DEVICE, "type"):
             device_type_str = DEVICE.type.upper()
-        # --- END MODIFIED ---
 
-        # Define info lines within the render method
+        network_desc = self._get_network_description()
         info_lines = [
-            ("Device", device_type_str),  # Use the dynamically fetched string
-            ("Network", f"Actor-Critic (CNN+MLP->LSTM:{RNNConfig.USE_RNN})"),
-            # Add any other essential non-plotted info here if needed
+            ("Device", device_type_str),
+            ("Network", network_desc),
         ]
 
         last_y = y_start
         x_pos_key, x_pos_val_offset = 10, 5
-
-        # Add a small gap before this section
         current_y = y_start + 5
 
         for idx, (key, value_str) in enumerate(info_lines):
@@ -68,7 +71,6 @@ class InfoTextRenderer:
                     topleft=(key_rect.right + x_pos_val_offset, line_y)
                 )
 
-                # Simple clipping for value text
                 clip_width = max(0, panel_width - value_rect.left - 10)
                 if value_rect.width > clip_width:
                     self.screen.blit(
@@ -79,7 +81,6 @@ class InfoTextRenderer:
                 else:
                     self.screen.blit(value_surf, value_rect)
 
-                # Store rect for tooltip
                 combined_rect = key_rect.union(value_rect)
                 combined_rect.width = min(
                     combined_rect.width, panel_width - x_pos_key - 10
@@ -90,5 +91,4 @@ class InfoTextRenderer:
                 print(f"Error rendering stat line '{key}': {e}")
                 last_y = line_y + line_height
 
-        # Return position below the last rendered line
         return last_y, stat_rects

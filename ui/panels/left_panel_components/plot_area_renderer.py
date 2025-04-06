@@ -1,8 +1,7 @@
-# File: ui/panels/left_panel_components/plot_area_renderer.py
 import pygame
-from typing import Dict, Deque, Optional
+from typing import Dict, Deque
 from config import VisConfig
-from ui.plotter import Plotter  # Import Plotter
+from ui.plotter import Plotter 
 
 
 class PlotAreaRenderer:
@@ -12,7 +11,7 @@ class PlotAreaRenderer:
         self,
         screen: pygame.Surface,
         fonts: Dict[str, pygame.font.Font],
-        plotter: Plotter,  # Pass plotter instance
+        plotter: Plotter, 
     ):
         self.screen = screen
         self.fonts = fonts

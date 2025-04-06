@@ -1,5 +1,3 @@
-# File: config/validation.py
-import os, torch
 from .core import (
     EnvConfig,
     PPOConfig,
@@ -9,9 +7,8 @@ from .core import (
     StatsConfig,
     TensorBoardConfig,
     VisConfig,
-    DemoConfig,
-    ObsNormConfig,  # Added
-    TransformerConfig,  # Added
+    ObsNormConfig,  
+    TransformerConfig, 
 )
 from .general import (
     RUN_ID,
@@ -29,6 +26,7 @@ def print_config_info_and_validate():
     rnn_config_instance = RNNConfig()
     transformer_config_instance = TransformerConfig()  # Added instance
     obs_norm_config_instance = ObsNormConfig()  # Added instance
+    vis_config_instance = VisConfig()  # Added instance
 
     print("-" * 70)
     print(f"RUN ID: {RUN_ID}")
@@ -49,6 +47,8 @@ def print_config_info_and_validate():
     else:
         print("--- Starting training from scratch (no checkpoint specified). ---")
 
+    print("--- Pre-training DISABLED ---")
+
     print(f"--- Using PPO Algorithm ---")
     print(f"    Rollout Steps: {ppo_config_instance.NUM_STEPS_PER_ROLLOUT}")
     print(f"    PPO Epochs: {ppo_config_instance.PPO_EPOCHS}")
@@ -61,7 +61,6 @@ def print_config_info_and_validate():
         f"    Value Coef: {ppo_config_instance.VALUE_LOSS_COEF}, Entropy Coef: {ppo_config_instance.ENTROPY_COEF}"
     )
 
-    # --- MODIFIED: Use correct attribute name and add cosine info ---
     lr_schedule_str = ""
     if ppo_config_instance.USE_LR_SCHEDULER:
         schedule_type = getattr(ppo_config_instance, "LR_SCHEDULE_TYPE", "linear")
@@ -79,7 +78,6 @@ def print_config_info_and_validate():
         + lr_schedule_str
         + " ---"
     )
-    # --- END MODIFIED ---
 
     print(
         f"--- Using RNN: {rnn_config_instance.USE_RNN}"

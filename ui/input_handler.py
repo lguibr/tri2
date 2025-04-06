@@ -1,16 +1,20 @@
-# File: ui/input_handler.py
 import pygame
-from typing import Tuple, Callable, Optional
+from typing import Tuple, Callable, Dict
 
 # Type Aliases for Callbacks
-HandleDemoInputCallback = Callable[[pygame.event.Event], None]
-ToggleTrainingRunCallback = Callable[[], None]  # Renamed
+HandleDemoMouseMotionCallback = Callable[[Tuple[int, int]], None]
+HandleDemoMouseButtonDownCallback = Callable[[pygame.event.Event], None]
+ToggleTrainingRunCallback = Callable[[], None]
 RequestCleanupCallback = Callable[[], None]
 CancelCleanupCallback = Callable[[], None]
 ConfirmCleanupCallback = Callable[[], None]
 ExitAppCallback = Callable[[], bool]
 StartDemoModeCallback = Callable[[], None]
 ExitDemoModeCallback = Callable[[], None]
+StartDebugModeCallback = Callable[[], None]
+ExitDebugModeCallback = Callable[[], None]
+HandleDebugInputCallback = Callable[[pygame.event.Event], None]
+
 
 # Forward declaration for type hinting
 if False:
@@ -24,34 +28,45 @@ class InputHandler:
         self,
         screen: pygame.Surface,
         renderer: "UIRenderer",
-        toggle_training_run_cb: ToggleTrainingRunCallback,  # Renamed
+        toggle_training_run_cb: ToggleTrainingRunCallback,
         request_cleanup_cb: RequestCleanupCallback,
         cancel_cleanup_cb: CancelCleanupCallback,
         confirm_cleanup_cb: ConfirmCleanupCallback,
         exit_app_cb: ExitAppCallback,
         start_demo_mode_cb: StartDemoModeCallback,
         exit_demo_mode_cb: ExitDemoModeCallback,
-        handle_demo_input_cb: HandleDemoInputCallback,
+        handle_demo_mouse_motion_cb: HandleDemoMouseMotionCallback, 
+        handle_demo_mouse_button_down_cb: HandleDemoMouseButtonDownCallback, 
+        start_debug_mode_cb: StartDebugModeCallback,
+        exit_debug_mode_cb: ExitDebugModeCallback,
+        handle_debug_input_cb: HandleDebugInputCallback,
     ):
         self.screen = screen
         self.renderer = renderer
-        self.toggle_training_run_cb = toggle_training_run_cb  # Renamed
+        self.toggle_training_run_cb = toggle_training_run_cb
         self.request_cleanup_cb = request_cleanup_cb
         self.cancel_cleanup_cb = cancel_cleanup_cb
         self.confirm_cleanup_cb = confirm_cleanup_cb
         self.exit_app_cb = exit_app_cb
         self.start_demo_mode_cb = start_demo_mode_cb
         self.exit_demo_mode_cb = exit_demo_mode_cb
-        self.handle_demo_input_cb = handle_demo_input_cb
+        self.handle_demo_mouse_motion_cb = handle_demo_mouse_motion_cb
+        self.handle_demo_mouse_button_down_cb = handle_demo_mouse_button_down_cb
+        self.start_debug_mode_cb = start_debug_mode_cb
+        self.exit_debug_mode_cb = exit_debug_mode_cb
+        self.handle_debug_input_cb = handle_debug_input_cb
+
+        self.shape_preview_rects: Dict[int, pygame.Rect] = {}
 
         self._update_button_rects()
 
     def _update_button_rects(self):
         """Calculates button rects based on initial layout assumptions."""
         # These rects are primarily for click detection, actual rendering is in LeftPanel
-        self.run_btn_rect = pygame.Rect(10, 10, 100, 40)  # Renamed
+        self.run_btn_rect = pygame.Rect(10, 10, 100, 40)
         self.cleanup_btn_rect = pygame.Rect(self.run_btn_rect.right + 10, 10, 160, 40)
         self.demo_btn_rect = pygame.Rect(self.cleanup_btn_rect.right + 10, 10, 120, 40)
+        self.debug_btn_rect = pygame.Rect(self.demo_btn_rect.right + 10, 10, 120, 40)
         # Confirmation buttons are positioned dynamically during rendering
         sw, sh = self.screen.get_size()
         self.confirm_yes_rect = pygame.Rect(0, 0, 100, 40)
@@ -66,12 +81,20 @@ class InputHandler:
         try:
             mouse_pos = pygame.mouse.get_pos()
         except pygame.error:
-            mouse_pos = (0, 0)  # Handle cases where display might not be initialized
+            mouse_pos = (0, 0)  # Gracefully handle if display not ready
 
-        # Update confirmation button positions dynamically based on screen size
+        # Update dynamic rects
         sw, sh = self.screen.get_size()
         self.confirm_yes_rect.center = (sw // 2 - 60, sh // 2 + 50)
         self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)
+
+        # Update shape preview rects if in demo mode (needed for mapping clicks)
+        if app_state == "Playing" and self.renderer and self.renderer.demo_renderer:
+            self.shape_preview_rects = (
+                self.renderer.demo_renderer.get_shape_preview_rects()
+            )
+        else:
+            self.shape_preview_rects.clear()
 
         if app_state == "MainMenu" and not cleanup_confirmation_active:
             if hasattr(self.renderer, "check_hover"):
@@ -88,13 +111,13 @@ class InputHandler:
                         (new_w, new_h), pygame.RESIZABLE
                     )
                     self._update_ui_screen_references(self.screen)
-                    self._update_button_rects()  # Recalculate button rects
+                    self._update_button_rects()
                     if hasattr(self.renderer, "force_redraw"):
                         self.renderer.force_redraw()
                     print(f"Window resized: {new_w}x{new_h}")
                 except pygame.error as e:
                     print(f"Error resizing window: {e}")
-                continue  # Skip other event handling for this frame
+                continue
 
             # --- Cleanup Confirmation Mode ---
             if cleanup_confirmation_active:
@@ -105,40 +128,53 @@ class InputHandler:
                         self.confirm_cleanup_cb()
                     elif self.confirm_no_rect.collidepoint(mouse_pos):
                         self.cancel_cleanup_cb()
-                continue  # Don't process other inputs during confirmation
+                continue
 
             # --- Playing (Demo) Mode ---
             elif app_state == "Playing":
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         self.exit_demo_mode_cb()
+                    # Remove other key handling if mouse is primary
+                elif event.type == pygame.MOUSEMOTION:
+                    self.handle_demo_mouse_motion_cb(event.pos)
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    self.handle_demo_mouse_button_down_cb(event)
+
+            # --- Debug Mode ---
+            elif app_state == "Debug":
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_ESCAPE:
+                        self.exit_debug_mode_cb()
                     else:
-                        # Delegate other key presses to the demo input handler
-                        self.handle_demo_input_cb(event)
+                        self.handle_debug_input_cb(event)
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    self.handle_debug_input_cb(event)
 
             # --- Main Menu Mode ---
             elif app_state == "MainMenu":
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         return self.exit_app_cb()
-                    elif event.key == pygame.K_p:  # 'P' key toggles training
+                    elif event.key == pygame.K_p:
                         self.toggle_training_run_cb()
 
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    # Check button clicks using the stored rects
                     if self.run_btn_rect.collidepoint(mouse_pos):
                         self.toggle_training_run_cb()
                     elif self.cleanup_btn_rect.collidepoint(mouse_pos):
                         self.request_cleanup_cb()
                     elif self.demo_btn_rect.collidepoint(mouse_pos):
                         self.start_demo_mode_cb()
+                    elif self.debug_btn_rect.collidepoint(mouse_pos):
+                        self.start_debug_mode_cb()
 
             # --- Error Mode ---
             elif app_state == "Error":
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     return self.exit_app_cb()
 
-        return True  # Continue running
+        return True
 
     def _update_ui_screen_references(self, new_screen: pygame.Surface):
         """Updates the screen reference in the renderer and its sub-components."""

@@ -1,5 +1,3 @@
-# File: ui/overlays.py
-# (No significant changes needed, this file was already focused)
 import pygame
 import time
 import traceback

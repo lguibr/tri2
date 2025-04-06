@@ -1,8 +1,6 @@
-# File: training/rollout_collector.py
 import time
 import torch
 import numpy as np
-import random
 import traceback
 from typing import List, Dict, Any, Tuple, Optional
 
@@ -13,18 +11,13 @@ from config import (
     PPOConfig,
     RNNConfig,
     ObsNormConfig,
-    TransformerConfig,
-    # DEVICE, # Removed direct import
 )
 from environment.game_state import GameState, StateType
 from agent.ppo_agent import PPOAgent
 from stats.stats_recorder import StatsRecorderBase
-from utils.types import ActionType
 
-# --- MODIFIED: Import RunningMeanStd ---
 from utils.running_mean_std import RunningMeanStd
 
-# --- END MODIFIED ---
 from .rollout_storage import RolloutStorage
 
 
@@ -45,7 +38,7 @@ class RolloutCollector:
         reward_config: RewardConfig,
         tb_config: TensorBoardConfig,
         obs_norm_config: ObsNormConfig,  # Added
-        device: torch.device,  # --- MODIFIED: Added device ---
+        device: torch.device, 
     ):
         self.envs = envs
         self.agent = agent
@@ -56,8 +49,8 @@ class RolloutCollector:
         self.rnn_config = rnn_config
         self.reward_config = reward_config
         self.tb_config = tb_config
-        self.obs_norm_config = obs_norm_config  # Store config
-        self.device = device  # --- MODIFIED: Use passed device ---
+        self.obs_norm_config = obs_norm_config 
+        self.device = device 
 
         self.rollout_storage = RolloutStorage(
             ppo_config.NUM_STEPS_PER_ROLLOUT,
@@ -67,7 +60,6 @@ class RolloutCollector:
             self.device,
         )
 
-        # --- MODIFIED: Observation Normalization Setup ---
         self.obs_rms: Dict[str, RunningMeanStd] = {}
         if self.obs_norm_config.ENABLE_OBS_NORMALIZATION:
             print("[RolloutCollector] Observation Normalization ENABLED.")
@@ -107,9 +99,7 @@ class RolloutCollector:
                 )
         else:
             print("[RolloutCollector] Observation Normalization DISABLED.")
-        # --- END MODIFIED ---
 
-        # CPU Buffers for current step's RAW observations and dones
         self.current_raw_obs_grid_cpu = np.zeros(
             (self.num_envs, *self.env_config.GRID_STATE_SHAPE), dtype=np.float32
         )
@@ -128,7 +118,7 @@ class RolloutCollector:
         self.current_episode_scores = np.zeros(self.num_envs, dtype=np.float32)
         self.current_episode_lengths = np.zeros(self.num_envs, dtype=np.int32)
         self.current_episode_game_scores = np.zeros(self.num_envs, dtype=np.int32)
-        self.current_episode_lines_cleared = np.zeros(self.num_envs, dtype=np.int32)
+        self.current_episode_triangles_cleared = np.zeros(self.num_envs, dtype=np.int32)
         self.episode_count = 0
 
         # RNN state
@@ -142,7 +132,6 @@ class RolloutCollector:
 
         # Reset environments and populate initial observations
         self._reset_all_envs()
-        # --- MODIFIED: Update RMS with initial obs before copying ---
         self._update_obs_rms(self.current_raw_obs_grid_cpu, "grid")
         self._update_obs_rms(self.current_raw_obs_shapes_cpu, "shapes")
         self._update_obs_rms(
@@ -152,11 +141,9 @@ class RolloutCollector:
             self.current_raw_obs_explicit_features_cpu, "explicit_features"
         )
         self._copy_initial_observations_to_storage()  # Now copies potentially normalized obs
-        # --- END MODIFIED ---
 
         print(f"[RolloutCollector] Initialized for {self.num_envs} environments.")
 
-    # --- MODIFIED: Observation Normalization Methods ---
     def _update_obs_rms(self, obs_batch: np.ndarray, key: str):
         """Update the running mean/std for a given observation key if enabled."""
         if key in self.obs_rms:
@@ -181,8 +168,6 @@ class RolloutCollector:
         """Returns the dictionary containing the RunningMeanStd instances for checkpointing."""
         return self.obs_rms
 
-    # --- END MODIFIED ---
-
     def _reset_env(self, env_index: int) -> StateType:
         """Resets a single environment and returns its initial state dict."""
         try:
@@ -190,7 +175,7 @@ class RolloutCollector:
             self.current_episode_scores[env_index] = 0.0
             self.current_episode_lengths[env_index] = 0
             self.current_episode_game_scores[env_index] = 0
-            self.current_episode_lines_cleared[env_index] = 0
+            self.current_episode_triangles_cleared[env_index] = 0
             return state_dict
         except Exception as e:
             print(f"ERROR resetting env {env_index}: {e}")
@@ -224,10 +209,48 @@ class RolloutCollector:
 
     def _reset_all_envs(self):
         """Resets all environments and updates initial raw observations."""
+        print(f"[RolloutCollector] Resetting {self.num_envs} environments...")
+        reset_start_time = time.time()
+        # Step 1: Call reset() on all environments
+        initial_states = [None] * self.num_envs
         for i in range(self.num_envs):
-            initial_state = self._reset_env(i)
-            self._update_raw_obs_from_state_dict(i, initial_state)
-            self.current_dones_cpu[i] = False  # Reset done flag
+            try:
+                # Call reset but store the state temporarily
+                initial_states[i] = self.envs[i].reset()
+                self.current_episode_scores[i] = 0.0
+                self.current_episode_lengths[i] = 0
+                self.current_episode_game_scores[i] = 0
+                self.current_episode_triangles_cleared[i] = 0
+                self.current_dones_cpu[i] = False  # Reset done flag
+            except Exception as e:
+                print(f"ERROR resetting env {i}: {e}")
+                traceback.print_exc()
+                # Create dummy state if reset fails
+                initial_states[i] = {
+                    "grid": np.zeros(
+                        self.env_config.GRID_STATE_SHAPE, dtype=np.float32
+                    ),
+                    "shapes": np.zeros(
+                        self.env_config.SHAPE_STATE_DIM, dtype=np.float32
+                    ),
+                    "shape_availability": np.zeros(
+                        self.env_config.SHAPE_AVAILABILITY_DIM, dtype=np.float32
+                    ),
+                    "explicit_features": np.zeros(
+                        self.env_config.EXPLICIT_FEATURES_DIM, dtype=np.float32
+                    ),
+                }
+                self.current_dones_cpu[i] = True  # Mark as done if reset failed
+
+        # Step 2: Update the raw observation buffers from the collected states
+        for i in range(self.num_envs):
+            if initial_states[i] is not None:
+                self._update_raw_obs_from_state_dict(i, initial_states[i])
+            # else: Should not happen due to dummy state creation on error
+
+        reset_duration = time.time() - reset_start_time
+        print(f"[RolloutCollector] Environments reset in {reset_duration:.3f}s.")
+
         if self.rnn_config.USE_RNN:
             self.current_lstm_state_device = self.agent.get_initial_hidden_state(
                 self.num_envs
@@ -235,7 +258,6 @@ class RolloutCollector:
 
     def _copy_initial_observations_to_storage(self):
         """Normalizes (if enabled) and copies initial observations to RolloutStorage."""
-        # --- MODIFIED: Normalize before copying ---
         obs_grid_norm = self._normalize_obs(self.current_raw_obs_grid_cpu, "grid")
         obs_shapes_norm = self._normalize_obs(self.current_raw_obs_shapes_cpu, "shapes")
         obs_availability_norm = self._normalize_obs(
@@ -244,7 +266,6 @@ class RolloutCollector:
         obs_explicit_features_norm = self._normalize_obs(
             self.current_raw_obs_explicit_features_cpu, "explicit_features"
         )
-        # --- END MODIFIED ---
 
         initial_obs_grid_t = torch.from_numpy(obs_grid_norm).to(
             self.rollout_storage.device
@@ -296,15 +317,15 @@ class RolloutCollector:
         )
         final_episode_length = self.current_episode_lengths[env_index]
         final_game_score = self.current_episode_game_scores[env_index]
-        final_lines_cleared = self.current_episode_lines_cleared[env_index]
-        # Use the actual global step for logging
+        final_triangles_cleared = self.current_episode_triangles_cleared[env_index]
+
         self.stats_recorder.record_episode(
             episode_score=final_episode_score,
             episode_length=final_episode_length,
             episode_num=self.episode_count,
             global_step=current_global_step,
             game_score=final_game_score,
-            lines_cleared=final_lines_cleared,
+            triangles_cleared=final_triangles_cleared,
         )
 
     def _reset_rnn_state_for_env(self, env_index: int):
@@ -359,7 +380,6 @@ class RolloutCollector:
         if active_env_indices:
             active_indices_tensor = torch.tensor(active_env_indices, dtype=torch.long)
 
-            # --- MODIFIED: Normalize observations before feeding to agent ---
             batch_obs_grid_raw = self.current_raw_obs_grid_cpu[active_env_indices]
             batch_obs_shapes_raw = self.current_raw_obs_shapes_cpu[active_env_indices]
             batch_obs_availability_raw = self.current_raw_obs_availability_cpu[
@@ -390,7 +410,6 @@ class RolloutCollector:
             batch_obs_explicit_features_t = torch.from_numpy(
                 batch_obs_explicit_features_norm
             ).to(self.agent.device)
-            # --- END MODIFIED ---
 
             batch_valid_actions = [valid_actions_list[i] for i in active_env_indices]
 
@@ -474,9 +493,9 @@ class RolloutCollector:
                     self.current_episode_scores[i] += reward
                     self.current_episode_lengths[i] += 1
                     self.current_episode_game_scores[i] = self.envs[i].game_score
-                    self.current_episode_lines_cleared[i] = self.envs[
+                    self.current_episode_triangles_cleared[i] = self.envs[
                         i
-                    ].lines_cleared_this_episode
+                    ].triangles_cleared_this_episode
                     if done:
                         self._record_episode_stats(
                             i, 0.0, current_global_step
@@ -513,7 +532,6 @@ class RolloutCollector:
             )
 
         # 4. Update RMS with the RAW observations collected *before* this step
-        # --- MODIFIED: Update RMS stats ---
         self._update_obs_rms(self.current_raw_obs_grid_cpu, "grid")
         self._update_obs_rms(self.current_raw_obs_shapes_cpu, "shapes")
         self._update_obs_rms(
@@ -522,10 +540,8 @@ class RolloutCollector:
         self._update_obs_rms(
             self.current_raw_obs_explicit_features_cpu, "explicit_features"
         )
-        # --- END MODIFIED ---
 
         # 5. Store potentially NORMALIZED results in RolloutStorage
-        # --- MODIFIED: Normalize observations before storing ---
         obs_grid_norm = self._normalize_obs(self.current_raw_obs_grid_cpu, "grid")
         obs_shapes_norm = self._normalize_obs(self.current_raw_obs_shapes_cpu, "shapes")
         obs_availability_norm = self._normalize_obs(
@@ -534,7 +550,6 @@ class RolloutCollector:
         obs_explicit_features_norm = self._normalize_obs(
             self.current_raw_obs_explicit_features_cpu, "explicit_features"
         )
-        # --- END MODIFIED ---
 
         obs_grid_t = torch.from_numpy(obs_grid_norm).to(self.rollout_storage.device)
         obs_shapes_t = torch.from_numpy(obs_shapes_norm).to(self.rollout_storage.device)
@@ -578,7 +593,7 @@ class RolloutCollector:
 
         lstm_state_to_store = None
         if self.rnn_config.USE_RNN and self.current_lstm_state_device is not None:
-            # Store the hidden state *before* this step was processed by the agent
+            # Store the hidden state corresponding to the observation at current_step_index
             lstm_state_to_store = (
                 self.current_lstm_state_device[0].to(self.rollout_storage.device),
                 self.current_lstm_state_device[1].to(self.rollout_storage.device),
@@ -617,7 +632,6 @@ class RolloutCollector:
     def compute_advantages_for_storage(self):
         """Computes GAE advantages using the data in RolloutStorage."""
         with torch.no_grad():
-            # --- MODIFIED: Normalize final observation before value prediction ---
             final_obs_grid_norm = self._normalize_obs(
                 self.current_raw_obs_grid_cpu, "grid"
             )
@@ -643,7 +657,6 @@ class RolloutCollector:
             final_obs_explicit_features_t = torch.from_numpy(
                 final_obs_explicit_features_norm
             ).to(self.agent.device)
-            # --- END MODIFIED ---
 
             final_lstm_state = None
             if self.rnn_config.USE_RNN and self.current_lstm_state_device is not None:

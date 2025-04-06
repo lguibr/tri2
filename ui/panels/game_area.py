@@ -1,13 +1,11 @@
-# File: ui/panels/game_area.py
 import pygame
 import math
 import traceback
 from typing import List, Tuple
-from config import VisConfig, EnvConfig
+from config import VisConfig, EnvConfig, BLACK, BLUE  
 from environment.game_state import GameState
 from environment.shape import Shape
 from environment.triangle import Triangle
-import numpy as np
 
 
 class GameAreaRenderer:
@@ -22,14 +20,23 @@ class GameAreaRenderer:
             fonts["env_score"] = pygame.font.SysFont(None, 18)
             fonts["env_overlay"] = pygame.font.SysFont(None, 36)
             fonts["ui"] = pygame.font.SysFont(None, 24)
+            fonts["index"] = pygame.font.SysFont(
+                None, 12
+            )  # Added small font for indices
         except Exception as e:
             print(f"Warning: SysFont error: {e}. Using default.")
             fonts["env_score"] = pygame.font.Font(None, 18)
             fonts["env_overlay"] = pygame.font.Font(None, 36)
             fonts["ui"] = pygame.font.Font(None, 24)
+            fonts["index"] = pygame.font.Font(None, 12)  # Added small font for indices
         return fonts
 
-    def render(self, envs: List[GameState], num_envs: int, env_config: EnvConfig):
+    def render(
+        self,
+        envs: List[GameState],
+        num_envs: int,
+        env_config: EnvConfig,
+    ):
         current_width, current_height = self.screen.get_size()
         lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
         ga_rect = pygame.Rect(lp_width, 0, current_width - lp_width, current_height)
@@ -38,7 +45,8 @@ class GameAreaRenderer:
             return
 
         render_limit = self.vis_config.NUM_ENVS_TO_RENDER
-        num_to_render = num_envs if render_limit <= 0 else min(num_envs, render_limit)
+        num_to_render = min(num_envs, render_limit) if render_limit > 0 else num_envs
+
         if num_to_render <= 0:
             return
 
@@ -77,7 +85,15 @@ class GameAreaRenderer:
         return cols_env, rows_env, cell_w, cell_h
 
     def _render_env_grid(
-        self, envs, num_to_render, env_config, ga_rect, cols, rows, cell_w, cell_h
+        self,
+        envs,
+        num_to_render,
+        env_config,
+        ga_rect,
+        cols,
+        rows,
+        cell_w,
+        cell_h,
     ):
         env_idx = 0
         for r in range(rows):
@@ -110,7 +126,10 @@ class GameAreaRenderer:
                 env_idx += 1
 
     def _render_single_env(
-        self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
+        self,
+        surf: pygame.Surface,
+        env: GameState,
+        env_config: EnvConfig,
     ):
         cell_w = surf.get_width()
         cell_h = surf.get_height()
@@ -142,7 +161,6 @@ class GameAreaRenderer:
                 grid_rect = pygame.Rect(0, 0, cell_w, grid_area_height)
                 grid_surf = surf.subsurface(grid_rect)
             except ValueError as e:
-                print(f"Warning: Grid subsurface error ({grid_rect}): {e}")
                 pygame.draw.rect(surf, VisConfig.RED, grid_rect, 1)
 
         if shape_area_height > 0 and cell_w > 0:
@@ -151,7 +169,6 @@ class GameAreaRenderer:
                 shape_surf = surf.subsurface(shape_rect)
                 shape_surf.fill((35, 35, 35))
             except ValueError as e:
-                print(f"Warning: Shape subsurface error ({shape_rect}): {e}")
                 pygame.draw.rect(surf, VisConfig.RED, shape_rect, 1)
 
         if grid_surf:
@@ -161,10 +178,12 @@ class GameAreaRenderer:
             self._render_shape_previews(shape_surf, env)
 
         try:
+            score_text = f"GS: {env.game_score} R: {env.score:.1f}"
+            score_color = VisConfig.WHITE
             score_surf = self.fonts["env_score"].render(
-                f"GS: {env.game_score} R: {env.score:.1f}",
+                score_text,
                 True,
-                VisConfig.WHITE,
+                score_color,
                 (0, 0, 0, 180),
             )
             surf.blit(score_surf, (2, 2))
@@ -173,22 +192,34 @@ class GameAreaRenderer:
 
         if env.is_over():
             self._render_overlay_text(surf, "GAME OVER", VisConfig.RED)
-        elif env.is_line_clearing():
-            self._render_overlay_text(surf, "Line Clear!", VisConfig.BLUE)
+        elif env.is_line_clearing() and env.last_line_clear_info:
+            lines, tris, score = env.last_line_clear_info
+            line_str = "Line" if lines == 1 else "Lines"
+            clear_msg = f"{lines} {line_str} Cleared! ({tris} Tris, +{score:.2f} pts)"
+            self._render_overlay_text(surf, clear_msg, BLUE)
 
     def _render_overlay_text(
         self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
     ):
         try:
             overlay_font = self.fonts["env_overlay"]
-            text_surf = overlay_font.render(
-                text,
-                True,
-                VisConfig.WHITE,
-                (color[0] // 2, color[1] // 2, color[2] // 2, 220),
+            # Adjust font size dynamically based on surface width and text length
+            max_width = surf.get_width() * 0.9
+            font_size = 36
+            text_surf = overlay_font.render(text, True, VisConfig.WHITE)
+            while text_surf.get_width() > max_width and font_size > 10:
+                font_size -= 2
+                overlay_font = pygame.font.SysFont(None, font_size)  # Recreate font
+                text_surf = overlay_font.render(text, True, VisConfig.WHITE)
+
+            # Add background color with alpha
+            bg_color_rgba = (color[0] // 2, color[1] // 2, color[2] // 2, 220)
+            text_surf_with_bg = overlay_font.render(
+                text, True, VisConfig.WHITE, bg_color_rgba
             )
-            text_rect = text_surf.get_rect(center=surf.get_rect().center)
-            surf.blit(text_surf, text_rect)
+
+            text_rect = text_surf_with_bg.get_rect(center=surf.get_rect().center)
+            surf.blit(text_surf_with_bg, text_rect)
         except Exception as e:
             print(f"Error rendering overlay text '{text}': {e}")
 
@@ -226,6 +257,8 @@ class GameAreaRenderer:
             )
             highlight_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
 
+            index_font = self.fonts.get("index")  # Get the index font
+
             if hasattr(env, "grid") and hasattr(env.grid, "triangles"):
                 for r in range(env.grid.rows):
                     for c in range(env.grid.cols):
@@ -254,8 +287,25 @@ class GameAreaRenderer:
 
                                 pygame.draw.polygon(surf, color, pts)
                                 pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
+
+                                if (
+                                    index_font and tri_cell_w > 10 and tri_cell_h > 10
+                                ):  # Only render if font exists and cell is large enough
+                                    index_text = f"{r},{c}"
+                                    text_color = BLACK  # Use black for contrast
+                                    text_surf = index_font.render(
+                                        index_text, True, text_color
+                                    )
+                                    # Calculate centroid for text position
+                                    center_x = sum(p[0] for p in pts) / 3
+                                    center_y = sum(p[1] for p in pts) / 3
+                                    text_rect = text_surf.get_rect(
+                                        center=(center_x, center_y)
+                                    )
+                                    surf.blit(text_surf, text_rect)
+
                             except Exception as e_render:
-                                pass
+                                pass  # Ignore errors for single triangles
             else:
                 pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
                 err_txt = self.fonts["ui"].render(
@@ -264,8 +314,6 @@ class GameAreaRenderer:
                 surf.blit(err_txt, err_txt.get_rect(center=surf.get_rect().center))
 
         except Exception as e:
-            print(f"Unexpected Render Error in _render_single_env_grid: {e}")
-            traceback.print_exc()
             pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
 
     def _render_shape_previews(self, surf: pygame.Surface, env: GameState):
@@ -302,13 +350,10 @@ class GameAreaRenderer:
             if preview_rect.right > surf_w - padding:
                 break
 
-            # --- ADDED CHECK: Skip rendering if shape is None ---
             if shape is None:
-                # Optionally draw an empty box or just skip
                 pygame.draw.rect(surf, (50, 50, 50), preview_rect, 1, border_radius=2)
                 current_x += preview_dim + padding
                 continue
-            # --- END ADDED CHECK ---
 
             try:
                 temp_shape_surf = pygame.Surface(
@@ -316,7 +361,7 @@ class GameAreaRenderer:
                 )
                 temp_shape_surf.fill((0, 0, 0, 0))
 
-                min_r, min_c, max_r, max_c = shape.bbox()  # Now safe to call
+                min_r, min_c, max_r, max_c = shape.bbox()
                 shape_h_cells = max(1, max_r - min_r + 1)
                 shape_w_cells_eff = max(1, (max_c - min_c + 1) * 0.75 + 0.25)
 
@@ -330,7 +375,6 @@ class GameAreaRenderer:
                 current_x += preview_dim + padding
 
             except Exception as e:
-                print(f"Error rendering shape preview: {e}")  # Keep error log
                 pygame.draw.rect(surf, VisConfig.RED, preview_rect, 1)
                 current_x += preview_dim + padding
 
@@ -357,7 +401,7 @@ class GameAreaRenderer:
                 )
                 pygame.draw.polygon(surf, shape.color, pts)
             except Exception as e:
-                print(f"Warning: Error rendering shape preview tri ({dr},{dc}): {e}")
+                pass
 
     def _render_too_small_message(self, ga_rect: pygame.Rect, cell_w: int, cell_h: int):
         try:

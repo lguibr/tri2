@@ -1,19 +1,16 @@
-# File: config/__init__.py
 from .core import (
-    VisConfig,
+    VisConfig, 
     EnvConfig,
     RewardConfig,
-    PPOConfig,
+    PPOConfig, 
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
     DemoConfig,
-    # --- NEW IMPORTS ---
     ObsNormConfig,
     TransformerConfig,
-    # --- END NEW IMPORTS ---
 )
 from .general import (
     DEVICE,
@@ -29,7 +26,6 @@ from .general import (
 from .utils import get_config_dict
 from .validation import print_config_info_and_validate
 
-# --- NEW: Import and export constants ---
 from .constants import (
     WHITE,
     BLACK,
@@ -44,8 +40,6 @@ from .constants import (
     LINE_CLEAR_HIGHLIGHT_COLOR,
     GAME_OVER_FLASH_COLOR,
 )
-
-# --- END NEW ---
 
 # Assign RUN_LOG_DIR to TensorBoardConfig after imports
 TensorBoardConfig.LOG_DIR = RUN_LOG_DIR
@@ -63,7 +57,7 @@ __all__ = [
     "TensorBoardConfig",
     "DemoConfig",
     "ObsNormConfig",
-    "TransformerConfig",  # Added new configs
+    "TransformerConfig",
     # General Constants/Paths
     "DEVICE",
     "RANDOM_SEED",
@@ -77,7 +71,6 @@ __all__ = [
     # Utils/Validation
     "get_config_dict",
     "print_config_info_and_validate",
-    # --- NEW: Export constants ---
     "WHITE",
     "BLACK",
     "LIGHTG",
@@ -90,5 +83,4 @@ __all__ = [
     "LINE_CLEAR_FLASH_COLOR",
     "LINE_CLEAR_HIGHLIGHT_COLOR",
     "GAME_OVER_FLASH_COLOR",
-    # --- END NEW ---
 ]

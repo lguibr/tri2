@@ -1,11 +1,7 @@
-# File: environment/shape.py
 import random
 from typing import List, Tuple
 
-# --- MODIFIED: Import from constants ---
 from config.constants import GOOGLE_COLORS
-
-# --- END MODIFIED ---
 
 
 class Shape:

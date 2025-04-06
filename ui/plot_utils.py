@@ -1,4 +1,3 @@
-# File: ui/plot_utils.py
 import pygame
 import numpy as np
 from typing import Dict, Optional, Deque, List, Union, Tuple

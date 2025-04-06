@@ -1,16 +1,15 @@
-# File: ui/renderer.py
 import pygame
-import time
 import traceback
 from typing import List, Dict, Any, Optional, Tuple, Deque
 
-from config import VisConfig, EnvConfig, TensorBoardConfig, DemoConfig
+from config import VisConfig, EnvConfig, DemoConfig
 from environment.game_state import GameState
 from .panels import LeftPanelRenderer, GameAreaRenderer
 from .overlays import OverlayRenderer
 from .tooltips import TooltipRenderer
 from .plotter import Plotter
 from .demo_renderer import DemoRenderer
+from .input_handler import InputHandler
 
 
 class UIRenderer:
@@ -30,13 +29,19 @@ class UIRenderer:
         )
         self.last_plot_update_time = 0
 
+    def set_input_handler(self, input_handler: InputHandler):
+        """Sets the InputHandler reference after it's initialized."""
+        self.left_panel.input_handler = input_handler
+
     def check_hover(self, mouse_pos: Tuple[int, int], app_state: str):
         """Passes hover check to the tooltip renderer."""
         if app_state == "MainMenu":
-            self.tooltips.update_rects_and_texts(
-                self.left_panel.get_stat_rects(), self.left_panel.get_tooltip_texts()
-            )
-            self.tooltips.check_hover(mouse_pos)
+            if self.left_panel.input_handler:
+                self.tooltips.update_rects_and_texts(
+                    self.left_panel.get_stat_rects(),
+                    self.left_panel.get_tooltip_texts(),
+                )
+                self.tooltips.check_hover(mouse_pos)
         else:
             self.tooltips.hovered_stat_key = None
             self.tooltips.stat_rects.clear()
@@ -48,7 +53,7 @@ class UIRenderer:
     def render_all(
         self,
         app_state: str,
-        is_training_running: bool,
+        is_process_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
         envs: List[GameState],
@@ -60,13 +65,13 @@ class UIRenderer:
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         demo_env: Optional[GameState] = None,
-        update_progress: float = 0.0,  # Added update_progress parameter
+        update_progress_details: Dict[str, Any] = {},
     ):
         """Renders UI based on the application state."""
         try:
             if app_state == "MainMenu":
                 self._render_main_menu(
-                    is_training_running=is_training_running,
+                    is_process_running=is_process_running,
                     status=status,
                     stats_summary=stats_summary,
                     envs=envs,
@@ -76,20 +81,26 @@ class UIRenderer:
                     last_cleanup_message_time=last_cleanup_message_time,
                     tensorboard_log_dir=tensorboard_log_dir,
                     plot_data=plot_data,
-                    update_progress=update_progress,  # Pass progress
+                    update_progress_details=update_progress_details,
+                    app_state=app_state,
                 )
             elif app_state == "Playing":
                 if demo_env:
-                    self.demo_renderer.render(demo_env, env_config)
+                    self.demo_renderer.render(demo_env, env_config, is_debug=False)
                 else:
                     print("Error: Attempting to render demo mode without demo_env.")
                     self._render_simple_message("Demo Env Error!", VisConfig.RED)
+            elif app_state == "Debug":
+                if demo_env:
+                    self._render_debug_mode(demo_env, env_config)
+                else:
+                    print("Error: Attempting to render debug mode without demo_env.")
+                    self._render_simple_message("Debug Env Error!", VisConfig.RED)
             elif app_state == "Initializing":
                 self._render_initializing_screen(status)
             elif app_state == "Error":
                 self._render_error_screen(status)
 
-            # Overlays are rendered on top
             if cleanup_confirmation_active and app_state != "Error":
                 self.overlays.render_cleanup_confirmation()
             elif not cleanup_confirmation_active:
@@ -97,7 +108,6 @@ class UIRenderer:
                     cleanup_message, last_cleanup_message_time
                 )
 
-            # Render tooltips last
             if app_state == "MainMenu" and not cleanup_confirmation_active:
                 self.tooltips.render_tooltip()
 
@@ -117,7 +127,7 @@ class UIRenderer:
 
     def _render_main_menu(
         self,
-        is_training_running: bool,
+        is_process_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
         envs: List[GameState],
@@ -127,24 +137,37 @@ class UIRenderer:
         last_cleanup_message_time: float,
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
-        update_progress: float,  # Added update_progress parameter
+        update_progress_details: Dict[str, Any],
+        app_state: str,
     ):
         """Renders the main training dashboard view."""
         self.screen.fill(VisConfig.BLACK)
 
-        # Render Left Panel (Pass update_progress)
+        # Render Left Panel
         self.left_panel.render(
-            is_training_running=is_training_running,
+            is_process_running=is_process_running,
             status=status,
             stats_summary=stats_summary,
             tensorboard_log_dir=tensorboard_log_dir,
             plot_data=plot_data,
-            app_state="MainMenu",
-            update_progress=update_progress,  # Pass progress
+            app_state=app_state,
+            update_progress_details=update_progress_details,
         )
 
         # Render Game Area
         self.game_area.render(envs, num_envs, env_config)
+
+    def _render_debug_mode(self, demo_env: GameState, env_config: EnvConfig):
+        """Renders the UI specifically for Debug mode."""
+        if not self.demo_renderer:
+            print("Error: Cannot render debug mode - demo_renderer missing.")
+            return
+        try:
+            self.demo_renderer.render(demo_env, env_config, is_debug=True)
+        except Exception as render_debug_err:
+            print(f"CRITICAL ERROR in _render_debug_mode: {render_debug_err}")
+            traceback.print_exc()
+            self._render_simple_message("Debug Render Error!", VisConfig.RED)
 
     def _render_initializing_screen(
         self, status_message: str = "Initializing RL Components..."
@@ -158,30 +181,25 @@ class UIRenderer:
             self.screen.fill((40, 0, 0))
             font_title = pygame.font.SysFont(None, 70)
             font_msg = pygame.font.SysFont(None, 30)
-
             title_surf = font_title.render("APPLICATION ERROR", True, VisConfig.RED)
             title_rect = title_surf.get_rect(
                 center=(self.screen.get_width() // 2, self.screen.get_height() // 3)
             )
-
             msg_surf = font_msg.render(
                 f"Status: {status_message}", True, VisConfig.YELLOW
             )
             msg_rect = msg_surf.get_rect(
                 center=(self.screen.get_width() // 2, title_rect.bottom + 30)
             )
-
             exit_surf = font_msg.render(
                 "Press ESC or close window to exit.", True, VisConfig.WHITE
             )
             exit_rect = exit_surf.get_rect(
                 center=(self.screen.get_width() // 2, self.screen.get_height() * 0.8)
             )
-
             self.screen.blit(title_surf, title_rect)
             self.screen.blit(msg_surf, msg_rect)
             self.screen.blit(exit_surf, exit_rect)
-
         except Exception as e:
             print(f"Error rendering error screen: {e}")
             self._render_simple_message(f"Error State: {status_message}", VisConfig.RED)

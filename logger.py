@@ -1,4 +1,3 @@
-# File: logger.py
 import os
 import sys
 from typing import TextIO

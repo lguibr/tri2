@@ -1,6 +1,4 @@
-# File: utils/running_mean_std.py
 import numpy as np
-import torch
 from typing import Tuple, Union, Dict, Any
 
 # Adapted from Stable Baselines3 VecNormalize

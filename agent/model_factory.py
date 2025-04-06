@@ -1,13 +1,7 @@
-# File: agent/model_factory.py
 import torch
 import torch.nn as nn
 
-# --- MODIFIED: Import TransformerConfig ---
-from config import ModelConfig, EnvConfig, PPOConfig, RNNConfig, TransformerConfig
-
-# --- END MODIFIED ---
-from typing import Type
-
+from config import ModelConfig, EnvConfig, RNNConfig, TransformerConfig
 from agent.networks.agent_network import ActorCriticNetwork
 
 
@@ -17,7 +11,7 @@ def create_network(
     model_config: ModelConfig,
     rnn_config: RNNConfig,
     transformer_config: TransformerConfig,
-    device: torch.device,  # --- MODIFIED: Added device ---
+    device: torch.device,
 ) -> nn.Module:
     """Creates the ActorCriticNetwork based on configuration."""
     print(
@@ -29,5 +23,5 @@ def create_network(
         model_config=model_config.Network,
         rnn_config=rnn_config,
         transformer_config=transformer_config,
-        device=device,  # --- MODIFIED: Pass device ---
+        device=device,
     )

@@ -1,4 +1,3 @@
-# File: stats/stats_recorder.py
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -18,7 +17,7 @@ class StatsRecorderBase(ABC):
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
-        lines_cleared: Optional[int] = None,
+        triangles_cleared: Optional[int] = None,
     ):
         """Record stats for a completed episode."""
         pass

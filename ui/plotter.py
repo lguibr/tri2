@@ -1,7 +1,5 @@
-# File: ui/plotter.py
 import pygame
-import numpy as np
-from typing import Dict, Optional, Deque, List, Union, Tuple
+from typing import Dict, Optional, Deque
 from collections import deque
 import matplotlib
 import time
@@ -50,34 +48,21 @@ class Plotter:
             return None
 
         data_keys = [
-            "episode_scores",
             "game_scores",
-            "policy_loss",
-            "value_loss",
-            "entropy",
+            "best_game_score_history",
+            "episode_scores",
             "episode_lengths",
             "sps_values",
-            "best_game_score_history",
             "lr_values",
+            "value_loss",
+            "policy_loss",
+            "entropy",
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
-        # --- REMOVED Plotter Debug Print ---
-        # print(f"[Plotter Debug] Data lengths: ...")
-        # print(f"  PLoss sample: ...")
-        # print(f"  VLoss sample: ...")
-        # print(f"  Entropy sample: ...")
-        # --- END REMOVED ---
-
-        has_meaningful_data = any(
-            len(data_lists.get(key, [])) > 0
-            for key in ["episode_scores", "policy_loss", "value_loss", "entropy"]
-        )
-        # Only prevent plotting if *all* key data series are empty
-        # Allow plotting if at least scores are present, even if losses aren't yet
         has_any_data = any(len(d) > 0 for d in data_lists.values())
         if not has_any_data:
-            return None  # Return None if absolutely no data exists for any plot
+            return None
 
         fig = None
         try:
@@ -105,18 +90,9 @@ class Plotter:
                     f"Latest {min(self.plot_data_window, max_len)} Updates"
                 )
 
-                # Pass the actual data lists to render_single_plot
+                # Row 1
                 render_single_plot(
                     axes_flat[0],
-                    data_lists["episode_scores"],
-                    "RL Score",
-                    self.colors["rl_score"],
-                    self.rolling_window_sizes,
-                    xlabel=plot_window_label,
-                    placeholder_text="RL Score",
-                )
-                render_single_plot(
-                    axes_flat[1],
                     data_lists["game_scores"],
                     "Game Score",
                     self.colors["game_score"],
@@ -125,34 +101,27 @@ class Plotter:
                     placeholder_text="Game Score",
                 )
                 render_single_plot(
+                    axes_flat[1],
+                    data_lists["best_game_score_history"],
+                    "Best Game Score",
+                    self.colors["best_game"],
+                    [],  # No rolling average for best score history
+                    xlabel=plot_window_label,
+                    placeholder_text="Best Game Score",
+                )
+                render_single_plot(
                     axes_flat[2],
-                    data_lists["policy_loss"],
-                    "Policy Loss",
-                    self.colors["policy_loss"],
+                    data_lists["episode_scores"],
+                    "RL Score",
+                    self.colors["rl_score"],
                     self.rolling_window_sizes,
                     xlabel=plot_window_label,
-                    placeholder_text="Policy Loss",
+                    placeholder_text="RL Score",
                 )
+
+                # Row 2
                 render_single_plot(
                     axes_flat[3],
-                    data_lists["value_loss"],
-                    "Value Loss",
-                    self.colors["value_loss"],
-                    self.rolling_window_sizes,
-                    xlabel=plot_window_label,
-                    placeholder_text="Value Loss",
-                )
-                render_single_plot(
-                    axes_flat[4],
-                    data_lists["entropy"],
-                    "Entropy",
-                    self.colors["entropy"],
-                    self.rolling_window_sizes,
-                    xlabel=plot_window_label,
-                    placeholder_text="Entropy",
-                )
-                render_single_plot(
-                    axes_flat[5],
                     data_lists["episode_lengths"],
                     "Ep Length",
                     self.colors["len"],
@@ -161,7 +130,7 @@ class Plotter:
                     placeholder_text="Episode Length",
                 )
                 render_single_plot(
-                    axes_flat[6],
+                    axes_flat[4],
                     data_lists["sps_values"],
                     "Steps/Sec",
                     self.colors["sps"],
@@ -170,23 +139,43 @@ class Plotter:
                     placeholder_text="SPS",
                 )
                 render_single_plot(
-                    axes_flat[7],
-                    data_lists["best_game_score_history"],
-                    "Best Game Score",
-                    self.colors["best_game"],
-                    [],
-                    xlabel=plot_window_label,
-                    placeholder_text="Best Game Score",
-                )
-                render_single_plot(
-                    axes_flat[8],
+                    axes_flat[5],
                     data_lists["lr_values"],
                     "Learning Rate",
                     self.colors["lr"],
-                    [],
+                    [],  # No rolling average for LR
                     xlabel=plot_window_label,
                     y_log_scale=True,
                     placeholder_text="Learning Rate",
+                )
+
+                # Row 3
+                render_single_plot(
+                    axes_flat[6],
+                    data_lists["value_loss"],
+                    "Value Loss",
+                    self.colors["value_loss"],
+                    self.rolling_window_sizes,
+                    xlabel=plot_window_label,
+                    placeholder_text="Value Loss",
+                )
+                render_single_plot(
+                    axes_flat[7],
+                    data_lists["policy_loss"],
+                    "Policy Loss",
+                    self.colors["policy_loss"],
+                    self.rolling_window_sizes,
+                    xlabel=plot_window_label,
+                    placeholder_text="Policy Loss",
+                )
+                render_single_plot(
+                    axes_flat[8],
+                    data_lists["entropy"],
+                    "Entropy",
+                    self.colors["entropy"],
+                    self.rolling_window_sizes,
+                    xlabel=plot_window_label,
+                    placeholder_text="Entropy",
                 )
 
                 for ax in axes_flat:
