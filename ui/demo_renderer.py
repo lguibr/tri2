@@ -13,13 +13,11 @@ from config import (
     LIGHTG,
     GRAY,
     DARK_RED,
-    YELLOW,
-    BLACK,
 )
 from config.constants import LINE_CLEAR_FLASH_COLOR, GAME_OVER_FLASH_COLOR
 
 from environment.game_state import GameState
-from environment.triangle import Triangle
+from environment.triangle import Triangle 
 from .panels.game_area import GameAreaRenderer
 
 
@@ -179,15 +177,18 @@ class DemoRenderer:
                         tri_cell_h,
                         grid_ox,
                         grid_oy,
-                        clipped_game_rect.topleft, 
+                        clipped_game_rect.topleft,
                     )
 
+            # Render overlays like "GAME OVER" or line clear message
             if demo_env.is_over():
                 self._render_demo_overlay_text(game_surf, "GAME OVER", RED)
-            elif demo_env.is_line_clearing():
-                tris = demo_env.last_triangles_cleared
-                score = demo_env.last_line_clear_score
-                clear_msg = f"{tris} Triangles Cleared! (+{score:.2f} pts)"
+            elif demo_env.is_line_clearing() and demo_env.last_line_clear_info:
+                lines, tris, score = demo_env.last_line_clear_info
+                line_str = "Line" if lines == 1 else "Lines"
+                clear_msg = (
+                    f"{lines} {line_str} Cleared! ({tris} Tris, +{score:.2f} pts)"
+                )
                 self._render_demo_overlay_text(game_surf, clear_msg, BLUE)
 
         except ValueError as e:
@@ -226,7 +227,6 @@ class DemoRenderer:
 
         try:
             preview_area_surf = self.screen.subsurface(clipped_preview_area_rect)
-            # Store the calculated rects relative to the screen
             preview_rects = self._render_demo_shape_previews(
                 preview_area_surf, demo_env, preview_area_rect.topleft
             )
@@ -236,8 +236,7 @@ class DemoRenderer:
         except Exception as e:
             print(f"Error rendering demo shape previews: {e}")
             traceback.print_exc()
-        return preview_rects  # Return the calculated rects
-
+        return preview_rects
 
     def _render_hud(
         self, demo_env: GameState, screen_width: int, hud_y: int, is_debug: bool
@@ -278,15 +277,13 @@ class DemoRenderer:
     ):
         """Renders centered overlay text (e.g., GAME OVER)."""
         try:
-            # Adjust font size dynamically based on surface width and text length
             max_width = surf.get_width() * 0.9
             font_size = 36
-            overlay_font = self.overlay_font  # Start with default
-            # Attempt to recreate font with adjusted size
+            overlay_font = self.overlay_font
             try:
                 overlay_font = pygame.font.SysFont(None, font_size)
             except Exception:
-                overlay_font = pygame.font.Font(None, font_size)  # Fallback
+                overlay_font = pygame.font.Font(None, font_size)
 
             text_surf = overlay_font.render(text, True, WHITE)
             while text_surf.get_width() > max_width and font_size > 10:
@@ -297,7 +294,6 @@ class DemoRenderer:
                     overlay_font = pygame.font.Font(None, font_size)
                 text_surf = overlay_font.render(text, True, WHITE)
 
-            # Add background color with alpha
             bg_color_rgba = (color[0] // 2, color[1] // 2, color[2] // 2, 220)
             text_surf_with_bg = overlay_font.render(text, True, WHITE, bg_color_rgba)
 
@@ -358,9 +354,7 @@ class DemoRenderer:
         cell_h: int,
         grid_offset_x: float,
         grid_offset_y: float,
-        game_area_offset: Tuple[
-            int, int
-        ],  # Top-left of the game area surface relative to screen
+        game_area_offset: Tuple[int, int],
     ):
         """Renders the shape being dragged, either snapped or following the mouse."""
         if cell_w <= 0 or cell_h <= 0:
@@ -381,66 +375,52 @@ class DemoRenderer:
                 preview_alpha,
             )
         else:
-            # Use a different color/alpha if not snapped/invalid
             preview_color_rgba = (50, 50, 50, 100)
 
         temp_surface = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
         temp_surface.fill((0, 0, 0, 0))
 
-        # Determine the reference point (top-left of where the shape's (0,0) relative coord would be)
         ref_x, ref_y = 0, 0
         if snapped_pos:
-            # Render at snapped grid position
             snap_r, snap_c = snapped_pos
             ref_x = grid_offset_x + snap_c * (cell_w * 0.75)
             ref_y = grid_offset_y + snap_r * cell_h
         else:
-            # Render centered on mouse cursor
             mouse_x, mouse_y = pygame.mouse.get_pos()
-            # Adjust mouse pos relative to the game_surf
             mouse_x -= game_area_offset[0]
             mouse_y -= game_area_offset[1]
 
-            # Calculate shape dimensions in pixels to center it
             min_r, min_c, max_r, max_c = dragged_shape.bbox()
             shape_h_cells = max_r - min_r + 1
             shape_w_cells_eff = (max_c - min_c + 1) * 0.75 + 0.25
             shape_pixel_w = shape_w_cells_eff * cell_w
             shape_pixel_h = shape_h_cells * cell_h
 
-            # Offset mouse position to center the shape bbox
-            # The reference point needs to be adjusted based on the shape's min_r/min_c
             ref_x = mouse_x - (shape_pixel_w / 2) - (min_c * cell_w * 0.75)
             ref_y = mouse_y - (shape_pixel_h / 2) - (min_r * cell_h)
 
-        # Draw the triangles relative to the reference point
         for dr, dc, is_up in dragged_shape.triangles:
-            # Calculate triangle top-left corner based on its relative position
             tri_x = ref_x + dc * (cell_w * 0.75)
             tri_y = ref_y + dr * cell_h
 
-            # Use Triangle class logic to get points relative to this corner
-            temp_tri = Triangle(0, 0, is_up)  # Dummy triangle for point calculation
+            temp_tri = Triangle(0, 0, is_up)
             try:
                 points = temp_tri.get_points(ox=tri_x, oy=tri_y, cw=cell_w, ch=cell_h)
                 pygame.draw.polygon(temp_surface, preview_color_rgba, points)
-                # Optionally draw border
-                # pygame.draw.polygon(temp_surface, (200, 200, 200, 180), points, 1)
             except Exception:
-                pass  # Ignore drawing errors for single triangles
+                pass
 
         surf.blit(temp_surface, (0, 0))
-
 
     def _render_demo_shape_previews(
         self, surf: pygame.Surface, env: GameState, area_topleft: Tuple[int, int]
     ) -> Dict[int, pygame.Rect]:
         """Renders the small previews of available shapes. Returns dict of screen rects."""
-        calculated_rects: Dict[int, pygame.Rect] = {}  # Store rects relative to screen
+        calculated_rects: Dict[int, pygame.Rect] = {}
         surf.fill((25, 25, 25))
         all_slots = env.shapes
-        selected_idx = env.demo_selected_shape_idx  # Highlight based on selection
-        dragged_idx = env.demo_dragged_shape_idx  # Could also highlight dragged
+        selected_idx = env.demo_selected_shape_idx
+        dragged_idx = env.demo_dragged_shape_idx
 
         num_slots = env.env_config.NUM_SHAPE_SLOTS
         surf_w, surf_h = surf.get_size()
@@ -455,13 +435,11 @@ class DemoRenderer:
 
         for i in range(num_slots):
             shape_in_slot = all_slots[i] if i < len(all_slots) else None
-            # Rect relative to the preview surface
             preview_rect_local = pygame.Rect(
                 preview_padding, current_preview_y, preview_w, preview_h
             )
-            # Rect relative to the main screen
             preview_rect_screen = preview_rect_local.move(area_topleft)
-            calculated_rects[i] = preview_rect_screen  # Store screen rect
+            calculated_rects[i] = preview_rect_screen
 
             clipped_preview_rect = preview_rect_local.clip(surf.get_rect())
             if clipped_preview_rect.width <= 0 or clipped_preview_rect.height <= 0:
@@ -471,12 +449,11 @@ class DemoRenderer:
             bg_color = (40, 40, 40)
             border_color = GRAY
             border_width = 1
-            # Highlight if selected OR dragged
             if i == selected_idx and shape_in_slot is not None:
                 border_color = self.demo_config.SELECTED_SHAPE_HIGHLIGHT_COLOR
-                border_width = 3  # Make highlight thicker
-            elif i == dragged_idx:  # Optional: different highlight for dragged
-                border_color = (100, 100, 255)  # Lighter blue
+                border_width = 3
+            elif i == dragged_idx:
+                border_color = (100, 100, 255)
                 border_width = 2
 
             pygame.draw.rect(surf, bg_color, clipped_preview_rect, border_radius=3)
@@ -491,7 +468,6 @@ class DemoRenderer:
 
             current_preview_y += preview_h + preview_padding
         return calculated_rects
-
 
     def _render_single_shape_in_preview_box(
         self,
@@ -512,9 +488,8 @@ class DemoRenderer:
             if shape_render_area_rect.width <= 0 or shape_render_area_rect.height <= 0:
                 return
 
-            # Render onto a temporary surface relative to the preview_rect
             temp_surf = pygame.Surface(shape_render_area_rect.size, pygame.SRCALPHA)
-            temp_surf.fill((0, 0, 0, 0))  # Transparent background
+            temp_surf.fill((0, 0, 0, 0))
 
             min_r, min_c, max_r, max_c = shape_obj.bbox()
             shape_h_cells = max(1, max_r - min_r + 1)
@@ -523,12 +498,10 @@ class DemoRenderer:
             scale_w = shape_render_area_rect.width / shape_w_cells_eff
             cell_size = max(1, min(scale_h, scale_w))
 
-            # Render shape centered on the temporary surface
             self.game_area_renderer._render_single_shape(
                 temp_surf, shape_obj, int(cell_size)
             )
 
-            # Blit the temporary surface onto the main preview surface
             surf.blit(
                 temp_surf, shape_render_area_rect.move(preview_rect.topleft).topleft
             )
