@@ -48,7 +48,7 @@ class UIRenderer:
     def render_all(
         self,
         app_state: str,
-        is_running: bool,  # Renamed from is_training
+        is_training_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
         envs: List[GameState],
@@ -60,21 +60,23 @@ class UIRenderer:
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         demo_env: Optional[GameState] = None,
+        update_progress: float = 0.0,  # Added update_progress parameter
     ):
         """Renders UI based on the application state."""
         try:
             if app_state == "MainMenu":
                 self._render_main_menu(
-                    is_running,
-                    status,
-                    stats_summary,
-                    envs,
-                    num_envs,
-                    env_config,
-                    cleanup_message,
-                    last_cleanup_message_time,
-                    tensorboard_log_dir,
-                    plot_data,
+                    is_training_running=is_training_running,
+                    status=status,
+                    stats_summary=stats_summary,
+                    envs=envs,
+                    num_envs=num_envs,
+                    env_config=env_config,
+                    cleanup_message=cleanup_message,
+                    last_cleanup_message_time=last_cleanup_message_time,
+                    tensorboard_log_dir=tensorboard_log_dir,
+                    plot_data=plot_data,
+                    update_progress=update_progress,  # Pass progress
                 )
             elif app_state == "Playing":
                 if demo_env:
@@ -87,6 +89,7 @@ class UIRenderer:
             elif app_state == "Error":
                 self._render_error_screen(status)
 
+            # Overlays are rendered on top
             if cleanup_confirmation_active and app_state != "Error":
                 self.overlays.render_cleanup_confirmation()
             elif not cleanup_confirmation_active:
@@ -94,6 +97,7 @@ class UIRenderer:
                     cleanup_message, last_cleanup_message_time
                 )
 
+            # Render tooltips last
             if app_state == "MainMenu" and not cleanup_confirmation_active:
                 self.tooltips.render_tooltip()
 
@@ -113,7 +117,7 @@ class UIRenderer:
 
     def _render_main_menu(
         self,
-        is_running: bool,
+        is_training_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
         envs: List[GameState],
@@ -123,18 +127,23 @@ class UIRenderer:
         last_cleanup_message_time: float,
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
+        update_progress: float,  # Added update_progress parameter
     ):
         """Renders the main training dashboard view."""
         self.screen.fill(VisConfig.BLACK)
 
+        # Render Left Panel (Pass update_progress)
         self.left_panel.render(
-            is_running,
-            status,
-            stats_summary,
-            tensorboard_log_dir,
-            plot_data,
+            is_training_running=is_training_running,
+            status=status,
+            stats_summary=stats_summary,
+            tensorboard_log_dir=tensorboard_log_dir,
+            plot_data=plot_data,
             app_state="MainMenu",
+            update_progress=update_progress,  # Pass progress
         )
+
+        # Render Game Area
         self.game_area.render(envs, num_envs, env_config)
 
     def _render_initializing_screen(

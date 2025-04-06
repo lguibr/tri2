@@ -1,4 +1,3 @@
-# File: config/validation.py
 import os, torch
 from .core import (
     EnvConfig,

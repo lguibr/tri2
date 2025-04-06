@@ -15,18 +15,25 @@ def get_device() -> torch.device:
         print("Forcing CPU device based on environment variable.")
         return torch.device("cpu")
 
+    # Check MPS first (for Macs) - This will be false on your PC
     if torch.backends.mps.is_available():
         device_str = "mps"
+    # Check CUDA next (for NVIDIA GPUs) - This SHOULD become true
     elif torch.cuda.is_available():
         device_str = "cuda"
+    # Fallback to CPU
     else:
         device_str = "cpu"
 
     print(f"Using device: {device_str.upper()}")
     if device_str == "cuda":
+        # This line should execute once fixed
         print(f"CUDA Device Name: {torch.cuda.get_device_name(0)}")
     elif device_str == "mps":
-        print("MPS device found on MacOS.")
+        print("MPS device found on MacOS.") # Won't execute on PC
+    else:
+        print("No CUDA or MPS device found, falling back to CPU.") # This is what's happening now
+
     return torch.device(device_str)
 
 
@@ -78,7 +85,7 @@ def save_object(obj: Any, filepath: str):
             cloudpickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
     except Exception as e:
         print(f"Error saving object to {filepath}: {e}")
-        raise e  # Re-raise after logging
+        raise e  # Re-raise after loggingcpu
 
 
 def load_object(filepath: str) -> Any:

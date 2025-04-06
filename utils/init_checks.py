@@ -1,9 +1,8 @@
 # File: utils/init_checks.py
-# --- Pre-Run Sanity Checks ---
 import sys
 import traceback
 import numpy as np
-from config import EnvConfig  # Import config class
+from config import EnvConfig
 from environment.game_state import GameState
 
 
@@ -12,7 +11,7 @@ def run_pre_checks() -> bool:
     print("--- Pre-Run Checks ---")
     try:
         print("Checking GameState and Configuration Compatibility...")
-        env_config_instance = EnvConfig()  # Instantiate
+        env_config_instance = EnvConfig()
 
         gs_test = GameState()
         gs_test.reset()
@@ -24,13 +23,11 @@ def run_pre_checks() -> bool:
             )
         print("GameState state type check PASSED (returned dict).")
 
-        # --- MODIFIED: Check grid shape (2 channels) ---
+        # Check grid shape
         if "grid" not in s_test_dict:
             raise KeyError("State dictionary missing 'grid' key.")
         grid_state = s_test_dict["grid"]
-        expected_grid_shape = (
-            env_config_instance.GRID_STATE_SHAPE
-        )  # Uses property (2, H, W)
+        expected_grid_shape = env_config_instance.GRID_STATE_SHAPE
         if not isinstance(grid_state, np.ndarray):
             raise TypeError(
                 f"State 'grid' component should be numpy array, but got {type(grid_state)}"
@@ -40,9 +37,8 @@ def run_pre_checks() -> bool:
                 f"State 'grid' shape mismatch! GameState:{grid_state.shape}, EnvConfig:{expected_grid_shape}"
             )
         print(f"GameState 'grid' state shape check PASSED (Shape: {grid_state.shape}).")
-        # --- END MODIFIED ---
 
-        # Check 'shapes' component (unchanged)
+        # Check 'shapes' component (features)
         if "shapes" not in s_test_dict:
             raise KeyError("State dictionary missing 'shapes' key.")
         shape_state = s_test_dict["shapes"]
@@ -56,11 +52,59 @@ def run_pre_checks() -> bool:
             )
         if shape_state.shape != expected_shape_shape:
             raise ValueError(
-                f"State 'shapes' shape mismatch! GameState:{shape_state.shape}, EnvConfig:{expected_shape_shape}"
+                f"State 'shapes' feature shape mismatch! GameState:{shape_state.shape}, EnvConfig:{expected_shape_shape}"
             )
         print(
-            f"GameState 'shapes' state shape check PASSED (Shape: {shape_state.shape})."
+            f"GameState 'shapes' feature shape check PASSED (Shape: {shape_state.shape})."
         )
+
+        # Check 'shape_availability' component
+        if "shape_availability" not in s_test_dict:
+            raise KeyError("State dictionary missing 'shape_availability' key.")
+        availability_state = s_test_dict["shape_availability"]
+        expected_availability_shape = (env_config_instance.SHAPE_AVAILABILITY_DIM,)
+        if not isinstance(availability_state, np.ndarray):
+            raise TypeError(
+                f"State 'shape_availability' component should be numpy array, but got {type(availability_state)}"
+            )
+        if availability_state.shape != expected_availability_shape:
+            raise ValueError(
+                f"State 'shape_availability' shape mismatch! GameState:{availability_state.shape}, EnvConfig:{expected_availability_shape}"
+            )
+        print(
+            f"GameState 'shape_availability' state shape check PASSED (Shape: {availability_state.shape})."
+        )
+
+        # Check 'explicit_features' component
+        if "explicit_features" not in s_test_dict:
+            raise KeyError("State dictionary missing 'explicit_features' key.")
+        explicit_features_state = s_test_dict["explicit_features"]
+        expected_explicit_features_shape = (env_config_instance.EXPLICIT_FEATURES_DIM,)
+        if not isinstance(explicit_features_state, np.ndarray):
+            raise TypeError(
+                f"State 'explicit_features' component should be numpy array, but got {type(explicit_features_state)}"
+            )
+        if explicit_features_state.shape != expected_explicit_features_shape:
+            raise ValueError(
+                f"State 'explicit_features' shape mismatch! GameState:{explicit_features_state.shape}, EnvConfig:{expected_explicit_features_shape}"
+            )
+        print(
+            f"GameState 'explicit_features' state shape check PASSED (Shape: {explicit_features_state.shape})."
+        )
+
+        # Check PBRS calculation (if enabled)
+        if env_config_instance.CALCULATE_POTENTIAL_OUTCOMES_IN_STATE:
+            print("Potential outcome calculation is ENABLED in EnvConfig.")
+        else:
+            print("Potential outcome calculation is DISABLED in EnvConfig.")
+
+        if hasattr(gs_test, "_calculate_potential"):
+            _ = gs_test._calculate_potential()
+            print("GameState PBRS potential calculation check PASSED.")
+        else:
+            raise AttributeError(
+                "GameState missing '_calculate_potential' method for PBRS."
+            )
 
         _ = gs_test.valid_actions()
         print("GameState valid_actions check PASSED.")
@@ -83,4 +127,4 @@ def run_pre_checks() -> bool:
     except Exception as e:
         print(f"FATAL ERROR during GameState pre-check: {e}")
         traceback.print_exc()
-    sys.exit(1)
+    sys.exit(1)  # Exit if checks fail

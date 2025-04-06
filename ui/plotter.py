@@ -25,12 +25,9 @@ class Plotter:
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        self.plot_update_interval: float = 0.5
+        self.plot_update_interval: float = 1.0
         self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
-        self.default_line_width = 1.0
-        self.avg_line_width = 1.5
-        self.avg_line_alpha = 0.8
 
         self.colors = {
             "rl_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
@@ -42,15 +39,8 @@ class Plotter:
             "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
             "best_game": normalize_color_for_matplotlib((255, 165, 0)),
             "lr": normalize_color_for_matplotlib((255, 0, 255)),
-            "avg_primary": normalize_color_for_matplotlib(VisConfig.YELLOW),
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
-        self.avg_line_colors_secondary = [
-            normalize_color_for_matplotlib((0, 255, 255)),
-            normalize_color_for_matplotlib((255, 165, 0)),
-            normalize_color_for_matplotlib((0, 255, 0)),
-            normalize_color_for_matplotlib((255, 0, 255)),
-        ]
 
     def create_plot_surface(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
@@ -72,14 +62,22 @@ class Plotter:
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
-        # --- DEBUG LOGGING ---
-        # print(f"[Plotter Debug] Data lengths: "
-        #       f"RLScore={len(data_lists['episode_scores'])}, GameScore={len(data_lists['game_scores'])}, EpLen={len(data_lists['episode_lengths'])}, "
-        #       f"PLoss={len(data_lists['policy_loss'])}, VLoss={len(data_lists['value_loss'])}, Ent={len(data_lists['entropy'])}")
-        # --- END DEBUG LOGGING ---
+        # --- REMOVED Plotter Debug Print ---
+        # print(f"[Plotter Debug] Data lengths: ...")
+        # print(f"  PLoss sample: ...")
+        # print(f"  VLoss sample: ...")
+        # print(f"  Entropy sample: ...")
+        # --- END REMOVED ---
 
-        if not any(len(d) > 0 for d in data_lists.values()):
-            return None
+        has_meaningful_data = any(
+            len(data_lists.get(key, [])) > 0
+            for key in ["episode_scores", "policy_loss", "value_loss", "entropy"]
+        )
+        # Only prevent plotting if *all* key data series are empty
+        # Allow plotting if at least scores are present, even if losses aren't yet
+        has_any_data = any(len(d) > 0 for d in data_lists.values())
+        if not has_any_data:
+            return None  # Return None if absolutely no data exists for any plot
 
         fig = None
         try:
@@ -93,12 +91,12 @@ class Plotter:
                     3, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
                 fig.subplots_adjust(
-                    hspace=0.55,
-                    wspace=0.35,
-                    left=0.10,
+                    hspace=0.30,
+                    wspace=0.15,
+                    left=0.08,
                     right=0.98,
-                    bottom=0.12,
-                    top=0.95,
+                    bottom=0.10,
+                    top=0.92,
                 )
                 axes_flat = axes.flatten()
 
@@ -107,132 +105,88 @@ class Plotter:
                     f"Latest {min(self.plot_data_window, max_len)} Updates"
                 )
 
+                # Pass the actual data lists to render_single_plot
                 render_single_plot(
                     axes_flat[0],
                     data_lists["episode_scores"],
                     "RL Score",
                     self.colors["rl_score"],
-                    self.colors["avg_primary"],
-                    self.avg_line_colors_secondary,
                     self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     placeholder_text="RL Score",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
                 render_single_plot(
                     axes_flat[1],
                     data_lists["game_scores"],
                     "Game Score",
                     self.colors["game_score"],
-                    self.colors["avg_primary"],
-                    self.avg_line_colors_secondary,
                     self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     placeholder_text="Game Score",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
                 render_single_plot(
                     axes_flat[2],
                     data_lists["policy_loss"],
                     "Policy Loss",
                     self.colors["policy_loss"],
-                    self.colors["avg_primary"],
-                    self.avg_line_colors_secondary,
                     self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     placeholder_text="Policy Loss",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
                 render_single_plot(
                     axes_flat[3],
                     data_lists["value_loss"],
                     "Value Loss",
                     self.colors["value_loss"],
-                    self.colors["avg_primary"],
-                    self.avg_line_colors_secondary,
                     self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     placeholder_text="Value Loss",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
                 render_single_plot(
                     axes_flat[4],
                     data_lists["entropy"],
                     "Entropy",
                     self.colors["entropy"],
-                    self.colors["avg_primary"],
-                    self.avg_line_colors_secondary,
                     self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     placeholder_text="Entropy",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
                 render_single_plot(
                     axes_flat[5],
                     data_lists["episode_lengths"],
                     "Ep Length",
                     self.colors["len"],
-                    self.colors["avg_primary"],
-                    self.avg_line_colors_secondary,
                     self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     placeholder_text="Episode Length",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
                 render_single_plot(
                     axes_flat[6],
                     data_lists["sps_values"],
                     "Steps/Sec",
                     self.colors["sps"],
-                    self.colors["avg_primary"],
-                    self.avg_line_colors_secondary,
                     self.rolling_window_sizes,
                     xlabel=plot_window_label,
                     placeholder_text="SPS",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
                 render_single_plot(
                     axes_flat[7],
                     data_lists["best_game_score_history"],
                     "Best Game Score",
                     self.colors["best_game"],
-                    None,
-                    [],
                     [],
                     xlabel=plot_window_label,
                     placeholder_text="Best Game Score",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
                 render_single_plot(
                     axes_flat[8],
                     data_lists["lr_values"],
                     "Learning Rate",
                     self.colors["lr"],
-                    None,
-                    [],
                     [],
                     xlabel=plot_window_label,
                     y_log_scale=True,
                     placeholder_text="Learning Rate",
-                    default_line_width=self.default_line_width,
-                    avg_line_width=self.avg_line_width,
-                    avg_line_alpha=self.avg_line_alpha,
                 )
 
                 for ax in axes_flat:
@@ -268,7 +222,6 @@ class Plotter:
     def get_cached_or_updated_plot(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-        """Returns the cached plot surface or generates a new one if needed."""
         current_time = time.time()
         has_data = any(d for d in plot_data.values())
         needs_update_time = (
@@ -282,11 +235,17 @@ class Plotter:
         can_create_plot = target_width > 50 and target_height > 50
 
         if can_create_plot and (needs_update_time or size_changed or first_plot_needed):
-            new_plot_surface = self.create_plot_surface(
-                plot_data, target_width, target_height
-            )
-            if new_plot_surface:
-                self.plot_surface = new_plot_surface
+            if has_data:
+                new_plot_surface = self.create_plot_surface(
+                    plot_data, target_width, target_height
+                )
+                # Only update cache if plot creation was successful
+                if new_plot_surface:
+                    self.plot_surface = new_plot_surface
+                # If creation failed (e.g., due to error), keep the old cached plot (if any)
+                # else: self.plot_surface = None # Optionally clear cache on failure
                 self.last_plot_update_time = current_time
+            elif not has_data:  # No data at all, clear cache
+                self.plot_surface = None
 
         return self.plot_surface

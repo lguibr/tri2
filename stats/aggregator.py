@@ -1,4 +1,6 @@
 # File: stats/aggregator.py
+# No changes needed here, the debug prints were already removed in the previous step.
+# Keep the file as it was after the previous modification.
 import time
 from collections import deque
 from typing import Deque, Dict, Any, Optional, List
@@ -87,10 +89,6 @@ class StatsAggregator:
         )
         update_info = {"new_best_rl": False, "new_best_game": False}
 
-        # --- DEBUG LOGGING ---
-        # print(f"[StatsAggregator Debug] Appending Ep {episode_num}: RLScore={episode_score:.2f}, Len={episode_length}, GameScore={game_score}")
-        # --- END DEBUG LOGGING ---
-
         self.episode_scores.append(episode_score)
         self.episode_lengths.append(episode_length)
         if game_score is not None:
@@ -128,28 +126,39 @@ class StatsAggregator:
         update_info = {"new_best_loss": False}
 
         if "policy_loss" in step_data and step_data["policy_loss"] is not None:
-            # --- DEBUG LOGGING ---
-            # print(f"[StatsAggregator Debug] Appending Policy Loss: {step_data['policy_loss']:.4f} at Step {g_step}")
-            # --- END DEBUG LOGGING ---
-            self.policy_losses.append(step_data["policy_loss"])
+            loss_val = step_data["policy_loss"]
+            if np.isfinite(loss_val):
+                self.policy_losses.append(loss_val)
+                # print(f"[Aggregator Debug] Appended Policy Loss...") # Removed
+            else:
+                print(
+                    f"[Aggregator Warning] Received non-finite Policy Loss: {loss_val}"
+                )
 
         if "value_loss" in step_data and step_data["value_loss"] is not None:
             current_value_loss = step_data["value_loss"]
-            # --- DEBUG LOGGING ---
-            # print(f"[StatsAggregator Debug] Appending Value Loss: {current_value_loss:.4f} at Step {g_step}")
-            # --- END DEBUG LOGGING ---
-            self.value_losses.append(current_value_loss)
-            if current_value_loss < self.best_value_loss and g_step > 0:
-                self.previous_best_value_loss = self.best_value_loss
-                self.best_value_loss = current_value_loss
-                self.best_value_loss_step = g_step
-                update_info["new_best_loss"] = True
+            if np.isfinite(current_value_loss):
+                self.value_losses.append(current_value_loss)
+                # print(f"[Aggregator Debug] Appended Value Loss...") # Removed
+                if current_value_loss < self.best_value_loss and g_step > 0:
+                    self.previous_best_value_loss = self.best_value_loss
+                    self.best_value_loss = current_value_loss
+                    self.best_value_loss_step = g_step
+                    update_info["new_best_loss"] = True
+            else:
+                print(
+                    f"[Aggregator Warning] Received non-finite Value Loss: {current_value_loss}"
+                )
 
         if "entropy" in step_data and step_data["entropy"] is not None:
-            # --- DEBUG LOGGING ---
-            # print(f"[StatsAggregator Debug] Appending Entropy: {step_data['entropy']:.4f} at Step {g_step}")
-            # --- END DEBUG LOGGING ---
-            self.entropies.append(step_data["entropy"])
+            entropy_val = step_data["entropy"]
+            if np.isfinite(entropy_val):
+                self.entropies.append(entropy_val)
+                # print(f"[Aggregator Debug] Appended Entropy...") # Removed
+            else:
+                print(
+                    f"[Aggregator Warning] Received non-finite Entropy: {entropy_val}"
+                )
 
         if "grad_norm" in step_data and step_data["grad_norm"] is not None:
             self.grad_norms.append(step_data["grad_norm"])
@@ -184,7 +193,8 @@ class StatsAggregator:
 
         def safe_mean(q: Deque, default=0.0) -> float:
             window_data = list(q)[-summary_window:]
-            return float(np.mean(window_data)) if window_data else default
+            finite_data = [x for x in window_data if np.isfinite(x)]
+            return float(np.mean(finite_data)) if finite_data else default
 
         summary = {
             "avg_score_window": safe_mean(self.episode_scores),
@@ -213,17 +223,14 @@ class StatsAggregator:
             "previous_best_loss": self.previous_best_value_loss,
             "best_loss_step": self.best_value_loss_step,
             "num_ep_scores": len(self.episode_scores),
-            "num_losses": len(self.value_losses),
+            "num_losses": len(
+                self.value_losses
+            ),  # Keep track of how many loss updates happened
             "summary_avg_window_size": summary_window,
         }
         return summary
 
     def get_plot_data(self) -> Dict[str, Deque]:
-        # --- DEBUG LOGGING ---
-        # print(f"[StatsAggregator Debug] get_plot_data lengths: "
-        #       f"RLScore={len(self.episode_scores)}, GameScore={len(self.game_scores)}, EpLen={len(self.episode_lengths)}, "
-        #       f"PLoss={len(self.policy_losses)}, VLoss={len(self.value_losses)}, Ent={len(self.entropies)}")
-        # --- END DEBUG LOGGING ---
         return {
             "episode_scores": self.episode_scores.copy(),
             "episode_lengths": self.episode_lengths.copy(),

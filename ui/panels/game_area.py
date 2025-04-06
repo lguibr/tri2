@@ -117,17 +117,16 @@ class GameAreaRenderer:
         if cell_w <= 0 or cell_h <= 0:
             return
 
-        # --- Background Color Logic (Order Matters!) ---
-        bg_color = VisConfig.GRAY  # Default
-        if env.is_line_clearing():  # Line clear flash has highest priority
+        bg_color = VisConfig.GRAY
+        if env.is_line_clearing():
             bg_color = VisConfig.LINE_CLEAR_FLASH_COLOR
-        elif env.is_game_over_flashing():  # Game over flash is next
+        elif env.is_game_over_flashing():
             bg_color = VisConfig.GAME_OVER_FLASH_COLOR
-        elif env.is_blinking():  # Generic blink (currently unused but kept)
+        elif env.is_blinking():
             bg_color = VisConfig.YELLOW
-        elif env.is_over():  # Static game over (no flash)
+        elif env.is_over():
             bg_color = VisConfig.DARK_RED
-        elif env.is_frozen():  # Frozen Blue (only if not game over/line clearing)
+        elif env.is_frozen():
             bg_color = (30, 30, 100)
         surf.fill(bg_color)
 
@@ -172,15 +171,10 @@ class GameAreaRenderer:
         except Exception as e:
             print(f"Error rendering score: {e}")
 
-        # --- MODIFIED: Specific Overlay Logic ---
         if env.is_over():
-            # Always show GAME OVER text if the game is over
             self._render_overlay_text(surf, "GAME OVER", VisConfig.RED)
         elif env.is_line_clearing():
-            # Show Line Clear! text only during the line clear flash
             self._render_overlay_text(surf, "Line Clear!", VisConfig.BLUE)
-        # No generic "Frozen" message anymore
-        # --- END MODIFIED ---
 
     def _render_overlay_text(
         self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
@@ -308,13 +302,21 @@ class GameAreaRenderer:
             if preview_rect.right > surf_w - padding:
                 break
 
+            # --- ADDED CHECK: Skip rendering if shape is None ---
+            if shape is None:
+                # Optionally draw an empty box or just skip
+                pygame.draw.rect(surf, (50, 50, 50), preview_rect, 1, border_radius=2)
+                current_x += preview_dim + padding
+                continue
+            # --- END ADDED CHECK ---
+
             try:
                 temp_shape_surf = pygame.Surface(
                     (preview_dim, preview_dim), pygame.SRCALPHA
                 )
                 temp_shape_surf.fill((0, 0, 0, 0))
 
-                min_r, min_c, max_r, max_c = shape.bbox()
+                min_r, min_c, max_r, max_c = shape.bbox()  # Now safe to call
                 shape_h_cells = max(1, max_r - min_r + 1)
                 shape_w_cells_eff = max(1, (max_c - min_c + 1) * 0.75 + 0.25)
 
@@ -328,7 +330,7 @@ class GameAreaRenderer:
                 current_x += preview_dim + padding
 
             except Exception as e:
-                print(f"Error rendering shape preview: {e}")
+                print(f"Error rendering shape preview: {e}")  # Keep error log
                 pygame.draw.rect(surf, VisConfig.RED, preview_rect, 1)
                 current_x += preview_dim + padding
 

@@ -8,7 +8,7 @@ from config import (
     VisConfig,
     StatsConfig,
     PPOConfig,
-    RNNConfig,  # Added
+    RNNConfig,
     DEVICE,
     TensorBoardConfig,
 )
@@ -17,31 +17,24 @@ from ui.plotter import Plotter
 
 from .left_panel_components import (
     ButtonStatusRenderer,
-    NotificationRenderer,
     InfoTextRenderer,
     TBStatusRenderer,
     PlotAreaRenderer,
 )
 
 TOOLTIP_TEXTS = {
-    "Status": "Current state: Ready, Training, Confirm Cleanup, Cleaning, or Error.",
-    "Global Steps": "Total environment steps taken / Total planned steps.",
-    "Total Episodes": "Total completed episodes across all environments.",
-    "Steps/Sec (Current)": "Current avg Steps/Sec (Collection + Update). See plot for history.",
-    "Learning Rate": "Current learning rate. See plot for history/schedule.",
-    "Run Button": "Click to Start/Stop training run (or press 'P').",  # Renamed
+    "Status": "Current application state: Ready, Collecting Experience, Updating Agent, Confirm Cleanup, Cleaning, or Error.",
+    "Run Button": "Click to Start/Stop training run (or press 'P').",
     "Cleanup Button": "Click to DELETE agent ckpt for CURRENT run ONLY, then re-init.",
     "Play Demo Button": "Click to enter interactive play mode.",
     "Device": f"Computation device detected ({DEVICE.type.upper()}).",
-    "Network": f"Actor-Critic (CNN+MLP Fusion -> Optional LSTM:{RNNConfig.USE_RNN})",  # Updated
+    "Network": f"Actor-Critic (CNN+MLP Fusion -> Optional LSTM:{RNNConfig.USE_RNN})",
     "TensorBoard Status": "Indicates TB logging status and log directory.",
-    "Notification Area": "Displays the latest best achievements (RL Score, Game Score, Value Loss).",
-    "Best RL Score Info": "Best RL Score achieved: Current Value (Previous Value) - Steps Ago",
-    "Best Game Score Info": "Best Game Score achieved: Current Value (Previous Value) - Steps Ago",
-    "Best Loss Info": "Best (Lowest) Value Loss achieved: Current Value (Previous Value) - Steps Ago",
-    "Policy Loss": "Average loss for the policy network during the last update.",
-    "Value Loss": "Average loss for the value network during the last update.",
-    "Entropy": "Average policy entropy during the last update (encourages exploration).",
+    # Add tooltips for compact status line elements if desired
+    "Steps Info": "Global Steps / Total Planned Steps",
+    "Episodes Info": "Total Completed Episodes",
+    "SPS Info": "Steps Per Second (Collection + Update Avg)",
+    "Update Progress": "Progress of the current agent neural network update cycle.",
 }
 
 
@@ -56,7 +49,6 @@ class LeftPanelRenderer:
         self.stat_rects: Dict[str, pygame.Rect] = {}
 
         self.button_status_renderer = ButtonStatusRenderer(self.screen, self.fonts)
-        self.notification_renderer = NotificationRenderer(self.screen, self.fonts)
         self.info_text_renderer = InfoTextRenderer(self.screen, self.fonts)
         self.tb_status_renderer = TBStatusRenderer(self.screen, self.fonts)
         self.plot_area_renderer = PlotAreaRenderer(
@@ -70,8 +62,9 @@ class LeftPanelRenderer:
             "status": 28,
             "logdir": 16,
             "plot_placeholder": 20,
-            "notification": 19,
             "notification_label": 16,
+            "plot_title_values": 8,
+            "progress_bar": 14,  # Font for progress bar percentage
         }
         for key, size in font_configs.items():
             try:
@@ -84,12 +77,13 @@ class LeftPanelRenderer:
 
     def render(
         self,
-        is_running: bool,  # Renamed from is_training
+        is_training_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         app_state: str,
+        update_progress: float,  # Added update_progress
     ):
         current_width, current_height = self.screen.get_size()
         lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
@@ -97,7 +91,8 @@ class LeftPanelRenderer:
 
         status_color_map = {
             "Ready": (30, 30, 30),
-            "Training": (30, 40, 30),
+            "Collecting Experience": (30, 40, 30),  # Greenish tint
+            "Updating Agent": (30, 30, 50),  # Bluish tint
             "Confirm Cleanup": (50, 20, 20),
             "Cleaning": (60, 30, 30),
             "Error": (60, 0, 0),
@@ -109,32 +104,35 @@ class LeftPanelRenderer:
         self.stat_rects.clear()
 
         current_y = 10
-        notification_area_rect = None
 
-        next_y, rects_bs, notification_area_rect = self.button_status_renderer.render(
-            current_y, lp_width, app_state, is_running, status
+        # Render Buttons and Compact Status Block (Pass update_progress)
+        next_y, rects_bs = self.button_status_renderer.render(
+            y_start=current_y,
+            panel_width=lp_width,
+            app_state=app_state,
+            is_training_running=is_training_running,
+            status=status,
+            stats_summary=stats_summary,
+            update_progress=update_progress,  # Pass progress
         )
         self.stat_rects.update(rects_bs)
         current_y = next_y
 
-        if notification_area_rect:
-            rects_notif = self.notification_renderer.render(
-                notification_area_rect, stats_summary
-            )
-            self.stat_rects.update(rects_notif)
-
+        # Render Info Text Block
         next_y, rects_info = self.info_text_renderer.render(
-            current_y, stats_summary, lp_width
+            current_y + 5, stats_summary, lp_width
         )
         self.stat_rects.update(rects_info)
         current_y = next_y
 
+        # Render TensorBoard Status
         next_y, rects_tb = self.tb_status_renderer.render(
             current_y + 10, tensorboard_log_dir, lp_width
         )
         self.stat_rects.update(rects_tb)
         current_y = next_y
 
+        # Render Plot Area
         self.plot_area_renderer.render(
             current_y + 15, lp_width, current_height, plot_data, status
         )

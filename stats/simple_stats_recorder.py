@@ -29,8 +29,9 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_step: int = 0
         self.start_time: float = time.time()
         self.summary_avg_window = self.aggregator.summary_avg_window
+        self.rollouts_since_last_log = 0  # Track rollouts for logging frequency
         print(
-            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'}"
+            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} rollouts"
         )
         print(
             f"[SimpleStatsRecorder] Console logs will use Avg Window: {self.summary_avg_window}"
@@ -78,7 +79,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
             print(
                 f"--- 🎮 New Best Game: {self.aggregator.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
             )
-        # --- MODIFIED: Check for new best loss ---
         if update_info.get("new_best_loss"):
             prev_str = (
                 f"{self.aggregator.previous_best_value_loss:.4f}"
@@ -88,13 +88,11 @@ class SimpleStatsRecorder(StatsRecorderBase):
             print(
                 f"---📉 New Best Loss: {self.aggregator.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
             )
-        # --- END MODIFIED ---
 
     def record_step(self, step_data: Dict[str, Any]):
         update_info = self.aggregator.record_step(step_data)
         g_step = step_data.get("global_step", self.aggregator.current_global_step)
 
-        # --- MODIFIED: Check for new best loss after recording step data ---
         if update_info.get("new_best_loss"):
             prev_str = (
                 f"{self.aggregator.previous_best_value_loss:.4f}"
@@ -105,9 +103,11 @@ class SimpleStatsRecorder(StatsRecorderBase):
             print(
                 f"---📉 New Best Loss: {self.aggregator.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
             )
-        # --- END MODIFIED ---
 
-        self.log_summary(g_step)
+        # Check if an agent update occurred (indicated by presence of loss keys)
+        if "policy_loss" in step_data or "value_loss" in step_data:
+            self.rollouts_since_last_log += 1
+            self.log_summary(g_step)  # Attempt to log after each agent update
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
         return self.aggregator.get_summary(current_global_step)
@@ -116,9 +116,10 @@ class SimpleStatsRecorder(StatsRecorderBase):
         return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
+        # Log based on number of rollouts (agent updates) since last log
         if (
             self.console_log_interval <= 0
-            or global_step < self.last_log_step + self.console_log_interval
+            or self.rollouts_since_last_log < self.console_log_interval
         ):
             return
 
@@ -137,28 +138,25 @@ class SimpleStatsRecorder(StatsRecorderBase):
             else "N/A"
         )
 
-        # --- MODIFIED: Use 'value_loss' key instead of 'avg_loss_window' ---
+        # --- MODIFIED: Use 'value_loss' key for the average loss display ---
         avg_window_size = summary.get("summary_avg_window_size", "?")
         log_str = (
             f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
             f"Ep: {summary['total_episodes']:<7} | SPS: {summary['steps_per_second']:<5.0f} | "
             f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
-            f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "
+            f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "  # Corrected key
             f"LR: {summary['current_lr']:.1e}"
         )
         # --- END MODIFIED ---
 
-        # Conditionally add epsilon if present and non-default
         epsilon = summary.get("epsilon")
         if epsilon is not None and epsilon < 1.0:
             log_str += f" | Eps: {epsilon:.3f}"
 
-        # Conditionally add beta if present and non-default
         beta = summary.get("beta")
         if beta is not None and beta > 0.0 and beta < 1.0:
             log_str += f" | Beta: {beta:.3f}"
 
-        # Add Buffer Size if relevant (e.g., for experience replay methods)
         buffer_size = summary.get("buffer_size")
         if buffer_size is not None and buffer_size > 0:
             log_str += f" | Buf: {buffer_size/1e6:.2f}M"
@@ -167,6 +165,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
 
         self.last_log_time = time.time()
         self.last_log_step = global_step
+        self.rollouts_since_last_log = 0  # Reset counter after logging
 
     def record_histogram(
         self,
