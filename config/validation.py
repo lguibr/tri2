@@ -1,3 +1,4 @@
+# File: config/validation.py
 import os, torch
 from .core import (
     EnvConfig,
@@ -9,6 +10,8 @@ from .core import (
     TensorBoardConfig,
     VisConfig,
     DemoConfig,
+    ObsNormConfig,  # Added
+    TransformerConfig,  # Added
 )
 from .general import (
     RUN_ID,
@@ -24,12 +27,14 @@ def print_config_info_and_validate():
     env_config_instance = EnvConfig()
     ppo_config_instance = PPOConfig()
     rnn_config_instance = RNNConfig()
+    transformer_config_instance = TransformerConfig()  # Added instance
+    obs_norm_config_instance = ObsNormConfig()  # Added instance
 
     print("-" * 70)
     print(f"RUN ID: {RUN_ID}")
     print(f"Log Directory: {RUN_LOG_DIR}")
     print(f"Checkpoint Directory: {RUN_CHECKPOINT_DIR}")
-    print(f"Device: {DEVICE}")
+    print(f"Device: {DEVICE}")  # DEVICE should be set by now
     print(
         f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
         f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
@@ -55,6 +60,27 @@ def print_config_info_and_validate():
     print(
         f"    Value Coef: {ppo_config_instance.VALUE_LOSS_COEF}, Entropy Coef: {ppo_config_instance.ENTROPY_COEF}"
     )
+
+    # --- MODIFIED: Use correct attribute name and add cosine info ---
+    lr_schedule_str = ""
+    if ppo_config_instance.USE_LR_SCHEDULER:
+        schedule_type = getattr(ppo_config_instance, "LR_SCHEDULE_TYPE", "linear")
+        if schedule_type == "linear":
+            end_fraction = getattr(ppo_config_instance, "LR_LINEAR_END_FRACTION", 0.0)
+            lr_schedule_str = f" (Linear Decay to {end_fraction * 100}%)"
+        elif schedule_type == "cosine":
+            min_factor = getattr(ppo_config_instance, "LR_COSINE_MIN_FACTOR", 0.01)
+            lr_schedule_str = f" (Cosine Decay to {min_factor * 100}%)"
+        else:
+            lr_schedule_str = f" (Unknown Schedule: {schedule_type})"
+
+    print(
+        f"--- Using LR Scheduler: {ppo_config_instance.USE_LR_SCHEDULER}"
+        + lr_schedule_str
+        + " ---"
+    )
+    # --- END MODIFIED ---
+
     print(
         f"--- Using RNN: {rnn_config_instance.USE_RNN}"
         + (
@@ -65,10 +91,19 @@ def print_config_info_and_validate():
         + " ---"
     )
     print(
-        f"--- Using LR Scheduler: {ppo_config_instance.USE_LR_SCHEDULER}"
+        f"--- Using Transformer: {transformer_config_instance.USE_TRANSFORMER}"
         + (
-            f" (Linear Decay to {ppo_config_instance.LR_SCHEDULER_END_FRACTION * 100}%)"
-            if ppo_config_instance.USE_LR_SCHEDULER
+            f" (d_model={transformer_config_instance.TRANSFORMER_D_MODEL}, nhead={transformer_config_instance.TRANSFORMER_NHEAD}, layers={transformer_config_instance.TRANSFORMER_NUM_LAYERS})"
+            if transformer_config_instance.USE_TRANSFORMER
+            else ""
+        )
+        + " ---"
+    )
+    print(
+        f"--- Using Obs Normalization: {obs_norm_config_instance.ENABLE_OBS_NORMALIZATION}"
+        + (
+            f" (Grid:{obs_norm_config_instance.NORMALIZE_GRID}, Shapes:{obs_norm_config_instance.NORMALIZE_SHAPES}, Avail:{obs_norm_config_instance.NORMALIZE_AVAILABILITY}, Explicit:{obs_norm_config_instance.NORMALIZE_EXPLICIT_FEATURES}, Clip:{obs_norm_config_instance.OBS_CLIP})"
+            if obs_norm_config_instance.ENABLE_OBS_NORMALIZATION
             else ""
         )
         + " ---"
@@ -93,12 +128,13 @@ def print_config_info_and_validate():
     )
 
     if env_config_instance.NUM_ENVS >= 1024:
+        device_type = DEVICE.type if DEVICE else "UNKNOWN"
         print(
             "*" * 70
             + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. Monitor system resources. ***"
             + (
                 "\n*** Using MPS device. Performance varies. Force CPU via env var if needed. ***"
-                if DEVICE.type == "mps"
+                if device_type == "mps"
                 else ""
             )
             + "\n"

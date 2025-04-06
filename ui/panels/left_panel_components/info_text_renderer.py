@@ -1,14 +1,19 @@
 # File: ui/panels/left_panel_components/info_text_renderer.py
 import pygame
 from typing import Dict, Any, Tuple
+
+# --- MODIFIED: Import DEVICE directly ---
 from config import (
     VisConfig,
     StatsConfig,
     PPOConfig,
-    RNNConfig,
-    DEVICE,
-    TOTAL_TRAINING_STEPS,
+    RNNConfig,  # Keep other necessary configs if used
+    WHITE,
+    LIGHTG,  # Import colors
 )
+from config.general import DEVICE  # Import DEVICE from config.general
+
+# --- END MODIFIED ---
 
 
 class InfoTextRenderer:
@@ -32,17 +37,18 @@ class InfoTextRenderer:
 
         line_height = ui_font.get_linesize()
 
-        # --- Kept essential, non-plotted info ---
+        # --- MODIFIED: Get device type dynamically ---
+        device_type_str = "UNKNOWN"
+        if DEVICE and hasattr(DEVICE, "type"):
+            device_type_str = DEVICE.type.upper()
+        # --- END MODIFIED ---
+
+        # Define info lines within the render method
         info_lines = [
-            ("Device", f"{DEVICE.type.upper()}"),
-            (
-                "Network",
-                f"Actor-Critic (CNN+MLP->LSTM:{RNNConfig.USE_RNN})",
-            ),
+            ("Device", device_type_str),  # Use the dynamically fetched string
+            ("Network", f"Actor-Critic (CNN+MLP->LSTM:{RNNConfig.USE_RNN})"),
             # Add any other essential non-plotted info here if needed
         ]
-        # --- Removed: Global Steps, Episodes, SPS (moved to status) ---
-        # --- Removed: Policy Loss, Value Loss, Entropy, LR (plotted) ---
 
         last_y = y_start
         x_pos_key, x_pos_val_offset = 10, 5
@@ -53,11 +59,11 @@ class InfoTextRenderer:
         for idx, (key, value_str) in enumerate(info_lines):
             line_y = current_y + idx * line_height
             try:
-                key_surf = ui_font.render(f"{key}:", True, VisConfig.LIGHTG)
+                key_surf = ui_font.render(f"{key}:", True, LIGHTG)
                 key_rect = key_surf.get_rect(topleft=(x_pos_key, line_y))
                 self.screen.blit(key_surf, key_rect)
 
-                value_surf = ui_font.render(f"{value_str}", True, VisConfig.WHITE)
+                value_surf = ui_font.render(f"{value_str}", True, WHITE)
                 value_rect = value_surf.get_rect(
                     topleft=(key_rect.right + x_pos_val_offset, line_y)
                 )

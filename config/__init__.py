@@ -10,6 +10,10 @@ from .core import (
     StatsConfig,
     TensorBoardConfig,
     DemoConfig,
+    # --- NEW IMPORTS ---
+    ObsNormConfig,
+    TransformerConfig,
+    # --- END NEW IMPORTS ---
 )
 from .general import (
     DEVICE,
@@ -24,6 +28,24 @@ from .general import (
 )
 from .utils import get_config_dict
 from .validation import print_config_info_and_validate
+
+# --- NEW: Import and export constants ---
+from .constants import (
+    WHITE,
+    BLACK,
+    LIGHTG,
+    GRAY,
+    RED,
+    DARK_RED,
+    BLUE,
+    YELLOW,
+    GOOGLE_COLORS,
+    LINE_CLEAR_FLASH_COLOR,
+    LINE_CLEAR_HIGHLIGHT_COLOR,
+    GAME_OVER_FLASH_COLOR,
+)
+
+# --- END NEW ---
 
 # Assign RUN_LOG_DIR to TensorBoardConfig after imports
 TensorBoardConfig.LOG_DIR = RUN_LOG_DIR
@@ -40,6 +62,8 @@ __all__ = [
     "StatsConfig",
     "TensorBoardConfig",
     "DemoConfig",
+    "ObsNormConfig",
+    "TransformerConfig",  # Added new configs
     # General Constants/Paths
     "DEVICE",
     "RANDOM_SEED",
@@ -53,4 +77,18 @@ __all__ = [
     # Utils/Validation
     "get_config_dict",
     "print_config_info_and_validate",
+    # --- NEW: Export constants ---
+    "WHITE",
+    "BLACK",
+    "LIGHTG",
+    "GRAY",
+    "RED",
+    "DARK_RED",
+    "BLUE",
+    "YELLOW",
+    "GOOGLE_COLORS",
+    "LINE_CLEAR_FLASH_COLOR",
+    "LINE_CLEAR_HIGHLIGHT_COLOR",
+    "GAME_OVER_FLASH_COLOR",
+    # --- END NEW ---
 ]

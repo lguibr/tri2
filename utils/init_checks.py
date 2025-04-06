@@ -2,16 +2,30 @@
 import sys
 import traceback
 import numpy as np
-from config import EnvConfig
+
+# --- MOVED IMPORT INSIDE FUNCTION ---
+# from config import EnvConfig
+# --- END MOVED IMPORT ---
 from environment.game_state import GameState
 
 
 def run_pre_checks() -> bool:
     """Performs basic checks on GameState and configuration compatibility."""
+    # --- IMPORT MOVED HERE ---
+    try:
+        from config import EnvConfig
+    except ImportError as e:
+        print(f"FATAL ERROR: Could not import EnvConfig during pre-check: {e}")
+        print(
+            "This might indicate an issue with the config package structure or an ongoing import cycle."
+        )
+        sys.exit(1)
+    # --- END IMPORT MOVED HERE ---
+
     print("--- Pre-Run Checks ---")
     try:
         print("Checking GameState and Configuration Compatibility...")
-        env_config_instance = EnvConfig()
+        env_config_instance = EnvConfig()  # Now EnvConfig is available here
 
         gs_test = GameState()
         gs_test.reset()
@@ -38,14 +52,11 @@ def run_pre_checks() -> bool:
             )
         print(f"GameState 'grid' state shape check PASSED (Shape: {grid_state.shape}).")
 
-        # Check 'shapes' component (features)
+        # Check 'shapes' component (features - flattened)
         if "shapes" not in s_test_dict:
             raise KeyError("State dictionary missing 'shapes' key.")
         shape_state = s_test_dict["shapes"]
-        expected_shape_shape = (
-            env_config_instance.NUM_SHAPE_SLOTS,
-            env_config_instance.SHAPE_FEATURES_PER_SHAPE,
-        )
+        expected_shape_shape = (env_config_instance.SHAPE_STATE_DIM,)  # Flattened
         if not isinstance(shape_state, np.ndarray):
             raise TypeError(
                 f"State 'shapes' component should be numpy array, but got {type(shape_state)}"
@@ -97,7 +108,6 @@ def run_pre_checks() -> bool:
             print("Potential outcome calculation is ENABLED in EnvConfig.")
         else:
             print("Potential outcome calculation is DISABLED in EnvConfig.")
-
         if hasattr(gs_test, "_calculate_potential"):
             _ = gs_test._calculate_potential()
             print("GameState PBRS potential calculation check PASSED.")
@@ -121,7 +131,7 @@ def run_pre_checks() -> bool:
         print("--- Pre-Run Checks Complete ---")
         return True
     except (NameError, ImportError) as e:
-        print(f"FATAL ERROR: Import/Name error: {e}")
+        print(f"FATAL ERROR: Import/Name error during pre-check: {e}")
     except (ValueError, AttributeError, TypeError, KeyError) as e:
         print(f"FATAL ERROR during pre-run checks: {e}")
     except Exception as e:

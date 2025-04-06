@@ -1,24 +1,29 @@
 # File: environment/grid.py
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any
+
+# --- MOVED IMPORT TO TOP LEVEL ---
+from config import EnvConfig
+
+# --- END MOVED IMPORT ---
+
 from .triangle import Triangle
 from .shape import Shape
-from config import EnvConfig
 
 
 class Grid:
     """Represents the game board composed of Triangles."""
 
-    def __init__(self, env_config: EnvConfig):
+    def __init__(self, env_config: EnvConfig):  # Accept EnvConfig instance
         self.rows = env_config.ROWS
         self.cols = env_config.COLS
         self.triangles: List[List[Triangle]] = []
-        self._create()
+        self._create(env_config)  # Pass config to _create
 
-    def _create(self) -> None:
-        # Determine playable columns based on row index (example pattern)
-        # This specific pattern defines a hexagon-like board within the grid bounds
-        cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]  # Example for 8 rows
+    def _create(self, env_config: EnvConfig) -> None:
+        """Initializes the grid with playable and death cells."""
+        # Example pattern for a hexagon-like board within the grid bounds
+        cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]  # Specific to 8 rows
 
         if len(cols_per_row) != self.rows:
             raise ValueError(
@@ -31,29 +36,22 @@ class Grid:
 
         self.triangles = []
         for r in range(self.rows):
-            rowt = []
+            row_triangles: List[Triangle] = []
             base_playable_cols = cols_per_row[r]
 
-            # Calculate padding for death cells based on total cols and playable cols
-            if base_playable_cols <= 0:
-                initial_death_cols_left = self.cols  # All death if 0 playable
-            elif base_playable_cols >= self.cols:
-                initial_death_cols_left = 0  # No death if playable >= total
-            else:
-                initial_death_cols_left = (self.cols - base_playable_cols) // 2
-
-            # Calculate the column index where death cells start on the right
+            # Calculate padding for death cells
+            initial_death_cols_left = (
+                (self.cols - base_playable_cols) // 2
+                if base_playable_cols < self.cols
+                else 0
+            )
             initial_first_death_col_right = initial_death_cols_left + base_playable_cols
 
-            # --- Adjustment for Specific Hex Grid Pattern ---
-            # This adjustment slightly shifts the death zones inward for the hex pattern
-            # If you want a simple rectangle, remove this adjustment
+            # Adjustment for Specific Hex Grid Pattern (makes it slightly narrower)
             adjusted_death_cols_left = initial_death_cols_left + 1
             adjusted_first_death_col_right = initial_first_death_col_right - 1
-            # --- End Adjustment ---
 
             for c in range(self.cols):
-                # Determine if the cell is a death cell based on adjusted boundaries
                 is_death_cell = (
                     (c < adjusted_death_cols_left)
                     or (
@@ -62,85 +60,78 @@ class Grid:
                     )
                     or (base_playable_cols <= 2)  # Treat very narrow rows as death
                 )
-
-                # Determine triangle orientation based on row and column index
-                is_up_cell = (r + c) % 2 == 0
-                tri = Triangle(r, c, is_up=is_up_cell, is_death=is_death_cell)
-                rowt.append(tri)
-            self.triangles.append(rowt)
+                is_up_cell = (r + c) % 2 == 0  # Checkerboard pattern for orientation
+                triangle = Triangle(r, c, is_up=is_up_cell, is_death=is_death_cell)
+                row_triangles.append(triangle)
+            self.triangles.append(row_triangles)
 
     def valid(self, r: int, c: int) -> bool:
+        """Checks if coordinates are within grid bounds."""
         return 0 <= r < self.rows and 0 <= c < self.cols
 
-    def can_place(self, shp: Shape, rr: int, cc: int) -> bool:
-        for dr, dc, up in shp.triangles:
-            nr, nc = rr + dr, cc + dc
+    def can_place(
+        self, shape_to_place: Shape, target_row: int, target_col: int
+    ) -> bool:
+        """Checks if a shape can be placed at the target location."""
+        for dr, dc, is_up_shape_tri in shape_to_place.triangles:
+            nr, nc = target_row + dr, target_col + dc
             if not self.valid(nr, nc):
-                return False
-            # Check bounds for self.triangles access
-            if not (
-                0 <= nr < len(self.triangles) and 0 <= nc < len(self.triangles[nr])
+                return False  # Out of bounds
+            grid_triangle = self.triangles[nr][nc]
+            # Cannot place on death cells, occupied cells, or cells with mismatching orientation
+            if (
+                grid_triangle.is_death
+                or grid_triangle.is_occupied
+                or (grid_triangle.is_up != is_up_shape_tri)
             ):
-                return False  # Should not happen if self.valid passed, but safety check
-            tri = self.triangles[nr][nc]
-            if tri.is_death or tri.is_occupied or (tri.is_up != up):
                 return False
-        return True
+        return True  # All shape triangles can be placed
 
-    def place(self, shp: Shape, rr: int, cc: int) -> None:
-        for dr, dc, _ in shp.triangles:
-            nr, nc = rr + dr, cc + dc
+    def place(self, shape_to_place: Shape, target_row: int, target_col: int) -> None:
+        """Places a shape onto the grid (assumes can_place was checked)."""
+        for dr, dc, _ in shape_to_place.triangles:
+            nr, nc = target_row + dr, target_col + dc
             if self.valid(nr, nc):
-                # Check bounds again before accessing
-                if not (
-                    0 <= nr < len(self.triangles) and 0 <= nc < len(self.triangles[nr])
-                ):
-                    continue
-                tri = self.triangles[nr][nc]
-                # Only place if the target cell is valid (not death, not occupied)
-                if not tri.is_death and not tri.is_occupied:
-                    tri.is_occupied = True
-                    tri.color = shp.color  # Assign shape color
+                grid_triangle = self.triangles[nr][nc]
+                # Only occupy non-death, non-occupied cells
+                if not grid_triangle.is_death and not grid_triangle.is_occupied:
+                    grid_triangle.is_occupied = True
+                    grid_triangle.color = shape_to_place.color
 
     def clear_filled_rows(self) -> Tuple[int, int, List[Tuple[int, int]]]:
+        """Clears fully occupied rows and returns stats."""
         lines_cleared = 0
         triangles_cleared = 0
-        rows_to_clear_indices = []
+        rows_to_clear_indices: List[int] = []
         cleared_triangles_coords: List[Tuple[int, int]] = []
 
-        # Identify full rows
+        # Identify rows to clear
         for r in range(self.rows):
-            if not (0 <= r < len(self.triangles)):
-                continue  # Bounds check
-            rowt = self.triangles[r]
+            row_triangles = self.triangles[r]
             is_row_full = True
             num_placeable_triangles_in_row = 0
-            for t in rowt:
-                if not t.is_death:
+            for triangle in row_triangles:
+                if not triangle.is_death:
                     num_placeable_triangles_in_row += 1
-                    if not t.is_occupied:
+                    if not triangle.is_occupied:
                         is_row_full = False
-                        break  # Can stop checking this row
-
-            # A row is considered full if all non-death cells are occupied
+                        break  # Row is not full
+            # Clear if all placeable triangles are occupied (and there are placeable triangles)
             if is_row_full and num_placeable_triangles_in_row > 0:
                 rows_to_clear_indices.append(r)
                 lines_cleared += 1
 
         # Clear the identified rows
         for r_idx in rows_to_clear_indices:
-            if not (0 <= r_idx < len(self.triangles)):
-                continue  # Bounds check
-            for t in self.triangles[r_idx]:
-                if not t.is_death and t.is_occupied:
+            for triangle in self.triangles[r_idx]:
+                if not triangle.is_death and triangle.is_occupied:
                     triangles_cleared += 1
-                    t.is_occupied = False
-                    t.color = None
-                    cleared_triangles_coords.append(
-                        (r_idx, t.col)
-                    )  # Store coords for visualization
+                    triangle.is_occupied = False
+                    triangle.color = None
+                    cleared_triangles_coords.append((r_idx, triangle.col))
 
-        # (No gravity/dropping logic is implemented here)
+        # Note: This implementation doesn't shift rows down.
+        # Depending on the game rules, row shifting might be needed here.
 
         return lines_cleared, triangles_cleared, cleared_triangles_coords
 
@@ -148,23 +139,20 @@ class Grid:
         """Calculates the height of occupied cells in each column."""
         heights = [0] * self.cols
         for c in range(self.cols):
-            for r in range(self.rows - 1, -1, -1):
-                # Check bounds before accessing triangles
-                if 0 <= r < len(self.triangles) and 0 <= c < len(self.triangles[r]):
-                    tri = self.triangles[r][c]
-                    # Check if the cell is occupied and not a death cell
-                    if tri.is_occupied and not tri.is_death:
-                        heights[c] = r + 1  # Height is row index + 1
-                        break  # Found highest occupied cell in this column
+            for r in range(self.rows - 1, -1, -1):  # Iterate from top down
+                triangle = self.triangles[r][c]
+                if triangle.is_occupied and not triangle.is_death:
+                    heights[c] = r + 1  # Height is row index + 1
+                    break  # Found highest occupied cell in this column
         return heights
 
     def get_max_height(self) -> int:
-        """Calculates the maximum height across all columns."""
+        """Returns the maximum height across all columns."""
         heights = self.get_column_heights()
         return max(heights) if heights else 0
 
     def get_bumpiness(self) -> int:
-        """Calculates the sum of absolute height differences between adjacent columns."""
+        """Calculates the total absolute difference between adjacent column heights."""
         heights = self.get_column_heights()
         bumpiness = 0
         for i in range(len(heights) - 1):
@@ -175,46 +163,27 @@ class Grid:
         """Counts the number of empty, non-death cells below an occupied cell in the same column."""
         holes = 0
         for c in range(self.cols):
-            occupied_above = False
-            for r in range(self.rows):  # Iterate from top to bottom
-                # Check bounds before accessing triangles
-                if not (
-                    0 <= r < len(self.triangles) and 0 <= c < len(self.triangles[r])
-                ):
-                    continue  # Skip if out of bounds
-                tri = self.triangles[r][c]
-
-                # Skip death cells entirely, they don't count as holes or blockers
-                if tri.is_death:
-                    # If we hit a death cell below the highest block, reset occupied_above?
-                    # Or just skip? Let's just skip for simplicity. Holes are non-death cells.
+            occupied_above_found = False
+            for r in range(self.rows):  # Iterate from bottom up
+                triangle = self.triangles[r][c]
+                if triangle.is_death:
                     continue
-
-                if tri.is_occupied:
-                    occupied_above = (
-                        True  # Mark that we've seen an occupied cell in this column
-                    )
-                elif not tri.is_occupied and occupied_above:
-                    # This is an empty, non-death cell below an occupied cell in the same column
+                if triangle.is_occupied:
+                    occupied_above_found = True
+                elif not triangle.is_occupied and occupied_above_found:
+                    # Found an empty cell below an occupied one in this column
                     holes += 1
         return holes
 
     def get_feature_matrix(self) -> np.ndarray:
-        """Creates a 2-channel feature matrix: [occupied, is_up]."""
-        # Channel 0: Occupied (1.0) or Empty (0.0) - only for non-death cells
-        # Channel 1: Orientation (1.0 if Up, 0.0 if Down) - only for non-death cells
+        """Returns the grid state as a 2-channel numpy array (Occupancy, Orientation)."""
+        # Channel 0: Occupancy (1.0 if occupied and not death, 0.0 otherwise)
+        # Channel 1: Orientation (1.0 if pointing up and not death, 0.0 otherwise)
         grid_state = np.zeros((2, self.rows, self.cols), dtype=np.float32)
         for r in range(self.rows):
             for c in range(self.cols):
-                # Check bounds before accessing triangles
-                if not (
-                    0 <= r < len(self.triangles) and 0 <= c < len(self.triangles[r])
-                ):
-                    continue  # Skip if out of bounds
-                t = self.triangles[r][c]
-                # Only populate features for non-death cells
-                if not t.is_death:
-                    grid_state[0, r, c] = 1.0 if t.is_occupied else 0.0
-                    grid_state[1, r, c] = 1.0 if t.is_up else 0.0
-                    # Optionally add more channels here (e.g., cell age, color?)
+                triangle = self.triangles[r][c]
+                if not triangle.is_death:
+                    grid_state[0, r, c] = 1.0 if triangle.is_occupied else 0.0
+                    grid_state[1, r, c] = 1.0 if triangle.is_up else 0.0
         return grid_state

@@ -19,7 +19,10 @@ from config import (
     RNNConfig,
     VisConfig,
     StatsConfig,
+    # DEVICE, # Removed direct import
 )
+
+# Import ActorCriticNetwork for type hinting graph model
 from agent.networks.agent_network import ActorCriticNetwork
 
 
@@ -36,11 +39,13 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         log_dir: str,
         hparam_dict: Optional[Dict[str, Any]] = None,
         model_for_graph: Optional[ActorCriticNetwork] = None,
-        dummy_input_for_graph: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        dummy_input_for_graph: Optional[
+            Tuple
+        ] = None,  # Use generic Tuple for dummy input
         histogram_log_interval: int = TensorBoardConfig.HISTOGRAM_LOG_FREQ,
         image_log_interval: int = TensorBoardConfig.IMAGE_LOG_FREQ,
-        env_config: Optional[EnvConfig] = None,
-        rnn_config: Optional[RNNConfig] = None,
+        env_config: Optional[EnvConfig] = None,  # Keep for context
+        rnn_config: Optional[RNNConfig] = None,  # Keep for context
     ):
         self.aggregator = aggregator
         self.console_recorder = console_recorder
@@ -57,12 +62,16 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         self.last_image_log_step = -1
         self.env_config = env_config
         self.rnn_config = rnn_config
-        self.vis_config = VisConfig()
+        self.vis_config = VisConfig()  # Needed for image rendering utils potentially
         self.summary_avg_window = self.aggregator.summary_avg_window
 
+        # --- MODIFIED: Add counter for TB logging frequency ---
+        self.rollouts_since_last_tb_log = 0
+        # --- END MODIFIED ---
+
         print(f"[TensorBoardStatsRecorder] Initialized. Logging to: {self.log_dir}")
-        print(f"  Histogram Log Interval: {self.histogram_log_interval}")
-        print(f"  Image Log Interval: {self.image_log_interval}")
+        print(f"  Histogram Log Interval: {self.histogram_log_interval} rollouts")
+        print(f"  Image Log Interval: {self.image_log_interval} rollouts")
         print(f"  Summary Avg Window: {self.summary_avg_window}")
 
         if model_for_graph and dummy_input_for_graph:
@@ -78,11 +87,14 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
     def _log_hparams_initial(self):
         """Logs hyperparameters at the beginning of the run."""
         try:
+            # Define initial metrics to avoid errors if no episodes complete before closing
             initial_metrics = {
-                "hparam/initial_best_rl_score": -float("inf"),
-                "hparam/initial_best_game_score": -float("inf"),
-                "hparam/initial_best_loss": float("inf"),
+                "hparam/final_best_rl_score": -float("inf"),
+                "hparam/final_best_game_score": -float("inf"),
+                "hparam/final_best_loss": float("inf"),
+                "hparam/final_total_episodes": 0,
             }
+            # Filter hparams to only include loggable types
             filtered_hparams = {
                 k: v
                 for k, v in self.hparam_dict.items()
@@ -92,6 +104,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print("[TensorBoardStatsRecorder] Hyperparameters logged.")
         except Exception as e:
             print(f"Error logging initial hyperparameters: {e}")
+            traceback.print_exc()
 
     def record_episode(
         self,
@@ -102,7 +115,8 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
     ):
-        # --- MODIFICATION: Call aggregator first to get update_info ---
+        """Records episode stats to TensorBoard and delegates to console recorder."""
+        # Call aggregator first to update internal state and get update_info
         update_info = self.aggregator.record_episode(
             episode_score,
             episode_length,
@@ -111,8 +125,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             game_score,
             lines_cleared,
         )
-        # --- END MODIFICATION ---
-
         g_step = (
             global_step
             if global_step is not None
@@ -128,90 +140,113 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             self.writer.add_scalar("Episode/Lines Cleared", lines_cleared, g_step)
         self.writer.add_scalar("Progress/Total Episodes", episode_num, g_step)
 
-        # Log best scores if they were updated (using update_info from aggregator)
+        # Log best scores if they were updated
         if update_info.get("new_best_rl"):
             self.writer.add_scalar(
                 "Best Performance/RL Score", self.aggregator.best_score, g_step
             )
-            # Optional: Keep console print here or rely on console_recorder's print
-            # print(f"--- 🏆 TB Logged New Best RL: {self.aggregator.best_score:.2f} at Step ~{g_step/1e6:.1f}M (Prev: {self.aggregator.previous_best_score:.2f}) ---")
-
         if update_info.get("new_best_game"):
             self.writer.add_scalar(
                 "Best Performance/Game Score", self.aggregator.best_game_score, g_step
             )
-            # Optional: Keep console print here or rely on console_recorder's print
-            # print(f"--- 🎮 TB Logged New Best Game: {self.aggregator.best_game_score:.0f} at Step ~{g_step/1e6:.1f}M (Prev: {self.aggregator.previous_best_game_score:.0f}) ---")
 
-        # --- MODIFICATION: Delegate to console recorder AFTER aggregator ---
-        # Pass the original arguments to the console recorder
+        # Delegate to console recorder AFTER aggregator and TB logging
         self.console_recorder.record_episode(
             episode_score,
             episode_length,
             episode_num,
-            global_step,  # Pass original global_step
+            global_step,
             game_score,
             lines_cleared,
         )
-        # --- END MODIFICATION ---
 
     def record_step(self, step_data: Dict[str, Any]):
-        # --- MODIFICATION: Call aggregator first to get update_info ---
+        """Records step stats to TensorBoard and delegates to console recorder."""
+        # Call aggregator first
         update_info = self.aggregator.record_step(step_data)
-        # --- END MODIFICATION ---
-
         g_step = step_data.get("global_step", self.aggregator.current_global_step)
 
         # Log scalar values from step_data
-        if "policy_loss" in step_data:
-            self.writer.add_scalar("Loss/Policy Loss", step_data["policy_loss"], g_step)
-        if "value_loss" in step_data:
-            self.writer.add_scalar("Loss/Value Loss", step_data["value_loss"], g_step)
-        if "entropy" in step_data:
-            self.writer.add_scalar("Loss/Entropy", step_data["entropy"], g_step)
-        if "grad_norm" in step_data:
-            self.writer.add_scalar("Debug/Grad Norm", step_data["grad_norm"], g_step)
-        if "avg_max_q" in step_data:
-            self.writer.add_scalar("Debug/Avg Max Q", step_data["avg_max_q"], g_step)
-        if "beta" in step_data:
-            self.writer.add_scalar("Debug/Beta", step_data["beta"], g_step)
-        if "buffer_size" in step_data:
-            self.writer.add_scalar(
-                "Debug/Buffer Size", step_data["buffer_size"], g_step
-            )
-        if "lr" in step_data:
-            self.writer.add_scalar("Train/Learning Rate", step_data["lr"], g_step)
-        if "epsilon" in step_data:
-            self.writer.add_scalar("Train/Epsilon", step_data["epsilon"], g_step)
-        if "sps_collection" in step_data:
-            self.writer.add_scalar(
-                "Performance/SPS Collection", step_data["sps_collection"], g_step
-            )
-        if "update_time" in step_data:
-            self.writer.add_scalar(
-                "Performance/Update Time", step_data["update_time"], g_step
-            )
-        if "step_time" in step_data:
-            self.writer.add_scalar(
-                "Performance/Total Step Time", step_data["step_time"], g_step
-            )
-            if step_data["step_time"] > 1e-9:
-                num_steps = step_data.get("num_steps_processed", 1)
-                sps_total = num_steps / step_data["step_time"]
-                self.writer.add_scalar("Performance/SPS Total", sps_total, g_step)
+        scalar_map = {
+            "policy_loss": "Loss/Policy Loss",
+            "value_loss": "Loss/Value Loss",
+            "entropy": "Loss/Entropy",
+            "grad_norm": "Debug/Grad Norm",
+            "avg_max_q": "Debug/Avg Max Q",
+            "beta": "Debug/Beta",
+            "buffer_size": "Debug/Buffer Size",
+            "lr": "Train/Learning Rate",
+            "epsilon": "Train/Epsilon",
+            "sps_collection": "Performance/SPS Collection",
+            "update_time": "Performance/Update Time",
+            "step_time": "Performance/Total Step Time",
+        }
+        for key, tag in scalar_map.items():
+            if key in step_data and step_data[key] is not None:
+                self.writer.add_scalar(tag, step_data[key], g_step)
 
-        # Log best loss if updated (using update_info from aggregator)
+        # Log total SPS if step_time is available
+        if "step_time" in step_data and step_data["step_time"] > 1e-9:
+            num_steps = step_data.get("num_steps_processed", 1)
+            sps_total = num_steps / step_data["step_time"]
+            self.writer.add_scalar("Performance/SPS Total", sps_total, g_step)
+
+        # Log best loss if updated
         if update_info.get("new_best_loss"):
             self.writer.add_scalar(
                 "Best Performance/Loss", self.aggregator.best_value_loss, g_step
             )
-            # Optional: Keep console print here or rely on console_recorder's print
-            # print(f"---📉 TB Logged New Best Loss: {self.aggregator.best_value_loss:.4f} at Step ~{g_step/1e6:.1f}M (Prev: {self.aggregator.previous_best_value_loss:.4f}) ---")
 
-        # --- MODIFICATION: Delegate to console recorder AFTER aggregator ---
-        # Pass the original step_data dictionary
+        # Delegate to console recorder AFTER aggregator and TB logging
         self.console_recorder.record_step(step_data)
-        # --- END MODIFICATION ---
+
+        # --- MODIFIED: Use internal counter for TB logging frequency ---
+        # Check if histograms/images should be logged (based on rollouts/updates)
+        if (
+            "policy_loss" in step_data
+        ):  # Use loss presence as proxy for update completion
+            self.rollouts_since_last_tb_log += 1  # Increment internal counter
+
+            # Check histogram logging
+            if (
+                self.histogram_log_interval > 0
+                and self.rollouts_since_last_tb_log >= self.histogram_log_interval
+            ):
+                if g_step > self.last_histogram_log_step:
+                    # Add histogram logging calls here if needed, e.g., for weights/grads
+                    # self.record_histogram("Agent/Actor Weights", agent.actor.parameters(), g_step)
+                    self.last_histogram_log_step = g_step  # Update last log step
+                    # Reset counter only if histograms were logged
+                    # self.rollouts_since_last_tb_log = 0 # Resetting here might skip image logging
+
+            # Check image logging
+            if (
+                self.image_log_interval > 0
+                and self.rollouts_since_last_tb_log >= self.image_log_interval
+            ):
+                if g_step > self.last_image_log_step:
+                    # Add image logging calls here if needed
+                    # self.record_image("Environment/Sample", get_env_image(...), g_step)
+                    self.last_image_log_step = g_step  # Update last log step
+                    # Reset counter only if images were logged
+                    # self.rollouts_since_last_tb_log = 0 # Resetting here might skip histogram logging
+
+            # Reset counter if either histogram or image interval was met and logging occurred
+            # This ensures the counter resets correctly even if intervals differ.
+            if (
+                self.histogram_log_interval > 0
+                and self.rollouts_since_last_tb_log >= self.histogram_log_interval
+            ) or (
+                self.image_log_interval > 0
+                and self.rollouts_since_last_tb_log >= self.image_log_interval
+            ):
+                # Check if actual logging happened for either (based on step)
+                if (
+                    g_step == self.last_histogram_log_step
+                    or g_step == self.last_image_log_step
+                ):
+                    self.rollouts_since_last_tb_log = 0  # Reset counter
+        # --- END MODIFIED ---
 
     def record_histogram(
         self,
@@ -219,86 +254,53 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         values: Union[np.ndarray, torch.Tensor, List[float]],
         global_step: int,
     ):
-        if self.histogram_log_interval <= 0:
-            return
-        # Log only at specified intervals based on global_step
-        # Use modulo for periodic logging relative to start
-        if (
-            global_step
-            // (
-                self.aggregator.num_envs
-                * self.aggregator.ppo_config.NUM_STEPS_PER_ROLLOUT
-            )
-            % self.histogram_log_interval
-            == 0
-        ):
-            # Check if we already logged for this update cycle step
-            if global_step > self.last_histogram_log_step:
-                try:
-                    self.writer.add_histogram(tag, values, global_step)
-                    self.last_histogram_log_step = global_step
-                except Exception as e:
-                    print(f"Error logging histogram '{tag}': {e}")
+        """Records a histogram to TensorBoard."""
+        # This method is now primarily called internally based on interval,
+        # but can still be called externally if needed.
+        try:
+            self.writer.add_histogram(tag, values, global_step)
+        except Exception as e:
+            print(f"Error logging histogram '{tag}': {e}")
 
     def record_image(
         self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
     ):
-        if self.image_log_interval <= 0:
-            return
-        # Log only at specified intervals based on global_step
-        if (
-            global_step
-            // (
-                self.aggregator.num_envs
-                * self.aggregator.ppo_config.NUM_STEPS_PER_ROLLOUT
-            )
-            % self.image_log_interval
-            == 0
-        ):
-            if global_step > self.last_image_log_step:
-                try:
-                    # Ensure image has channel-first format (C, H, W) or (N, C, H, W)
-                    if isinstance(image, np.ndarray):
-                        if image.ndim == 3 and image.shape[-1] in [
-                            1,
-                            3,
-                            4,
-                        ]:  # HWC -> CHW
-                            image_tensor = torch.from_numpy(image).permute(2, 0, 1)
-                        elif image.ndim == 2:  # HW -> CHW (add channel dim)
-                            image_tensor = torch.from_numpy(image).unsqueeze(0)
-                        else:  # Assume CHW or NCHW
-                            image_tensor = torch.from_numpy(image)
-                    elif isinstance(image, torch.Tensor):
-                        if image.ndim == 3 and image.shape[0] not in [
-                            1,
-                            3,
-                            4,
-                        ]:  # HWC? -> CHW
-                            if image.shape[-1] in [1, 3, 4]:
-                                image_tensor = image.permute(2, 0, 1)
-                            else:  # Assume CHW
-                                image_tensor = image
-                        elif image.ndim == 2:  # HW -> CHW
-                            image_tensor = image.unsqueeze(0)
-                        else:  # Assume CHW or NCHW
-                            image_tensor = image
+        """Records an image to TensorBoard, ensuring correct data format."""
+        # This method is now primarily called internally based on interval,
+        # but can still be called externally if needed.
+        try:
+            # Ensure image has channel-first format (C, H, W) or (N, C, H, W)
+            if isinstance(image, np.ndarray):
+                if image.ndim == 3 and image.shape[-1] in [1, 3, 4]:
+                    image_tensor = torch.from_numpy(image).permute(
+                        2, 0, 1
+                    )  # HWC -> CHW
+                elif image.ndim == 2:
+                    image_tensor = torch.from_numpy(image).unsqueeze(0)  # HW -> CHW
+                else:
+                    image_tensor = torch.from_numpy(image)  # Assume CHW or NCHW
+            elif isinstance(image, torch.Tensor):
+                if image.ndim == 3 and image.shape[0] not in [1, 3, 4]:  # HWC? -> CHW
+                    if image.shape[-1] in [1, 3, 4]:
+                        image_tensor = image.permute(2, 0, 1)
                     else:
-                        print(
-                            f"Warning: Unsupported image type for tag '{tag}': {type(image)}"
-                        )
-                        return
+                        image_tensor = image  # Assume CHW
+                elif image.ndim == 2:
+                    image_tensor = image.unsqueeze(0)  # HW -> CHW
+                else:
+                    image_tensor = image  # Assume CHW or NCHW
+            else:
+                print(f"Warning: Unsupported image type for tag '{tag}': {type(image)}")
+                return
 
-                    self.writer.add_image(
-                        tag, image_tensor, global_step, dataformats="CHW"
-                    )
-                    self.last_image_log_step = global_step
-                except Exception as e:
-                    print(f"Error logging image '{tag}': {e}")
+            self.writer.add_image(tag, image_tensor, global_step, dataformats="CHW")
+        except Exception as e:
+            print(f"Error logging image '{tag}': {e}")
 
     def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
         """Records final hyperparameters and metrics."""
         try:
+            # Filter hparams and metrics to loggable types
             filtered_hparams = {
                 k: v
                 for k, v in hparam_dict.items()
@@ -311,50 +313,72 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print("[TensorBoardStatsRecorder] Final hparams and metrics logged.")
         except Exception as e:
             print(f"Error logging final hyperparameters/metrics: {e}")
+            traceback.print_exc()
 
     def record_graph(
         self, model: torch.nn.Module, input_to_model: Optional[Any] = None
     ):
-        """Records the model graph."""
+        """Records the model graph to TensorBoard."""
         if input_to_model is None:
             print("Warning: Cannot record graph without dummy input.")
             return
         try:
+            # Ensure model and input are on CPU for graph tracing
+            original_device = next(model.parameters()).device
             model.cpu()
+            dummy_input_cpu: Any
             if isinstance(input_to_model, tuple):
-                dummy_input_cpu = tuple(
-                    t.cpu() for t in input_to_model if isinstance(t, torch.Tensor)
-                )
+                # Ensure all tensors in the tuple are moved to CPU
+                dummy_input_cpu_list = []
+                for item in input_to_model:
+                    if isinstance(item, torch.Tensor):
+                        dummy_input_cpu_list.append(item.cpu())
+                    elif isinstance(
+                        item, tuple
+                    ):  # Handle nested tuples (like LSTM state)
+                        dummy_input_cpu_list.append(
+                            tuple(
+                                t.cpu() if isinstance(t, torch.Tensor) else t
+                                for t in item
+                            )
+                        )
+                    else:
+                        dummy_input_cpu_list.append(item)
+                dummy_input_cpu = tuple(dummy_input_cpu_list)
             elif isinstance(input_to_model, torch.Tensor):
                 dummy_input_cpu = input_to_model.cpu()
             else:
-                dummy_input_cpu = input_to_model
+                dummy_input_cpu = input_to_model  # Assume non-tensor input is fine
 
             self.writer.add_graph(model, dummy_input_cpu, verbose=False)
             print("[TensorBoardStatsRecorder] Model graph logged.")
-            # Move model back to original device
-            if hasattr(model, "device"):  # Check if model has device attr
-                model.to(model.device)
-            elif self.env_config:  # Fallback to general device
-                model.to(DEVICE)
-
+            model.to(original_device)  # Move model back
         except Exception as e:
             print(f"Error logging model graph: {e}. Graph logging can be tricky.")
+            traceback.print_exc()
+            # Attempt to move model back even if logging failed
+            try:
+                model.to(original_device)
+            except:
+                pass
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
+        """Gets the summary dictionary from the aggregator."""
         return self.aggregator.get_summary(current_global_step)
 
     def get_plot_data(self) -> Dict[str, Deque]:
+        """Gets the plot data deques from the aggregator."""
         return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
-        # Delegate to console logger
+        """Delegates console logging to the SimpleStatsRecorder."""
         self.console_recorder.log_summary(global_step)
 
     def close(self):
         """Closes the TensorBoard writer and logs final hparams."""
         print("[TensorBoardStatsRecorder] Closing writer...")
         try:
+            # Log final metrics using the latest summary
             final_summary = self.get_summary(self.aggregator.current_global_step)
             final_metrics = {
                 "hparam/final_best_rl_score": final_summary.get(
@@ -366,7 +390,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 "hparam/final_best_loss": final_summary.get("best_loss", float("inf")),
                 "hparam/final_total_episodes": final_summary.get("total_episodes", 0),
             }
-            # Ensure hparam_dict exists before logging
             if self.hparam_dict:
                 self.record_hparams(self.hparam_dict, final_metrics)
             else:
@@ -379,5 +402,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print("[TensorBoardStatsRecorder] Writer closed.")
         except Exception as e:
             print(f"Error during TensorBoard writer close: {e}")
+            traceback.print_exc()
         # Close console recorder as well
         self.console_recorder.close()

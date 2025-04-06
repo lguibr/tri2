@@ -149,6 +149,19 @@ import traceback
 import torch
 from typing import List, Tuple, Optional, Dict, Any, Deque
 
+# --- MODIFIED: Import get_device and set_device ---
+from utils.helpers import set_random_seeds, get_device
+from config.general import set_device as set_config_device
+
+# --- END MODIFIED ---
+
+# --- Determine Device EARLY ---
+determined_device = get_device()
+set_config_device(determined_device)  # Set the device in config.general
+# --- Use determined_device directly or import config.general.DEVICE after setting ---
+# For simplicity, let's assume components will import config.general.DEVICE after it's set.
+# If issues arise, pass determined_device explicitly.
+
 from logger import TeeLogger
 from app_setup import (
     initialize_pygame,
@@ -156,6 +169,7 @@ from app_setup import (
     load_and_validate_configs,
 )
 
+# Now import config AFTER setting the device
 from config import (
     VisConfig,
     EnvConfig,
@@ -167,7 +181,9 @@ from config import (
     RewardConfig,
     TensorBoardConfig,
     DemoConfig,
-    DEVICE,
+    ObsNormConfig,
+    TransformerConfig,
+    # DEVICE, # Import DEVICE from config.general if needed, it should be set now
     RANDOM_SEED,
     MODEL_SAVE_PATH,
     BASE_CHECKPOINT_DIR,
@@ -175,13 +191,17 @@ from config import (
     RUN_LOG_DIR,
 )
 
+# Re-import DEVICE to ensure it's the updated one
+from config.general import DEVICE
+
 from environment.game_state import GameState, StateType
 from agent.ppo_agent import PPOAgent
 from training.trainer import Trainer
 from stats.stats_recorder import StatsRecorderBase
 from ui.renderer import UIRenderer
 from ui.input_handler import InputHandler
-from utils.helpers import set_random_seeds
+
+# from utils.helpers import set_random_seeds # Already imported
 from utils.init_checks import run_pre_checks
 
 from init.rl_components_ppo import (
@@ -197,8 +217,9 @@ class MainApp:
 
     def __init__(self):
         print("Initializing Application...")
-        set_random_seeds(RANDOM_SEED)
+        set_random_seeds(RANDOM_SEED)  # Use imported RANDOM_SEED
 
+        # --- Instantiate ALL config classes ---
         self.vis_config = VisConfig()
         self.env_config = EnvConfig()
         self.ppo_config = PPOConfig()
@@ -209,21 +230,34 @@ class MainApp:
         self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
         self.reward_config = RewardConfig()
+        self.obs_norm_config = ObsNormConfig()
+        self.transformer_config = TransformerConfig()
 
-        self.config_dict = load_and_validate_configs()
+        # --- MODIFIED: Use the globally set DEVICE ---
+        self.device = DEVICE
+        if self.device is None:
+            print("FATAL: Device was not set correctly before MainApp init.")
+            sys.exit(1)
+        # --- END MODIFIED ---
+
+        self.config_dict = (
+            load_and_validate_configs()
+        )  # Loads and validates ALL configs
         self.num_envs = self.env_config.NUM_ENVS
 
         initialize_directories()
         self.screen, self.clock = initialize_pygame(self.vis_config)
 
+        # --- App State Initialization ---
         self.app_state = "Initializing"
         self.is_training_running = False
         self.cleanup_confirmation_active = False
         self.last_cleanup_message_time = 0.0
         self.cleanup_message = ""
         self.status = "Initializing Components"
-        self.update_progress: float = 0.0  # For agent update progress bar
+        self.update_progress: float = 0.0
 
+        # --- Component Placeholders ---
         self.renderer: Optional[UIRenderer] = None
         self.input_handler: Optional[InputHandler] = None
         self.envs: List[GameState] = []
@@ -232,8 +266,10 @@ class MainApp:
         self.trainer: Optional[Trainer] = None
         self.demo_env: Optional[GameState] = None
 
+        # --- Initialize Core Components ---
         self._initialize_core_components(is_reinit=False)
 
+        # --- Final State Setup ---
         self.app_state = "MainMenu"
         self.status = "Ready"
         print("Initialization Complete. Ready.")
@@ -244,7 +280,7 @@ class MainApp:
         try:
             if not is_reinit:
                 self.renderer = UIRenderer(self.screen, self.vis_config)
-                # Initial render call (pass update_progress=0.0)
+                # Initial render call
                 self.renderer.render_all(
                     app_state=self.app_state,
                     is_training_running=self.is_training_running,
@@ -259,14 +295,16 @@ class MainApp:
                     tensorboard_log_dir=None,
                     plot_data={},
                     demo_env=None,
-                    update_progress=0.0,  # Pass initial progress
+                    update_progress=0.0,
                 )
-                pygame.time.delay(100)
+                pygame.time.delay(100)  # Allow screen update
 
+            # Initialize RL components (Agent, Stats, Trainer)
             self._initialize_rl_components(is_reinit=is_reinit)
 
             if not is_reinit:
                 self._initialize_demo_env()
+                # Initialize Input Handler (depends on renderer)
                 self.input_handler = InputHandler(
                     screen=self.screen,
                     renderer=self.renderer,
@@ -290,7 +328,7 @@ class MainApp:
                     pygame.display.flip()
                     time.sleep(5)
                 except Exception:
-                    pass
+                    pass  # Ignore errors during error rendering
             pygame.quit()
             sys.exit(1)
 
@@ -299,11 +337,21 @@ class MainApp:
         print(f"Initializing RL components (PPO)... Re-init: {is_reinit}")
         start_time = time.time()
         try:
+            # Initialize Environments
             self.envs = initialize_envs(self.num_envs, self.env_config)
-            self.agent = initialize_agent(
-                self.model_config, self.ppo_config, self.rnn_config, self.env_config
-            )
 
+            # --- MODIFIED: Pass device to agent initializer ---
+            self.agent = initialize_agent(
+                model_config=self.model_config,
+                ppo_config=self.ppo_config,
+                rnn_config=self.rnn_config,
+                env_config=self.env_config,
+                transformer_config=self.transformer_config,
+                device=self.device,  # Pass the determined device
+            )
+            # --- END MODIFIED ---
+
+            # Initialize Stats Recorder (Pass TransformerConfig)
             self.stats_recorder = initialize_stats_recorder(
                 stats_config=self.stats_config,
                 tb_config=self.tensorboard_config,
@@ -311,11 +359,13 @@ class MainApp:
                 agent=self.agent,
                 env_config=self.env_config,
                 rnn_config=self.rnn_config,
+                transformer_config=self.transformer_config,
                 is_reinit=is_reinit,
             )
             if self.stats_recorder is None:
                 raise RuntimeError("Stats Recorder initialization failed unexpectedly.")
 
+            # Initialize Trainer (Pass ObsNormConfig, TransformerConfig)
             self.trainer = initialize_trainer(
                 envs=self.envs,
                 agent=self.agent,
@@ -325,11 +375,14 @@ class MainApp:
                 rnn_config=self.rnn_config,
                 train_config=self.train_config,
                 model_config=self.model_config,
+                obs_norm_config=self.obs_norm_config,
+                transformer_config=self.transformer_config,
+                device=self.device,  # Pass the determined device
             )
             print(f"RL components initialized in {time.time() - start_time:.2f}s")
         except Exception as e:
             print(f"Error during RL component initialization: {e}")
-            raise e
+            raise e  # Re-raise to be caught by _initialize_core_components
 
     def _initialize_demo_env(self):
         """Initializes the separate environment for demo mode."""
@@ -387,7 +440,7 @@ class MainApp:
 
     def _exit_app(self) -> bool:
         print("Exit requested.")
-        return False
+        return False  # Signal to main loop to stop
 
     def _start_demo_mode(self):
         if self.demo_env is None:
@@ -440,7 +493,7 @@ class MainApp:
                     reward, done = self.demo_env.step(action_index)
                     action_taken = True
                 else:
-                    action_taken = True
+                    action_taken = True  # Still counts as an input handled
 
             if self.demo_env.is_over():
                 print("[Demo] Game Over! Press ESC to exit.")
@@ -454,9 +507,9 @@ class MainApp:
         self.status = "Cleaning"
         messages = []
 
+        # Render cleaning screen
         if self.renderer:
             try:
-                # Pass update_progress=0.0 during cleanup render
                 self.renderer.render_all(
                     app_state=self.app_state,
                     is_training_running=False,
@@ -471,13 +524,14 @@ class MainApp:
                     tensorboard_log_dir=None,
                     plot_data={},
                     demo_env=self.demo_env,
-                    update_progress=0.0,  # Pass progress
+                    update_progress=0.0,
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
             except Exception as render_err:
                 print(f"Warning: Error rendering during cleanup start: {render_err}")
 
+        # Cleanup Trainer and Stats Recorder
         if self.trainer:
             print("[Cleanup] Running trainer cleanup...")
             try:
@@ -487,19 +541,27 @@ class MainApp:
         if self.stats_recorder:
             print("[Cleanup] Closing stats recorder...")
             try:
-                # Close method might be on the specific recorder instance
                 if hasattr(self.stats_recorder, "close"):
                     self.stats_recorder.close()
             except Exception as e:
                 print(f"Error closing stats recorder: {e}")
 
-        print("[Cleanup] Deleting agent checkpoint file...")
+        # Delete Agent Checkpoint (Note: Now saves multiple files, delete directory?)
+        # For simplicity, let's just delete the base path if it exists, though specific files are better
+        print("[Cleanup] Deleting agent checkpoint file/dir...")
         try:
-            if os.path.isfile(MODEL_SAVE_PATH):
+            if os.path.isfile(
+                MODEL_SAVE_PATH
+            ):  # Check if the base path exists (might be dir now)
                 os.remove(MODEL_SAVE_PATH)
                 msg = f"Agent ckpt deleted: {os.path.basename(MODEL_SAVE_PATH)}"
+            elif os.path.isdir(os.path.dirname(MODEL_SAVE_PATH)):
+                # If it's a directory, maybe remove the whole run dir? Be careful!
+                # For now, just report not found as a file.
+                # Consider using shutil.rmtree(os.path.dirname(MODEL_SAVE_PATH)) if that's desired.
+                msg = f"Agent ckpt file not found (current run)."
             else:
-                msg = f"Agent ckpt not found (current run)."
+                msg = f"Agent ckpt path not found (current run)."
             print(f"  - {msg}")
             messages.append(msg)
         except OSError as e:
@@ -507,8 +569,9 @@ class MainApp:
             print(f"  - {msg}")
             messages.append(msg)
 
-        time.sleep(0.1)
+        time.sleep(0.1)  # Brief pause
 
+        # Re-initialize RL Components
         print("[Cleanup] Re-initializing RL components...")
         try:
             self._initialize_rl_components(is_reinit=True)
@@ -563,7 +626,6 @@ class MainApp:
                 if self.status != "Error":
                     self.status = "Error: Trainer Missing"
             elif self.is_training_running:
-                # Get detailed status from trainer
                 trainer_phase = self.trainer.get_current_phase()
                 if trainer_phase == "Collecting":
                     self.status = "Collecting Experience"
@@ -572,7 +634,6 @@ class MainApp:
                     self.update_progress = self.trainer.get_update_progress()
                 else:
                     self.status = "Training (Unknown Phase)"  # Fallback
-
                 should_perform_training_iteration = True
             else:  # Not running
                 if self.status != "Error":
@@ -673,6 +734,7 @@ class MainApp:
             except Exception as e:
                 print(f"Error rendering error screen: {e}")
 
+        # Clear cleanup message after timeout
         if time.time() - self.last_cleanup_message_time >= 5.0:
             self.cleanup_message = ""
 
@@ -686,7 +748,7 @@ class MainApp:
                 self.trainer.cleanup(save_final=save_on_exit)
             except Exception as final_cleanup_err:
                 print(f"Error during final trainer cleanup: {final_cleanup_err}")
-        elif self.stats_recorder:
+        elif self.stats_recorder:  # Close stats recorder even if trainer failed
             print("Closing stats recorder...")
             try:
                 if hasattr(self.stats_recorder, "close"):
@@ -705,6 +767,7 @@ class MainApp:
             while running_flag:
                 start_frame_time = time.perf_counter()
 
+                # Handle Input
                 if self.input_handler:
                     try:
                         running_flag = self.input_handler.handle_input(
@@ -716,7 +779,7 @@ class MainApp:
                         )
                         traceback.print_exc()
                         running_flag = False
-                else:
+                else:  # Fallback if input handler fails
                     for event in pygame.event.get():
                         if event.type == pygame.QUIT:
                             running_flag = False
@@ -732,8 +795,9 @@ class MainApp:
                         break
 
                 if not running_flag:
-                    break
+                    break  # Exit if input handler signals stop
 
+                # Update State
                 try:
                     self._update()
                 except Exception as update_err:
@@ -745,6 +809,7 @@ class MainApp:
                     self.app_state = "Error"
                     self.is_training_running = False
 
+                # Render Frame
                 try:
                     self._render()
                 except Exception as render_err:
@@ -755,12 +820,10 @@ class MainApp:
                     self.status = "Error: Render Loop Failed"
                     self.app_state = "Error"
 
-                # Adjust sleep based on whether agent update is happening
+                # Frame Limiting / Sleep Logic
                 is_updating = self.status == "Updating Agent"
                 if not self.is_training_running or not is_updating:
-                    # Sleep longer if not training or just collecting
-                    time.sleep(0.01)
-                # No explicit sleep during agent update to maximize processing speed
+                    time.sleep(0.01)  # Sleep longer if not training or just collecting
 
         except KeyboardInterrupt:
             print("\nCtrl+C detected. Exiting gracefully...")
@@ -774,12 +837,14 @@ class MainApp:
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
+    # Ensure base directories exist
     os.makedirs(BASE_CHECKPOINT_DIR, exist_ok=True)
     os.makedirs(BASE_LOG_DIR, exist_ok=True)
-    os.makedirs(RUN_LOG_DIR, exist_ok=True)
+    os.makedirs(RUN_LOG_DIR, exist_ok=True)  # RUN_LOG_DIR uses RUN_ID
 
     log_filepath = os.path.join(RUN_LOG_DIR, "console_output.log")
 
+    # Setup TeeLogger
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     logger = TeeLogger(log_filepath, original_stdout)
@@ -790,7 +855,7 @@ if __name__ == "__main__":
     exit_code = 0
 
     try:
-        if run_pre_checks():
+        if run_pre_checks():  # Perform checks before initializing app
             app_instance = MainApp()
             app_instance.run()
     except SystemExit as exit_err:
@@ -805,6 +870,7 @@ if __name__ == "__main__":
         traceback.print_exc()
         print("--- EXITING DUE TO ERROR ---")
         exit_code = 1
+        # Attempt cleanup even if initialization failed partially
         if app_instance and hasattr(app_instance, "_perform_cleanup"):
             print("Attempting cleanup after main exception...")
             try:
@@ -812,6 +878,7 @@ if __name__ == "__main__":
             except Exception as cleanup_err:
                 print(f"Error during cleanup after main exception: {cleanup_err}")
     finally:
+        # Restore stdout/stderr and close logger
         if logger:
             final_app_state = getattr(app_instance, "app_state", "UNKNOWN")
             print(
@@ -834,8 +901,13 @@ matplotlib
 
 File: agent\model_factory.py
 # File: agent/model_factory.py
+import torch
 import torch.nn as nn
-from config import ModelConfig, EnvConfig, PPOConfig, RNNConfig
+
+# --- MODIFIED: Import TransformerConfig ---
+from config import ModelConfig, EnvConfig, PPOConfig, RNNConfig, TransformerConfig
+
+# --- END MODIFIED ---
 from typing import Type
 
 from agent.networks.agent_network import ActorCriticNetwork
@@ -846,14 +918,20 @@ def create_network(
     action_dim: int,
     model_config: ModelConfig,
     rnn_config: RNNConfig,
+    transformer_config: TransformerConfig,
+    device: torch.device,  # --- MODIFIED: Added device ---
 ) -> nn.Module:
     """Creates the ActorCriticNetwork based on configuration."""
-    print(f"[ModelFactory] Creating ActorCriticNetwork (RNN: {rnn_config.USE_RNN})")
+    print(
+        f"[ModelFactory] Creating ActorCriticNetwork (RNN: {rnn_config.USE_RNN}, Transformer: {transformer_config.USE_TRANSFORMER})"
+    )
     return ActorCriticNetwork(
         env_config=env_config,
         action_dim=action_dim,
         model_config=model_config.Network,
         rnn_config=rnn_config,
+        transformer_config=transformer_config,
+        device=device,  # --- MODIFIED: Pass device ---
     )
 
 
@@ -873,18 +951,23 @@ from config import (
     EnvConfig,
     PPOConfig,
     RNNConfig,
-    DEVICE,
+    TransformerConfig,
+    ObsNormConfig,  # Keep import for context, though not used directly here
+    # DEVICE, # Removed direct import
     TensorBoardConfig,
     TOTAL_TRAINING_STEPS,
 )
-from environment.game_state import StateType
+from environment.game_state import StateType  # StateType uses raw numpy arrays
 from utils.types import ActionType, AgentStateDict
 from agent.model_factory import create_network
 from agent.networks.agent_network import ActorCriticNetwork
 
 
 class PPOAgent:
-    """PPO Agent orchestrating network, action selection, and updates."""
+    """
+    PPO Agent orchestrating network, action selection, and updates.
+    Assumes observations received are ALREADY NORMALIZED if ObsNorm is enabled.
+    """
 
     def __init__(
         self,
@@ -892,20 +975,26 @@ class PPOAgent:
         ppo_config: PPOConfig,
         rnn_config: RNNConfig,
         env_config: EnvConfig,
+        transformer_config: TransformerConfig,
+        device: torch.device,  # --- MODIFIED: Added device ---
+        # ObsNormConfig is used by collector, not directly by agent logic here
     ):
-        self.device = DEVICE
+        self.device = device  # --- MODIFIED: Use passed device ---
         self.env_config = env_config
         self.ppo_config = ppo_config
         self.rnn_config = rnn_config
-        self.tb_config = TensorBoardConfig()
+        self.transformer_config = transformer_config
+        self.tb_config = TensorBoardConfig()  # For potential future use
         self.action_dim = env_config.ACTION_DIM
-        self.update_progress: float = 0.0  # Track update progress
+        self.update_progress: float = 0.0  # Tracks progress within agent.update()
 
         self.network = create_network(
             env_config=self.env_config,
             action_dim=self.action_dim,
             model_config=model_config,
             rnn_config=self.rnn_config,
+            transformer_config=self.transformer_config,
+            device=self.device,  # --- MODIFIED: Pass device ---
         ).to(self.device)
 
         self.optimizer = optim.AdamW(
@@ -913,13 +1002,16 @@ class PPOAgent:
             lr=ppo_config.LEARNING_RATE,
             eps=ppo_config.ADAM_EPS,
         )
-
         self._print_init_info()
 
     def _print_init_info(self):
+        """Logs basic agent configuration on initialization."""
         print(f"[PPOAgent] Using Device: {self.device}")
         print(f"[PPOAgent] Network: {type(self.network).__name__}")
         print(f"[PPOAgent] Using RNN: {self.rnn_config.USE_RNN}")
+        print(
+            f"[PPOAgent] Using Transformer: {self.transformer_config.USE_TRANSFORMER}"
+        )
         total_params = sum(
             p.numel() for p in self.network.parameters() if p.requires_grad
         )
@@ -928,48 +1020,66 @@ class PPOAgent:
     @torch.no_grad()
     def select_action(
         self,
+        # State received here is assumed to be ALREADY NORMALIZED if ObsNorm enabled
         state: StateType,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         deterministic: bool = False,
         valid_actions_indices: Optional[List[ActionType]] = None,
     ) -> Tuple[ActionType, float, float, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
+        """Selects an action based on the (potentially normalized) state."""
         self.network.eval()
 
-        grid_np = state["grid"]
-        shapes_np = state["shapes"]
-        availability_np = state["shape_availability"]
-        explicit_features_np = state["explicit_features"]
-
-        grid_t = torch.from_numpy(grid_np).float().unsqueeze(0).to(self.device)
-        shapes_t = torch.from_numpy(shapes_np).float().unsqueeze(0).to(self.device)
+        # Convert numpy arrays from state dict to tensors
+        grid_t = torch.from_numpy(state["grid"]).float().unsqueeze(0).to(self.device)
+        shapes_t = (
+            torch.from_numpy(state["shapes"]).float().unsqueeze(0).to(self.device)
+        )
         availability_t = (
-            torch.from_numpy(availability_np).float().unsqueeze(0).to(self.device)
+            torch.from_numpy(state["shape_availability"])
+            .float()
+            .unsqueeze(0)
+            .to(self.device)
         )
         explicit_features_t = (
-            torch.from_numpy(explicit_features_np).float().unsqueeze(0).to(self.device)
+            torch.from_numpy(state["explicit_features"])
+            .float()
+            .unsqueeze(0)
+            .to(self.device)
         )
 
-        if self.rnn_config.USE_RNN:
-            grid_t = grid_t.unsqueeze(1)
-            shapes_t = shapes_t.unsqueeze(1)
-            availability_t = availability_t.unsqueeze(1)
-            explicit_features_t = explicit_features_t.unsqueeze(1)
-            if hidden_state:
+        needs_sequence_dim = (
+            self.rnn_config.USE_RNN or self.transformer_config.USE_TRANSFORMER
+        )
+        if needs_sequence_dim:
+            grid_t = grid_t.unsqueeze(1)  # (B=1, T=1, C, H, W)
+            shapes_t = shapes_t.unsqueeze(1)  # (B=1, T=1, Dim)
+            availability_t = availability_t.unsqueeze(1)  # (B=1, T=1, Dim)
+            explicit_features_t = explicit_features_t.unsqueeze(1)  # (B=1, T=1, Dim)
+            if hidden_state:  # LSTM state needs batch and sequence dim alignment
                 hidden_state = (
                     hidden_state[0][:, 0:1, :].contiguous(),
                     hidden_state[1][:, 0:1, :].contiguous(),
                 )
 
+        # Pass padding mask (None for single step)
         policy_logits, value, next_hidden_state = self.network(
-            grid_t, shapes_t, availability_t, explicit_features_t, hidden_state
+            grid_t,
+            shapes_t,
+            availability_t,
+            explicit_features_t,
+            hidden_state,
+            padding_mask=None,
         )
 
-        if self.rnn_config.USE_RNN:
-            policy_logits = policy_logits.squeeze(1)
-            value = value.squeeze(1)
+        if needs_sequence_dim:
+            policy_logits = policy_logits.squeeze(1)  # (B=1, Actions)
+            value = value.squeeze(1)  # (B=1, 1)
 
-        policy_logits = torch.nan_to_num(policy_logits.squeeze(0), nan=-1e9)
+        policy_logits = torch.nan_to_num(
+            policy_logits.squeeze(0), nan=-1e9
+        )  # (Actions,)
 
+        # Apply valid action masking
         if valid_actions_indices is not None:
             mask = torch.full_like(policy_logits, -float("inf"))
             valid_indices_in_bounds = [
@@ -981,8 +1091,9 @@ class PPOAgent:
                 mask[valid_indices_in_bounds] = 0
                 policy_logits += mask
 
+        # Handle cases where all actions are masked
         if torch.all(policy_logits == -float("inf")):
-            action = 0
+            action = 0  # Default action if none are valid
             action_log_prob = torch.tensor(-1e9, device=self.device)
         else:
             distribution = Categorical(logits=policy_logits)
@@ -992,6 +1103,7 @@ class PPOAgent:
             action_log_prob = distribution.log_prob(action_tensor)
             action = action_tensor.item()
 
+            # Double-check validity (can happen with near-zero probabilities)
             if (
                 valid_actions_indices is not None
                 and action not in valid_actions_indices
@@ -1001,7 +1113,7 @@ class PPOAgent:
                     action_log_prob = distribution.log_prob(
                         torch.tensor(action, device=self.device)
                     )
-                else:
+                else:  # Should not happen if initial check passed
                     action = 0
                     action_log_prob = torch.tensor(-1e9, device=self.device)
 
@@ -1010,6 +1122,7 @@ class PPOAgent:
     @torch.no_grad()
     def select_action_batch(
         self,
+        # Input tensors are assumed to be ALREADY NORMALIZED if ObsNorm enabled
         grid_batch: torch.Tensor,
         shape_batch: torch.Tensor,
         availability_batch: torch.Tensor,
@@ -1022,9 +1135,11 @@ class PPOAgent:
         torch.Tensor,
         Optional[Tuple[torch.Tensor, torch.Tensor]],
     ]:
+        """Selects actions for a batch of (potentially normalized) states."""
         self.network.eval()
         batch_size = grid_batch.shape[0]
 
+        # Move inputs to agent's device (might already be there)
         grid_batch = grid_batch.to(self.device)
         shape_batch = shape_batch.to(self.device)
         availability_batch = availability_batch.to(self.device)
@@ -1035,26 +1150,32 @@ class PPOAgent:
                 hidden_state_batch[1].to(self.device),
             )
 
-        if self.rnn_config.USE_RNN:
+        needs_sequence_dim = (
+            self.rnn_config.USE_RNN or self.transformer_config.USE_TRANSFORMER
+        )
+        if needs_sequence_dim:
             grid_batch = grid_batch.unsqueeze(1)
             shape_batch = shape_batch.unsqueeze(1)
             availability_batch = availability_batch.unsqueeze(1)
             explicit_features_batch = explicit_features_batch.unsqueeze(1)
 
+        # Pass padding mask (None for batch step)
         policy_logits, value, next_hidden_batch = self.network(
             grid_batch,
             shape_batch,
             availability_batch,
             explicit_features_batch,
             hidden_state_batch,
+            padding_mask=None,
         )
 
-        if self.rnn_config.USE_RNN:
-            policy_logits = policy_logits.squeeze(1)
-            value = value.squeeze(1)
+        if needs_sequence_dim:
+            policy_logits = policy_logits.squeeze(1)  # (B, Actions)
+            value = value.squeeze(1)  # (B, 1)
 
-        policy_logits = torch.nan_to_num(policy_logits, nan=-1e9)
+        policy_logits = torch.nan_to_num(policy_logits, nan=-1e9)  # (B, Actions)
 
+        # Apply action masking per environment
         mask = torch.full_like(policy_logits, -float("inf"))
         any_valid = False
         for i in range(batch_size):
@@ -1070,87 +1191,114 @@ class PPOAgent:
         if any_valid:
             policy_logits += mask
 
+        # Handle rows where all actions might have been masked
         all_masked_rows = torch.all(policy_logits == -float("inf"), dim=1)
-        policy_logits[all_masked_rows] = 0.0
+        policy_logits[all_masked_rows] = 0.0  # Avoid NaN in Categorical
 
         distribution = Categorical(logits=policy_logits)
         actions_tensor = distribution.sample()
         action_log_probs = distribution.log_prob(actions_tensor)
 
+        # For fully masked rows, force action 0 and set log_prob low
         actions_tensor[all_masked_rows] = 0
         action_log_probs[all_masked_rows] = -1e9
 
-        value = value.squeeze(-1) if value.ndim > 1 else value
+        value = value.squeeze(-1) if value.ndim > 1 else value  # Ensure value is (B,)
 
         return actions_tensor, action_log_probs, value, next_hidden_batch
 
     def evaluate_actions(
         self,
+        # Input tensors from storage are assumed ALREADY NORMALIZED if ObsNorm enabled
         grid_tensor: torch.Tensor,
         shape_feature_tensor: torch.Tensor,
         shape_availability_tensor: torch.Tensor,
         explicit_features_tensor: torch.Tensor,
         actions: torch.Tensor,
         initial_lstm_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        dones_tensor: Optional[torch.Tensor] = None,
+        dones_tensor: Optional[
+            torch.Tensor
+        ] = None,  # Shape (B, T) for sequence processing
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Evaluates actions for loss calculation, handling sequences for RNN/Transformer."""
         self.network.train()
-        is_sequence = self.rnn_config.USE_RNN and grid_tensor.ndim == 5
 
-        if is_sequence:
-            batch_size = grid_tensor.shape[0]
-            seq_len = grid_tensor.shape[1]
+        # --- MODIFIED: Removed incorrect reshaping based on full rollout dims ---
+        # The input tensors (grid_tensor, etc.) are already the minibatch tensors.
+        # The network's forward pass handles sequence dimensions internally if present.
+        # is_sequence = self.rnn_config.USE_RNN or self.transformer_config.USE_TRANSFORMER
+        # batch_size = dones_tensor.shape[0] if dones_tensor is not None else -1
+        # seq_len = (
+        #     dones_tensor.shape[1] if dones_tensor is not None and batch_size > 0 else -1
+        # )
+        # if is_sequence:
+        #     if batch_size <= 0 or seq_len <= 0:
+        #         raise ValueError(
+        #             "Cannot determine batch_size/seq_len for sequence evaluation."
+        #         )
+        #     grid_tensor = grid_tensor.view(
+        #         batch_size, seq_len, *self.env_config.GRID_STATE_SHAPE
+        #     ) # REMOVED
+        #     # ... other reshapes removed ...
+        #     actions = actions.view(batch_size, seq_len) # REMOVED
+        # --- END MODIFIED ---
 
-            if initial_lstm_state is None:
-                current_hidden_state = self.network.get_initial_hidden_state(batch_size)
-            else:
-                current_hidden_state = (
-                    initial_lstm_state[0].to(self.device),
-                    initial_lstm_state[1].to(self.device),
-                )
+        # --- MODIFIED: Removed padding mask calculation based on full rollout dones ---
+        # Padding mask should ideally be generated during minibatch creation if needed.
+        # For standard PPO, it's typically None here.
+        padding_mask = None
+        # if self.transformer_config.USE_TRANSFORMER and is_sequence:
+        #     # ... padding mask calculation removed ...
+        # --- END MODIFIED ---
 
-            policy_logits, value, _ = self.network(
-                grid_tensor,
-                shape_feature_tensor,
-                shape_availability_tensor,
-                explicit_features_tensor,
-                current_hidden_state,
-            )
+        # Network Forward Pass - receives potentially flat minibatch tensors
+        # The network's forward handles internal reshaping if needed based on input dims
+        policy_logits, value, _ = self.network(
+            grid_tensor,
+            shape_feature_tensor,
+            shape_availability_tensor,
+            explicit_features_tensor,
+            initial_lstm_state,  # Pass initial state (relevant if minibatch IS a sequence)
+            padding_mask=padding_mask,  # Pass potentially None mask
+        )
 
-            policy_logits = policy_logits.view(batch_size * seq_len, -1)
-            value = value.view(batch_size * seq_len, -1)
-
-        else:
-            policy_logits, value, _ = self.network(
-                grid_tensor,
-                shape_feature_tensor,
-                shape_availability_tensor,
-                explicit_features_tensor,
-                hidden_state=None,
-            )
+        # --- MODIFIED: Removed output reshaping ---
+        # Outputs should already match the input structure (likely flat minibatch)
+        # if is_sequence:
+        #     policy_logits = policy_logits.view(batch_size * seq_len, -1) # REMOVED
+        #     value = value.view(batch_size * seq_len, -1) # REMOVED
+        #     actions = actions.view(batch_size * seq_len) # REMOVED
+        # --- END MODIFIED ---
 
         policy_logits = torch.nan_to_num(policy_logits, nan=-1e9)
         distribution = Categorical(logits=policy_logits)
 
         action_log_probs = distribution.log_prob(actions)
         entropy = distribution.entropy()
-        value = value.squeeze(-1)
+        value = value.squeeze(-1)  # Ensure value is (N,) or (B,)
 
         return action_log_probs, value, entropy
 
     def update(self, rollout_data: Dict[str, Any]) -> Dict[str, float]:
+        """Performs PPO update using (potentially normalized) data from storage."""
         self.network.train()
         self.update_progress = 0.0
 
+        # Get potentially normalized observations from storage
         obs_grid_flat = rollout_data["obs_grid"]
         obs_shapes_flat = rollout_data["obs_shapes"]
         obs_availability_flat = rollout_data["obs_availability"]
         obs_explicit_features_flat = rollout_data["obs_explicit_features"]
+        # Standard PPO data
         actions_flat = rollout_data["actions"]
         old_log_probs_flat = rollout_data["log_probs"]
         returns_flat = rollout_data["returns"]
         advantages_flat = rollout_data["advantages"]
+        # RNN/Transformer specific
+        initial_lstm_state = rollout_data.get("initial_lstm_state")  # Might be None
+        dones_batch_seq = rollout_data.get("dones")  # Shape (B, T)
 
+        # Normalize advantages
         advantages_flat = (advantages_flat - advantages_flat.mean()) / (
             advantages_flat.std() + 1e-8
         )
@@ -1159,6 +1307,7 @@ class PPOAgent:
         total_value_loss = 0.0
         total_entropy = 0.0
         num_updates = 0
+        grad_norm_val = None  # Store last grad norm
 
         num_samples = actions_flat.shape[0]
         batch_size = self.ppo_config.MINIBATCH_SIZE
@@ -1171,8 +1320,8 @@ class PPOAgent:
             for i, start_idx in enumerate(range(0, num_samples, batch_size)):
                 end_idx = start_idx + batch_size
                 minibatch_indices = indices[start_idx:end_idx]
-                minibatch_size_actual = len(minibatch_indices)
 
+                # Get minibatch data (already flat)
                 mb_obs_grid = obs_grid_flat[minibatch_indices]
                 mb_obs_shapes = obs_shapes_flat[minibatch_indices]
                 mb_obs_availability = obs_availability_flat[minibatch_indices]
@@ -1182,38 +1331,30 @@ class PPOAgent:
                 mb_returns = returns_flat[minibatch_indices]
                 mb_advantages = advantages_flat[minibatch_indices]
 
-                if self.rnn_config.USE_RNN:
-                    eval_grid = mb_obs_grid.unsqueeze(1)
-                    eval_shapes = mb_obs_shapes.unsqueeze(1)
-                    eval_availability = mb_obs_availability.unsqueeze(1)
-                    eval_explicit_features = mb_obs_explicit_features.unsqueeze(1)
-                    eval_actions_seq = mb_actions
+                # --- MODIFIED: Pass appropriate state/dones to evaluate_actions ---
+                # For standard PPO minibatching, initial_lstm_state and dones are tricky.
+                # If RNN state needs to be handled *during* update, it usually involves
+                # iterating through sequences within the minibatch or carrying state
+                # between minibatches. Passing the full rollout's initial state and dones
+                # here is likely incorrect if the minibatch is randomly sampled & flat.
+                # For now, we pass None for state/dones, assuming evaluate_actions
+                # and the network handle flat inputs correctly.
+                # If sequence-aware updates are needed, storage/minibatching needs rework.
+                mb_initial_hidden = None  # Pass None for standard PPO minibatch
+                mb_dones = None  # Pass None for standard PPO minibatch
+                # --- END MODIFIED ---
 
-                    mb_initial_hidden = self.network.get_initial_hidden_state(
-                        minibatch_size_actual
-                    )
+                new_log_probs, predicted_values, entropy = self.evaluate_actions(
+                    mb_obs_grid,
+                    mb_obs_shapes,
+                    mb_obs_availability,
+                    mb_obs_explicit_features,
+                    mb_actions,
+                    mb_initial_hidden,  # Pass potentially None state
+                    mb_dones,  # Pass potentially None dones
+                )
 
-                    new_log_probs, predicted_values, entropy = self.evaluate_actions(
-                        eval_grid,
-                        eval_shapes,
-                        eval_availability,
-                        eval_explicit_features,
-                        eval_actions_seq,
-                        mb_initial_hidden,
-                        dones_tensor=None,
-                    )
-
-                else:
-                    new_log_probs, predicted_values, entropy = self.evaluate_actions(
-                        mb_obs_grid,
-                        mb_obs_shapes,
-                        mb_obs_availability,
-                        mb_obs_explicit_features,
-                        mb_actions,
-                        initial_lstm_state=None,
-                        dones_tensor=None,
-                    )
-
+                # PPO Loss Calculation
                 logratio = new_log_probs - mb_old_log_probs
                 ratio = torch.exp(logratio)
                 surr1 = ratio * mb_advantages
@@ -1235,67 +1376,69 @@ class PPOAgent:
                     + self.ppo_config.ENTROPY_COEF * entropy_loss
                 )
 
+                # Optimization Step
                 self.optimizer.zero_grad()
                 loss.backward()
                 if self.ppo_config.MAX_GRAD_NORM > 0:
                     grad_norm = nn.utils.clip_grad_norm_(
                         self.network.parameters(), self.ppo_config.MAX_GRAD_NORM
                     )
-                else:
-                    grad_norm = None
-
+                    grad_norm_val = grad_norm.item()  # Store value
                 self.optimizer.step()
 
+                # Accumulate stats
                 total_policy_loss += policy_loss.item()
                 total_value_loss += value_loss.item()
-                total_entropy += -entropy_loss.item()
+                total_entropy += -entropy_loss.item()  # Store positive entropy
                 num_updates += 1
 
+                # Update progress tracking
                 current_update_step = epoch * total_minibatches + (i + 1)
                 self.update_progress = current_update_step / total_update_steps
 
         avg_policy_loss = total_policy_loss / max(1, num_updates)
         avg_value_loss = total_value_loss / max(1, num_updates)
         avg_entropy = total_entropy / max(1, num_updates)
+        self.update_progress = 1.0  # Mark as complete
 
-        # --- REMOVED FINAL SUMMARY PRINT ---
-        # print(
-        #     f"[PPOAgent Update Summary] Avg P Loss: {avg_policy_loss:.4f}, Avg V Loss: {avg_value_loss:.4f}, Avg Entropy: {avg_entropy:.4f}"
-        # )
-        # --- END REMOVED ---
-        self.update_progress = 1.0
-
-        return {
+        metrics = {
             "policy_loss": avg_policy_loss,
             "value_loss": avg_value_loss,
             "entropy": avg_entropy,
         }
+        if grad_norm_val is not None:
+            metrics["grad_norm"] = grad_norm_val
+        return metrics
 
     def get_state_dict(self) -> AgentStateDict:
+        """Returns the agent's state dictionary for checkpointing."""
         original_device = next(self.network.parameters()).device
-        self.network.cpu()
+        self.network.cpu()  # Move to CPU before getting state dict
         state = {
             "network_state_dict": self.network.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
         }
-        self.network.to(original_device)
+        self.network.to(original_device)  # Move back to original device
         return state
 
     def load_state_dict(self, state_dict: AgentStateDict):
+        """Loads the agent's state from a dictionary."""
         print(f"[PPOAgent] Loading state dict. Target device: {self.device}")
         try:
             self.network.load_state_dict(state_dict["network_state_dict"])
-            self.network.to(self.device)
+            self.network.to(self.device)  # Ensure network is on the correct device
             print("[PPOAgent] Network state loaded.")
 
             if "optimizer_state_dict" in state_dict:
                 try:
+                    # Re-initialize optimizer with current network parameters BEFORE loading state
                     self.optimizer = optim.AdamW(
                         self.network.parameters(),
-                        lr=self.ppo_config.LEARNING_RATE,
+                        lr=self.ppo_config.LEARNING_RATE,  # Use current config LR
                         eps=self.ppo_config.ADAM_EPS,
                     )
                     self.optimizer.load_state_dict(state_dict["optimizer_state_dict"])
+                    # Move optimizer state tensors to the correct device
                     for state in self.optimizer.state.values():
                         for k, v in state.items():
                             if isinstance(v, torch.Tensor):
@@ -1305,6 +1448,7 @@ class PPOAgent:
                     print(
                         f"Warning: Could not load optimizer state ({e}). Re-initializing optimizer."
                     )
+                    # Re-initialize optimizer if loading failed
                     self.optimizer = optim.AdamW(
                         self.network.parameters(),
                         lr=self.ppo_config.LEARNING_RATE,
@@ -1319,9 +1463,7 @@ class PPOAgent:
                     lr=self.ppo_config.LEARNING_RATE,
                     eps=self.ppo_config.ADAM_EPS,
                 )
-
             print("[PPOAgent] load_state_dict complete.")
-
         except Exception as e:
             print(f"CRITICAL ERROR during PPOAgent.load_state_dict: {e}")
             traceback.print_exc()
@@ -1329,12 +1471,13 @@ class PPOAgent:
     def get_initial_hidden_state(
         self, num_envs: int
     ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """Gets the initial hidden state for the LSTM, if used."""
         if not self.rnn_config.USE_RNN:
             return None
         return self.network.get_initial_hidden_state(num_envs)
 
     def get_update_progress(self) -> float:
-        """Returns the progress of the current agent update phase (0.0 to 1.0)."""
+        """Returns the progress of the current agent update cycle (0.0 to 1.0)."""
         return self.update_progress
 
 
@@ -1358,16 +1501,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import math
-
-from config import ModelConfig, EnvConfig, PPOConfig, RNNConfig, DEVICE
 from typing import Tuple, List, Type, Optional
+
+from config import (
+    ModelConfig,
+    EnvConfig,
+    PPOConfig,
+    RNNConfig,
+    TransformerConfig,
+    # DEVICE, # Removed direct import
+)
 
 
 class ActorCriticNetwork(nn.Module):
     """
-    Actor-Critic Network: CNN+MLP -> Fusion -> Optional LSTM -> Actor/Critic Heads.
-    Handles both single step (eval) and sequence (RNN training) inputs.
-    Now includes shape availability and explicit features.
+    Actor-Critic Network: CNN+MLP -> Fusion -> Optional Transformer -> Optional LSTM -> Actor/Critic Heads.
+    Handles both single step (eval) and sequence (RNN/Transformer training) inputs.
+    Includes shape availability and explicit features.
+    Uses SiLU activation by default based on ModelConfig.
     """
 
     def __init__(
@@ -1376,34 +1527,32 @@ class ActorCriticNetwork(nn.Module):
         action_dim: int,
         model_config: ModelConfig.Network,
         rnn_config: RNNConfig,
+        transformer_config: TransformerConfig,
+        device: torch.device,  # --- MODIFIED: Added device ---
     ):
         super().__init__()
         self.action_dim = action_dim
         self.env_config = env_config
         self.config = model_config
         self.rnn_config = rnn_config
-        self.device = DEVICE
+        self.transformer_config = transformer_config
+        self.device = device  # --- MODIFIED: Use passed device ---
 
         print(f"[ActorCriticNetwork] Target device set to: {self.device}")
         print(f"[ActorCriticNetwork] Using RNN: {self.rnn_config.USE_RNN}")
+        print(
+            f"[ActorCriticNetwork] Using Transformer: {self.transformer_config.USE_TRANSFORMER}"
+        )
+        print(
+            f"[ActorCriticNetwork] Using Activation: {self.config.CONV_ACTIVATION.__name__}"
+        )
 
         self.grid_c, self.grid_h, self.grid_w = self.env_config.GRID_STATE_SHAPE
         self.shape_feat_dim = self.env_config.SHAPE_STATE_DIM
         self.shape_availability_dim = self.env_config.SHAPE_AVAILABILITY_DIM
-        # --- UPDATED: Read the potentially larger explicit features dimension ---
         self.explicit_features_dim = self.env_config.EXPLICIT_FEATURES_DIM
-        # --- END UPDATED ---
-        self.num_shape_slots = self.env_config.NUM_SHAPE_SLOTS
-        self.shape_feat_per_slot = self.env_config.SHAPE_FEATURES_PER_SHAPE
 
-        print(f"[ActorCriticNetwork] Initializing:")
-        print(f"  Input Grid Shape: [B, {self.grid_c}, {self.grid_h}, {self.grid_w}]")
-        print(f"  Input Shape Features Dim: {self.shape_feat_dim}")
-        print(f"  Input Shape Availability Dim: {self.shape_availability_dim}")
-        # --- UPDATED: Log the correct explicit features dim ---
-        print(f"  Input Explicit Features Dim: {self.explicit_features_dim}")
-        # --- END UPDATED ---
-
+        # --- Feature Extractors ---
         self.conv_base, conv_out_h, conv_out_w, conv_out_c = self._build_cnn_branch()
         self.conv_out_size = self._get_conv_out_size(
             (self.grid_c, self.grid_h, self.grid_w)
@@ -1415,55 +1564,95 @@ class ActorCriticNetwork(nn.Module):
         self.shape_mlp, self.shape_mlp_out_dim = self._build_shape_mlp_branch()
         print(f"  Shape Feature MLP Output Dim: {self.shape_mlp_out_dim}")
 
-        # --- MODIFIED: Calculate combined dim including availability and the *new* explicit features dim ---
         combined_features_dim = (
             self.conv_out_size
             + self.shape_mlp_out_dim
             + self.shape_availability_dim
-            + self.explicit_features_dim  # Use the updated dimension
+            + self.explicit_features_dim
         )
-        # --- END MODIFIED ---
         print(
-            f"  Combined Features Dim (CNN + Shape MLP + Availability + Explicit): {combined_features_dim}"
+            f"  Combined Features Dim (CNN + Shape MLP + Avail + Explicit): {combined_features_dim}"
         )
 
         self.fusion_mlp, self.fusion_output_dim = self._build_fusion_mlp_branch(
-            combined_features_dim  # Pass the updated combined dimension
+            combined_features_dim
         )
         print(f"  Fusion MLP Output Dim: {self.fusion_output_dim}")
 
+        # --- Optional Transformer Layer ---
+        self.transformer_encoder = None
+        transformer_output_dim = self.fusion_output_dim
+        if self.transformer_config.USE_TRANSFORMER:
+            if self.fusion_output_dim != self.transformer_config.TRANSFORMER_D_MODEL:
+                raise ValueError(
+                    f"Fusion MLP output dim ({self.fusion_output_dim}) must match TRANSFORMER_D_MODEL ({self.transformer_config.TRANSFORMER_D_MODEL})"
+                )
+            if (
+                self.transformer_config.TRANSFORMER_D_MODEL
+                % self.transformer_config.TRANSFORMER_NHEAD
+                != 0
+            ):
+                raise ValueError(
+                    f"TRANSFORMER_D_MODEL ({self.transformer_config.TRANSFORMER_D_MODEL}) must be divisible by TRANSFORMER_NHEAD ({self.transformer_config.TRANSFORMER_NHEAD})"
+                )
+
+            encoder_layer = nn.TransformerEncoderLayer(
+                d_model=self.transformer_config.TRANSFORMER_D_MODEL,
+                nhead=self.transformer_config.TRANSFORMER_NHEAD,
+                dim_feedforward=self.transformer_config.TRANSFORMER_DIM_FEEDFORWARD,
+                dropout=self.transformer_config.TRANSFORMER_DROPOUT,
+                activation=self.transformer_config.TRANSFORMER_ACTIVATION,  # Uses config activation (e.g., 'silu')
+                batch_first=True,
+                device=self.device,
+            )
+            self.transformer_encoder = nn.TransformerEncoder(
+                encoder_layer, num_layers=self.transformer_config.TRANSFORMER_NUM_LAYERS
+            ).to(self.device)
+            transformer_output_dim = self.transformer_config.TRANSFORMER_D_MODEL
+            print(
+                f"  Transformer Encoder Added (d_model={transformer_output_dim}, nhead={self.transformer_config.TRANSFORMER_NHEAD}, layers={self.transformer_config.TRANSFORMER_NUM_LAYERS})"
+            )
+
+        # --- Optional LSTM Layer ---
         self.lstm_layer = None
         self.lstm_hidden_size = 0
+        lstm_input_dim = transformer_output_dim  # Input to LSTM is output of Transformer (or Fusion MLP if no Transformer)
+        head_input_dim = lstm_input_dim  # Input to heads is output of LSTM (or Transformer/Fusion MLP)
+
         if self.rnn_config.USE_RNN:
             self.lstm_hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
             self.lstm_layer = nn.LSTM(
-                input_size=self.fusion_output_dim,
+                input_size=lstm_input_dim,
                 hidden_size=self.lstm_hidden_size,
                 num_layers=self.rnn_config.LSTM_NUM_LAYERS,
                 batch_first=True,
             ).to(self.device)
-            print(f"  LSTM Layer Added (Hidden Size: {self.lstm_hidden_size})")
-            head_input_dim = self.lstm_hidden_size
-        else:
-            head_input_dim = self.fusion_output_dim
+            print(
+                f"  LSTM Layer Added (Input: {lstm_input_dim}, Hidden: {self.lstm_hidden_size})"
+            )
+            head_input_dim = self.lstm_hidden_size  # Heads take LSTM output
 
+        # --- Actor/Critic Heads ---
         self.actor_head = nn.Linear(head_input_dim, self.action_dim).to(self.device)
         self.critic_head = nn.Linear(head_input_dim, 1).to(self.device)
+        print(f"  Head Input Dim: {head_input_dim}")
         print(f"  Actor Head Output Dim: {self.action_dim}")
         print(f"  Critic Head Output Dim: 1")
 
         self._init_head_weights()
 
     def _init_head_weights(self):
+        """Initializes Actor/Critic head weights."""
         print("  Initializing Actor/Critic heads using Xavier Uniform.")
-        actor_gain = nn.init.calculate_gain("linear")
-        critic_gain = nn.init.calculate_gain("linear")
+        # Small gain for actor output layer
         nn.init.xavier_uniform_(self.actor_head.weight, gain=0.01)
         nn.init.constant_(self.actor_head.bias, 0)
-        nn.init.xavier_uniform_(self.critic_head.weight, gain=critic_gain)
+        # Standard gain for critic output layer
+        nn.init.xavier_uniform_(self.critic_head.weight, gain=1.0)
         nn.init.constant_(self.critic_head.bias, 0)
 
     def _build_cnn_branch(self) -> Tuple[nn.Sequential, int, int, int]:
+        """Builds the CNN feature extractor for the grid."""
         conv_layers: List[nn.Module] = []
         current_channels = self.grid_c
         h, w = self.grid_h, self.grid_w
@@ -1475,39 +1664,48 @@ class ActorCriticNetwork(nn.Module):
                 kernel_size=cfg.CONV_KERNEL_SIZE,
                 stride=cfg.CONV_STRIDE,
                 padding=cfg.CONV_PADDING,
-                bias=not cfg.USE_BATCHNORM_CONV,
+                bias=not cfg.USE_BATCHNORM_CONV,  # No bias if using BatchNorm
             ).to(self.device)
             conv_layers.append(conv_layer)
             if cfg.USE_BATCHNORM_CONV:
                 conv_layers.append(nn.BatchNorm2d(out_channels).to(self.device))
-            conv_layers.append(cfg.CONV_ACTIVATION())
+            conv_layers.append(
+                cfg.CONV_ACTIVATION()
+            )  # Use activation from config (e.g., SiLU)
             current_channels = out_channels
+            # Calculate output dimensions after conv
             h = (h + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
             w = (w + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
         return nn.Sequential(*conv_layers), h, w, current_channels
 
     def _get_conv_out_size(self, shape: Tuple[int, int, int]) -> int:
+        """Calculates the flattened output size of the CNN."""
         with torch.no_grad():
             dummy_input = torch.zeros(1, *shape, device=self.device)
-            self.conv_base.eval()
             output = self.conv_base(dummy_input)
-            self.conv_base.train()
             return int(np.prod(output.size()[1:]))
 
     def _build_shape_mlp_branch(self) -> Tuple[nn.Sequential, int]:
+        """Builds the MLP for processing shape features."""
         shape_mlp_layers: List[nn.Module] = []
         current_dim = self.env_config.SHAPE_STATE_DIM
         cfg = self.config
         for hidden_dim in cfg.SHAPE_FEATURE_MLP_DIMS:
             lin_layer = nn.Linear(current_dim, hidden_dim).to(self.device)
             shape_mlp_layers.append(lin_layer)
-            shape_mlp_layers.append(cfg.SHAPE_MLP_ACTIVATION())
+            shape_mlp_layers.append(
+                cfg.SHAPE_MLP_ACTIVATION()
+            )  # Use activation from config
             current_dim = hidden_dim
         if not cfg.SHAPE_FEATURE_MLP_DIMS:
-            return nn.Identity(), current_dim
+            return (
+                nn.Identity(),
+                current_dim,
+            )  # Return Identity if no MLP layers defined
         return nn.Sequential(*shape_mlp_layers), current_dim
 
     def _build_fusion_mlp_branch(self, input_dim: int) -> Tuple[nn.Sequential, int]:
+        """Builds the MLP that fuses all features before RNN/Transformer/Heads."""
         fusion_layers: List[nn.Module] = []
         current_fusion_dim = input_dim
         cfg = self.config
@@ -1518,7 +1716,9 @@ class ActorCriticNetwork(nn.Module):
             fusion_layers.append(linear_layer)
             if cfg.USE_BATCHNORM_FC:
                 fusion_layers.append(nn.BatchNorm1d(hidden_dim).to(self.device))
-            fusion_layers.append(cfg.COMBINED_ACTIVATION())
+            fusion_layers.append(
+                cfg.COMBINED_ACTIVATION()
+            )  # Use activation from config
             if cfg.DROPOUT_FC > 0:
                 fusion_layers.append(nn.Dropout(cfg.DROPOUT_FC).to(self.device))
             current_fusion_dim = hidden_dim
@@ -1529,31 +1729,37 @@ class ActorCriticNetwork(nn.Module):
         grid_tensor: torch.Tensor,
         shape_feature_tensor: torch.Tensor,
         shape_availability_tensor: torch.Tensor,
-        # --- Input signature remains the same ---
         explicit_features_tensor: torch.Tensor,
-        # --- End Input ---
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        padding_mask: Optional[torch.Tensor] = None,  # Shape: (batch_size, seq_len)
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
-
-        model_device = next(self.parameters()).device
+        """
+        Forward pass through the network. Handles single step and sequence inputs.
+        """
+        # --- Ensure inputs are on the correct device ---
+        # --- MODIFIED: Use self.device instead of inferring from parameters ---
+        model_device = self.device
+        # --- END MODIFIED ---
         grid_tensor = grid_tensor.to(model_device)
         shape_feature_tensor = shape_feature_tensor.to(model_device)
         shape_availability_tensor = shape_availability_tensor.to(model_device)
-        # --- Move explicit features tensor to device ---
         explicit_features_tensor = explicit_features_tensor.to(model_device)
-        # --- End Move ---
-        if hidden_state:
+        if hidden_state is not None:
             hidden_state = (
                 hidden_state[0].to(model_device),
                 hidden_state[1].to(model_device),
             )
+        if padding_mask is not None:
+            padding_mask = padding_mask.to(model_device)
 
-        is_sequence = self.rnn_config.USE_RNN and grid_tensor.ndim == 5
+        # --- Determine input shape and flatten if necessary ---
+        # Input can be (B, C, H, W) or (B, T, C, H, W)
+        is_sequence_input = grid_tensor.ndim == 5
         initial_batch_size = grid_tensor.shape[0]
-        seq_len = grid_tensor.shape[1] if is_sequence else 1
-        num_samples = initial_batch_size * seq_len
+        seq_len = grid_tensor.shape[1] if is_sequence_input else 1
+        num_samples = initial_batch_size * seq_len  # Total samples to process
 
-        # Reshape inputs to [B*T or B, ...]
+        # Reshape inputs to (N, Features) where N = B*T for processing by CNN/MLP
         grid_input_flat = grid_tensor.reshape(
             num_samples, *self.env_config.GRID_STATE_SHAPE
         )
@@ -1563,58 +1769,87 @@ class ActorCriticNetwork(nn.Module):
         shape_availability_input_flat = shape_availability_tensor.reshape(
             num_samples, self.env_config.SHAPE_AVAILABILITY_DIM
         )
-        # --- Reshape explicit features tensor (using the updated dimension from config) ---
         explicit_features_input_flat = explicit_features_tensor.reshape(
             num_samples, self.env_config.EXPLICIT_FEATURES_DIM
         )
-        # --- End Reshape ---
 
-        conv_output = self.conv_base(grid_input_flat)
-        conv_output_flat = conv_output.view(num_samples, -1)
-        shape_mlp_output = self.shape_mlp(shape_feature_input_flat)
+        # --- Feature Extraction ---
+        conv_features_flat = self.conv_base(grid_input_flat).view(num_samples, -1)
+        shape_features_flat = self.shape_mlp(shape_feature_input_flat)
 
-        # --- Combine all feature streams (logic remains the same, dimensions handled by reshape) ---
-        combined_features = torch.cat(
+        # --- Feature Fusion ---
+        combined_features_flat = torch.cat(
             (
-                conv_output_flat,
-                shape_mlp_output,
+                conv_features_flat,
+                shape_features_flat,
                 shape_availability_input_flat,
-                explicit_features_input_flat,  # Add explicit features
+                explicit_features_input_flat,
             ),
             dim=1,
         )
-        # --- End Combine ---
+        fused_features_flat = self.fusion_mlp(combined_features_flat)
 
-        fused_output = self.fusion_mlp(combined_features)
-
-        next_hidden_state = hidden_state
-        if self.rnn_config.USE_RNN and self.lstm_layer is not None:
-            lstm_input = fused_output.view(
+        # --- Optional Transformer ---
+        current_features = fused_features_flat  # Start with fused features
+        if (
+            self.transformer_config.USE_TRANSFORMER
+            and self.transformer_encoder is not None
+        ):
+            # Reshape to (B, T, Dim) for Transformer
+            transformer_input = current_features.view(
                 initial_batch_size, seq_len, self.fusion_output_dim
             )
-            lstm_output, next_hidden_state = self.lstm_layer(lstm_input, hidden_state)
-            head_input = lstm_output.contiguous().view(num_samples, -1)
+            # Apply Transformer encoder with padding mask if provided
+            transformer_output = self.transformer_encoder(
+                transformer_input, src_key_padding_mask=padding_mask
+            )
+            # Flatten back to (N, Dim)
+            current_features = transformer_output.reshape(num_samples, -1)
+
+        # --- Optional LSTM ---
+        next_hidden_state = hidden_state  # Pass incoming state through
+        head_input_features = (
+            current_features  # Input to heads starts as output of previous layer
+        )
+
+        if self.rnn_config.USE_RNN and self.lstm_layer is not None:
+            # Reshape to (B, T, Dim) for LSTM
+            lstm_input = current_features.view(initial_batch_size, seq_len, -1)
+            # Apply LSTM
+            lstm_output_seq, next_hidden_state_tuple = self.lstm_layer(
+                lstm_input, hidden_state
+            )
+            # Flatten output for heads
+            head_input_features = lstm_output_seq.reshape(num_samples, -1)
+            # Update the hidden state to be returned
+            next_hidden_state = next_hidden_state_tuple
+
+        # --- Actor/Critic Heads ---
+        policy_logits_flat = self.actor_head(head_input_features)
+        value_flat = self.critic_head(head_input_features)
+
+        # --- Reshape outputs back to sequence if necessary ---
+        if is_sequence_input:
+            policy_logits = policy_logits_flat.view(initial_batch_size, seq_len, -1)
+            value = value_flat.view(initial_batch_size, seq_len, -1)
         else:
-            head_input = fused_output
-
-        policy_logits = self.actor_head(head_input)
-        value = self.critic_head(head_input)
-
-        # Reshape back if input was sequence
-        if is_sequence:
-            policy_logits = policy_logits.view(initial_batch_size, seq_len, -1)
-            value = value.view(initial_batch_size, seq_len, -1)
+            policy_logits = policy_logits_flat
+            value = value_flat
 
         return policy_logits, value, next_hidden_state
 
     def get_initial_hidden_state(
         self, batch_size: int
     ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """Returns the initial hidden state for the LSTM layer."""
         if not self.rnn_config.USE_RNN or self.lstm_layer is None:
             return None
-        model_device = next(self.parameters()).device
+        # --- MODIFIED: Use self.device ---
+        model_device = self.device
+        # --- END MODIFIED ---
         num_layers = self.rnn_config.LSTM_NUM_LAYERS
         hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
+        # Shape: (num_layers, batch_size, hidden_size)
         h_0 = torch.zeros(num_layers, batch_size, hidden_size, device=model_device)
         c_0 = torch.zeros(num_layers, batch_size, hidden_size, device=model_device)
         return (h_0, c_0)
@@ -1623,36 +1858,88 @@ class ActorCriticNetwork(nn.Module):
 File: agent\networks\__init__.py
 
 
+File: config\constants.py
+# File: config/constants.py
+# NEW FILE
+"""
+Defines constants shared across different modules, primarily visual elements,
+to avoid circular imports and keep configuration clean.
+"""
+
+# Colors (RGB tuples 0-255)
+WHITE: tuple[int, int, int] = (255, 255, 255)
+BLACK: tuple[int, int, int] = (0, 0, 0)
+LIGHTG: tuple[int, int, int] = (140, 140, 140)
+GRAY: tuple[int, int, int] = (50, 50, 50)
+RED: tuple[int, int, int] = (255, 50, 50)
+DARK_RED: tuple[int, int, int] = (80, 10, 10)
+BLUE: tuple[int, int, int] = (50, 50, 255)
+YELLOW: tuple[int, int, int] = (255, 255, 100)
+GOOGLE_COLORS: list[tuple[int, int, int]] = [
+    (15, 157, 88),  # Green
+    (244, 180, 0),  # Yellow/Orange
+    (66, 133, 244),  # Blue
+    (219, 68, 55),  # Red
+]
+LINE_CLEAR_FLASH_COLOR: tuple[int, int, int] = (180, 180, 220)
+LINE_CLEAR_HIGHLIGHT_COLOR: tuple[int, int, int, int] = (255, 255, 0, 180)  # RGBA
+GAME_OVER_FLASH_COLOR: tuple[int, int, int] = (255, 0, 0)
+
+# Add other simple, shared constants here if needed.
+
+
 File: config\core.py
 # File: config/core.py
 import torch
 from typing import Deque, Dict, Any, List, Type, Tuple, Optional
 
+# --- MODIFIED: Import from constants ---
 from .general import TOTAL_TRAINING_STEPS
+from .constants import (
+    WHITE,
+    BLACK,
+    LIGHTG,
+    GRAY,
+    RED,
+    DARK_RED,
+    BLUE,
+    YELLOW,
+    GOOGLE_COLORS,
+    LINE_CLEAR_FLASH_COLOR,
+    LINE_CLEAR_HIGHLIGHT_COLOR,
+    GAME_OVER_FLASH_COLOR,
+)
+
+# --- END MODIFIED ---
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 64
+    NUM_ENVS_TO_RENDER = 4
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
-    LEFT_PANEL_WIDTH = int(SCREEN_WIDTH * 0.7)
+    LEFT_PANEL_WIDTH = int(SCREEN_WIDTH * 0.8)
     ENV_SPACING = 0
     ENV_GRID_PADDING = 0
-    FPS = 0
+    FPS = 0  # Set to 0 for max speed, or > 0 to cap FPS
 
-    WHITE = (255, 255, 255)
-    BLACK = (0, 0, 0)
-    LIGHTG = (140, 140, 140)
-    GRAY = (50, 50, 50)
-    RED = (255, 50, 50)
-    DARK_RED = (80, 10, 10)
-    BLUE = (50, 50, 255)
-    YELLOW = (255, 255, 100)
-    GOOGLE_COLORS = [(15, 157, 88), (244, 180, 0), (66, 133, 244), (219, 68, 55)]
-    LINE_CLEAR_FLASH_COLOR = (180, 180, 220)
-    LINE_CLEAR_HIGHLIGHT_COLOR = (255, 255, 0, 180)
-    GAME_OVER_FLASH_COLOR = (255, 0, 0)
+    # --- MODIFIED: Use imported constants ---
+    WHITE = WHITE
+    BLACK = BLACK
+    LIGHTG = LIGHTG
+    GRAY = GRAY
+    RED = RED
+    DARK_RED = DARK_RED
+    BLUE = BLUE
+    YELLOW = YELLOW
+    GOOGLE_COLORS = GOOGLE_COLORS
+    LINE_CLEAR_FLASH_COLOR = LINE_CLEAR_FLASH_COLOR
+    LINE_CLEAR_HIGHLIGHT_COLOR = LINE_CLEAR_HIGHLIGHT_COLOR
+    GAME_OVER_FLASH_COLOR = GAME_OVER_FLASH_COLOR
+    # --- END MODIFIED ---
+
+
+# ... (rest of the file remains the same) ...
 
 
 class EnvConfig:
@@ -1694,22 +1981,33 @@ class RewardConfig:
     PENALTY_BUMPINESS_FACTOR = -0.01
     PENALTY_HOLE_PER_HOLE = -0.07
     PENALTY_NEW_HOLE = -0.15
+    ENABLE_PBRS = True
+    PBRS_HEIGHT_COEF = -0.05
+    PBRS_HOLE_COEF = -0.20
+    PBRS_BUMPINESS_COEF = -0.02
 
 
 class PPOConfig:
-    LEARNING_RATE = 2e-4
+    LEARNING_RATE = 1e-4
     ADAM_EPS = 1e-5
-    NUM_STEPS_PER_ROLLOUT = 1024
-    PPO_EPOCHS = 12
+    NUM_STEPS_PER_ROLLOUT = 128  # Reduced for testing/debugging if needed
+    PPO_EPOCHS = 6
     NUM_MINIBATCHES = 64
-    CLIP_PARAM = 0.2
+    CLIP_PARAM = 0.1
     GAMMA = 0.995
     GAE_LAMBDA = 0.95
     VALUE_LOSS_COEF = 0.5
     ENTROPY_COEF = 0.01
     MAX_GRAD_NORM = 0.5
+
+    # --- MODIFIED: Added LR Scheduler Config ---
     USE_LR_SCHEDULER = True
-    LR_SCHEDULER_END_FRACTION = 0.0
+    LR_SCHEDULE_TYPE = "linear"  # Options: "linear", "cosine"
+    LR_LINEAR_END_FRACTION = (
+        0.0  # For linear schedule: fraction of initial LR at the end
+    )
+    LR_COSINE_MIN_FACTOR = 0.01  # For cosine schedule: min LR = initial_lr * min_factor
+    # --- END MODIFIED ---
 
     @property
     def MINIBATCH_SIZE(self) -> int:
@@ -1723,6 +2021,16 @@ class PPOConfig:
         else:
             num_minibatches = self.NUM_MINIBATCHES
         batch_size = total_data_per_update // num_minibatches
+        min_recommended_size = 128
+        if batch_size < min_recommended_size and batch_size > 0:  # Added check > 0
+            print(
+                f"Warning: Calculated minibatch size ({batch_size}) is < {min_recommended_size}. Consider adjusting NUM_STEPS_PER_ROLLOUT or NUM_MINIBATCHES."
+            )
+        elif batch_size <= 0:
+            print(
+                f"ERROR: Calculated minibatch size is <= 0 ({batch_size}). Check NUM_ENVS({env_config_instance.NUM_ENVS}), NUM_STEPS_PER_ROLLOUT({self.NUM_STEPS_PER_ROLLOUT}), NUM_MINIBATCHES({self.NUM_MINIBATCHES}). Defaulting to 1."
+            )
+            return 1
         return max(1, batch_size)
 
 
@@ -1732,10 +2040,28 @@ class RNNConfig:
     LSTM_NUM_LAYERS = 1
 
 
+class ObsNormConfig:
+    ENABLE_OBS_NORMALIZATION = True
+    NORMALIZE_GRID = True
+    NORMALIZE_SHAPES = True
+    NORMALIZE_AVAILABILITY = False
+    NORMALIZE_EXPLICIT_FEATURES = True
+    OBS_CLIP = 10.0
+    EPSILON = 1e-8
+
+
+class TransformerConfig:
+    USE_TRANSFORMER = True
+    TRANSFORMER_D_MODEL = 896
+    TRANSFORMER_NHEAD = 8
+    TRANSFORMER_DIM_FEEDFORWARD = 1024
+    TRANSFORMER_NUM_LAYERS = 2
+    TRANSFORMER_DROPOUT = 0.1
+    TRANSFORMER_ACTIVATION = "relu"
+
+
 class TrainConfig:
-    # --- MODIFIED: Reduced checkpoint frequency ---
-    CHECKPOINT_SAVE_FREQ = 5  # Save every 5 rollouts
-    # --- END MODIFIED ---
+    CHECKPOINT_SAVE_FREQ = 20
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
@@ -1756,7 +2082,14 @@ class ModelConfig:
         SHAPE_FEATURE_MLP_DIMS = [192]
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
 
-        COMBINED_FC_DIMS = [1792, 896]
+        _transformer_cfg = TransformerConfig()
+        _last_fc_dim = (
+            _transformer_cfg.TRANSFORMER_D_MODEL
+            if _transformer_cfg.USE_TRANSFORMER
+            else 896
+        )
+        COMBINED_FC_DIMS = [1792, _last_fc_dim]
+        del _transformer_cfg
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
         DROPOUT_FC = 0.0
@@ -1764,31 +2097,27 @@ class ModelConfig:
 
 class StatsConfig:
     STATS_AVG_WINDOW: List[int] = [50, 100, 500, 1_000, 5_000, 10_000]
-    # --- MODIFIED: Reduced console log frequency ---
-    CONSOLE_LOG_FREQ = 2  # Log every 2 rollouts
-    # --- END MODIFIED ---
+    CONSOLE_LOG_FREQ = 5
     PLOT_DATA_WINDOW = 100_000
 
 
 class TensorBoardConfig:
     LOG_HISTOGRAMS = True
-    # --- MODIFIED: Reduced histogram log frequency ---
-    HISTOGRAM_LOG_FREQ = 5  # Log histograms every 5 rollouts
-    # --- END MODIFIED ---
+    HISTOGRAM_LOG_FREQ = 20
     LOG_IMAGES = True
-    # --- MODIFIED: Reduced image log frequency ---
-    IMAGE_LOG_FREQ = 10  # Log images every 10 rollouts
-    # --- END MODIFIED ---
+    IMAGE_LOG_FREQ = 50
     LOG_DIR: Optional[str] = None
     LOG_SHAPE_PLACEMENT_Q_VALUES = False
 
 
 class DemoConfig:
-    BACKGROUND_COLOR = (10, 10, 20)
-    SELECTED_SHAPE_HIGHLIGHT_COLOR = VisConfig.BLUE
+    # --- MODIFIED: Use imported constants ---
+    BACKGROUND_COLOR = (10, 10, 20)  # Keep specific demo color here
+    SELECTED_SHAPE_HIGHLIGHT_COLOR = BLUE
     HUD_FONT_SIZE = 24
     HELP_FONT_SIZE = 18
     HELP_TEXT = "[Arrows]=Move | [Q/E]=Cycle Shape | [Space]=Place | [ESC]=Exit"
+    # --- END MODIFIED ---
 
 
 File: config\general.py
@@ -1797,22 +2126,34 @@ File: config\general.py
 import torch
 import os
 import time
-from utils.helpers import get_device
+from typing import Optional
+# --- REMOVED: from utils.helpers import get_device ---
 
-DEVICE = get_device()
+# --- MODIFIED: Define DEVICE as placeholder initially ---
+DEVICE: Optional[torch.device] = None
+# --- END MODIFIED ---
+
 RANDOM_SEED = 42
 RUN_ID = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
 BASE_CHECKPOINT_DIR = "checkpoints"
 BASE_LOG_DIR = "logs"
 
-# --- MODIFIED: Reduced total steps ---
-TOTAL_TRAINING_STEPS = 10_000_000  # 10 Million steps
-# --- END MODIFIED ---
+TOTAL_TRAINING_STEPS = 500_000_000  # 500 Million steps
 
 RUN_CHECKPOINT_DIR = os.path.join(BASE_CHECKPOINT_DIR, RUN_ID)
 RUN_LOG_DIR = os.path.join(BASE_LOG_DIR, "tensorboard", RUN_ID)
 
 MODEL_SAVE_PATH = os.path.join(RUN_CHECKPOINT_DIR, "ppo_agent_state.pth")
+
+
+def set_device(device: torch.device):
+    """Sets the global DEVICE variable."""
+    global DEVICE
+    DEVICE = device
+    # Update dependent configs if necessary (though direct usage is preferred)
+    # Example: If other configs directly reference config.general.DEVICE at import time,
+    # this won't update them. It's better to pass the device where needed.
+    print(f"[Config] Global DEVICE set to: {DEVICE}")
 
 
 File: config\utils.py
@@ -1885,6 +2226,7 @@ def get_config_dict() -> Dict[str, Any]:
 
 
 File: config\validation.py
+# File: config/validation.py
 import os, torch
 from .core import (
     EnvConfig,
@@ -1896,6 +2238,8 @@ from .core import (
     TensorBoardConfig,
     VisConfig,
     DemoConfig,
+    ObsNormConfig,  # Added
+    TransformerConfig,  # Added
 )
 from .general import (
     RUN_ID,
@@ -1911,12 +2255,14 @@ def print_config_info_and_validate():
     env_config_instance = EnvConfig()
     ppo_config_instance = PPOConfig()
     rnn_config_instance = RNNConfig()
+    transformer_config_instance = TransformerConfig()  # Added instance
+    obs_norm_config_instance = ObsNormConfig()  # Added instance
 
     print("-" * 70)
     print(f"RUN ID: {RUN_ID}")
     print(f"Log Directory: {RUN_LOG_DIR}")
     print(f"Checkpoint Directory: {RUN_CHECKPOINT_DIR}")
-    print(f"Device: {DEVICE}")
+    print(f"Device: {DEVICE}")  # DEVICE should be set by now
     print(
         f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
         f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
@@ -1942,6 +2288,27 @@ def print_config_info_and_validate():
     print(
         f"    Value Coef: {ppo_config_instance.VALUE_LOSS_COEF}, Entropy Coef: {ppo_config_instance.ENTROPY_COEF}"
     )
+
+    # --- MODIFIED: Use correct attribute name and add cosine info ---
+    lr_schedule_str = ""
+    if ppo_config_instance.USE_LR_SCHEDULER:
+        schedule_type = getattr(ppo_config_instance, "LR_SCHEDULE_TYPE", "linear")
+        if schedule_type == "linear":
+            end_fraction = getattr(ppo_config_instance, "LR_LINEAR_END_FRACTION", 0.0)
+            lr_schedule_str = f" (Linear Decay to {end_fraction * 100}%)"
+        elif schedule_type == "cosine":
+            min_factor = getattr(ppo_config_instance, "LR_COSINE_MIN_FACTOR", 0.01)
+            lr_schedule_str = f" (Cosine Decay to {min_factor * 100}%)"
+        else:
+            lr_schedule_str = f" (Unknown Schedule: {schedule_type})"
+
+    print(
+        f"--- Using LR Scheduler: {ppo_config_instance.USE_LR_SCHEDULER}"
+        + lr_schedule_str
+        + " ---"
+    )
+    # --- END MODIFIED ---
+
     print(
         f"--- Using RNN: {rnn_config_instance.USE_RNN}"
         + (
@@ -1952,10 +2319,19 @@ def print_config_info_and_validate():
         + " ---"
     )
     print(
-        f"--- Using LR Scheduler: {ppo_config_instance.USE_LR_SCHEDULER}"
+        f"--- Using Transformer: {transformer_config_instance.USE_TRANSFORMER}"
         + (
-            f" (Linear Decay to {ppo_config_instance.LR_SCHEDULER_END_FRACTION * 100}%)"
-            if ppo_config_instance.USE_LR_SCHEDULER
+            f" (d_model={transformer_config_instance.TRANSFORMER_D_MODEL}, nhead={transformer_config_instance.TRANSFORMER_NHEAD}, layers={transformer_config_instance.TRANSFORMER_NUM_LAYERS})"
+            if transformer_config_instance.USE_TRANSFORMER
+            else ""
+        )
+        + " ---"
+    )
+    print(
+        f"--- Using Obs Normalization: {obs_norm_config_instance.ENABLE_OBS_NORMALIZATION}"
+        + (
+            f" (Grid:{obs_norm_config_instance.NORMALIZE_GRID}, Shapes:{obs_norm_config_instance.NORMALIZE_SHAPES}, Avail:{obs_norm_config_instance.NORMALIZE_AVAILABILITY}, Explicit:{obs_norm_config_instance.NORMALIZE_EXPLICIT_FEATURES}, Clip:{obs_norm_config_instance.OBS_CLIP})"
+            if obs_norm_config_instance.ENABLE_OBS_NORMALIZATION
             else ""
         )
         + " ---"
@@ -1980,12 +2356,13 @@ def print_config_info_and_validate():
     )
 
     if env_config_instance.NUM_ENVS >= 1024:
+        device_type = DEVICE.type if DEVICE else "UNKNOWN"
         print(
             "*" * 70
             + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. Monitor system resources. ***"
             + (
                 "\n*** Using MPS device. Performance varies. Force CPU via env var if needed. ***"
-                if DEVICE.type == "mps"
+                if device_type == "mps"
                 else ""
             )
             + "\n"
@@ -2010,6 +2387,10 @@ from .core import (
     StatsConfig,
     TensorBoardConfig,
     DemoConfig,
+    # --- NEW IMPORTS ---
+    ObsNormConfig,
+    TransformerConfig,
+    # --- END NEW IMPORTS ---
 )
 from .general import (
     DEVICE,
@@ -2024,6 +2405,24 @@ from .general import (
 )
 from .utils import get_config_dict
 from .validation import print_config_info_and_validate
+
+# --- NEW: Import and export constants ---
+from .constants import (
+    WHITE,
+    BLACK,
+    LIGHTG,
+    GRAY,
+    RED,
+    DARK_RED,
+    BLUE,
+    YELLOW,
+    GOOGLE_COLORS,
+    LINE_CLEAR_FLASH_COLOR,
+    LINE_CLEAR_HIGHLIGHT_COLOR,
+    GAME_OVER_FLASH_COLOR,
+)
+
+# --- END NEW ---
 
 # Assign RUN_LOG_DIR to TensorBoardConfig after imports
 TensorBoardConfig.LOG_DIR = RUN_LOG_DIR
@@ -2040,6 +2439,8 @@ __all__ = [
     "StatsConfig",
     "TensorBoardConfig",
     "DemoConfig",
+    "ObsNormConfig",
+    "TransformerConfig",  # Added new configs
     # General Constants/Paths
     "DEVICE",
     "RANDOM_SEED",
@@ -2053,6 +2454,20 @@ __all__ = [
     # Utils/Validation
     "get_config_dict",
     "print_config_info_and_validate",
+    # --- NEW: Export constants ---
+    "WHITE",
+    "BLACK",
+    "LIGHTG",
+    "GRAY",
+    "RED",
+    "DARK_RED",
+    "BLUE",
+    "YELLOW",
+    "GOOGLE_COLORS",
+    "LINE_CLEAR_FLASH_COLOR",
+    "LINE_CLEAR_HIGHLIGHT_COLOR",
+    "GAME_OVER_FLASH_COLOR",
+    # --- END NEW ---
 ]
 
 
@@ -2060,48 +2475,61 @@ File: environment\game_state.py
 # File: environment/game_state.py
 import time
 import numpy as np
-from typing import List, Optional, Tuple, Dict, Union
-from collections import deque
-from typing import Deque
+from typing import List, Optional, Tuple, Dict, Union, Deque
 import copy
+
+# --- MOVED IMPORT TO TOP LEVEL ---
+from config import EnvConfig, RewardConfig, PPOConfig
+
+# --- END MOVED IMPORT ---
 
 from .grid import Grid
 from .shape import Shape
-from config import EnvConfig, RewardConfig
 
 StateType = Dict[str, np.ndarray]
 
 
 class GameState:
+    """Represents the state of a single game instance."""
+
     def __init__(self):
+        # Config instances are now available due to top-level import
         self.env_config = EnvConfig()
         self.rewards = RewardConfig()
-        self.grid = Grid(self.env_config)
-        self.shapes: List[Optional[Shape]] = []
-        self.score = 0.0
-        self.game_score = 0
-        self.lines_cleared_this_episode = 0
-        self.pieces_placed_this_episode = 0
+        self.ppo_config = PPOConfig()  # Needed for gamma in PBRS
 
-        self.blink_time = 0.0
-        self.last_time = time.time()
-        self.freeze_time = 0.0
-        self.line_clear_flash_time = 0.0
+        self.grid = Grid(self.env_config)  # Pass env_config to Grid
+        self.shapes: List[Optional[Shape]] = []
+        self.score: float = 0.0  # Cumulative RL score for the episode
+        self.game_score: int = 0  # In-game score metric
+        self.lines_cleared_this_episode: int = 0
+        self.pieces_placed_this_episode: int = 0
+
+        # Timers for visual effects
+        self.blink_time: float = 0.0
+        self.last_time: float = time.time()
+        self.freeze_time: float = 0.0
+        self.line_clear_flash_time: float = 0.0
         self.line_clear_highlight_time: float = 0.0
         self.game_over_flash_time: float = 0.0
         self.cleared_triangles_coords: List[Tuple[int, int]] = []
 
-        self.game_over = False
-        self._last_action_valid = True
+        self.game_over: bool = False
+        self._last_action_valid: bool = True
 
+        # Demo mode state
         self.demo_selected_shape_idx: int = 0
         self.demo_target_row: int = self.env_config.ROWS // 2
         self.demo_target_col: int = self.env_config.COLS // 2
 
+        # State for PBRS
+        self._last_potential: float = 0.0
+
         self.reset()
 
     def reset(self) -> StateType:
-        self.grid = Grid(self.env_config)
+        """Resets the game to its initial state."""
+        self.grid = Grid(self.env_config)  # Re-create grid object
         self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
         self.score = 0.0
         self.game_score = 0
@@ -2122,9 +2550,29 @@ class GameState:
         self.demo_selected_shape_idx = 0
         self.demo_target_row = self.env_config.ROWS // 2
         self.demo_target_col = self.env_config.COLS // 2
+
+        self._last_potential = self._calculate_potential()
+
         return self.get_state()
 
+    def _calculate_potential(self) -> float:
+        """Calculates the potential function based on current grid state for PBRS."""
+        if not self.rewards.ENABLE_PBRS:
+            return 0.0
+
+        potential = 0.0
+        max_height = self.grid.get_max_height()
+        num_holes = self.grid.count_holes()
+        bumpiness = self.grid.get_bumpiness()
+
+        potential += self.rewards.PBRS_HEIGHT_COEF * max_height
+        potential += self.rewards.PBRS_HOLE_COEF * num_holes
+        potential += self.rewards.PBRS_BUMPINESS_COEF * bumpiness
+
+        return potential
+
     def valid_actions(self) -> List[int]:
+        """Returns a list of valid action indices for the current state."""
         if self.game_over or self.freeze_time > 0:
             return []
         valid_action_indices: List[int] = []
@@ -2142,14 +2590,15 @@ class GameState:
         return valid_action_indices
 
     def _check_fundamental_game_over(self) -> bool:
+        """Checks if any available shape can be placed anywhere."""
         for current_shape in self.shapes:
             if not current_shape:
                 continue
             for target_row in range(self.grid.rows):
                 for target_col in range(self.grid.cols):
                     if self.grid.can_place(current_shape, target_row, target_col):
-                        return False
-        return True
+                        return False  # Found a valid placement
+        return True  # No shape can be placed anywhere
 
     def is_over(self) -> bool:
         return self.game_over
@@ -2173,6 +2622,7 @@ class GameState:
         return self.cleared_triangles_coords
 
     def decode_action(self, action_index: int) -> Tuple[int, int, int]:
+        """Decodes an action index into (shape_slot, row, col)."""
         locations_per_shape = self.grid.rows * self.grid.cols
         shape_slot_index = action_index // locations_per_shape
         position_index = action_index % locations_per_shape
@@ -2181,6 +2631,7 @@ class GameState:
         return (shape_slot_index, target_row, target_col)
 
     def _update_timers(self):
+        """Updates timers for visual effects."""
         now = time.time()
         delta_time = now - self.last_time
         self.last_time = now
@@ -2192,7 +2643,7 @@ class GameState:
         )
         self.game_over_flash_time = max(0, self.game_over_flash_time - delta_time)
         if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
-            self.cleared_triangles_coords = []
+            self.cleared_triangles_coords = []  # Clear coords after highlight fades
 
     def _calculate_placement_reward(self, placed_shape: Shape) -> float:
         return self.rewards.REWARD_PLACE_PER_TRI * len(placed_shape.triangles)
@@ -2200,32 +2651,32 @@ class GameState:
     def _calculate_line_clear_reward(self, lines_cleared: int) -> float:
         if lines_cleared == 1:
             return self.rewards.REWARD_CLEAR_1
-        elif lines_cleared == 2:
+        if lines_cleared == 2:
             return self.rewards.REWARD_CLEAR_2
-        elif lines_cleared >= 3:
+        if lines_cleared >= 3:
             return self.rewards.REWARD_CLEAR_3PLUS
-        else:
-            return 0.0
+        return 0.0
 
     def _calculate_state_penalty(self) -> float:
+        """Calculates penalties based on grid state (height, holes, bumpiness)."""
         penalty = 0.0
         max_height = self.grid.get_max_height()
         bumpiness = self.grid.get_bumpiness()
         num_holes = self.grid.count_holes()
-
         penalty += max_height * self.rewards.PENALTY_MAX_HEIGHT_FACTOR
         penalty += bumpiness * self.rewards.PENALTY_BUMPINESS_FACTOR
         penalty += num_holes * self.rewards.PENALTY_HOLE_PER_HOLE
         return penalty
 
     def _handle_invalid_placement(self) -> float:
+        """Handles an invalid placement attempt."""
         self._last_action_valid = False
-        reward = self.rewards.PENALTY_INVALID_MOVE
-        return reward
+        return self.rewards.PENALTY_INVALID_MOVE
 
     def _handle_game_over_state_change(self) -> float:
+        """Sets game over state and returns penalty."""
         if self.game_over:
-            return 0.0
+            return 0.0  # Already over
         self.game_over = True
         if self.freeze_time <= 0:
             self.freeze_time = 1.0
@@ -2239,6 +2690,7 @@ class GameState:
         target_row: int,
         target_col: int,
     ) -> float:
+        """Handles a valid placement, updates grid, score, and returns reward components."""
         self._last_action_valid = True
         step_reward = 0.0
 
@@ -2246,7 +2698,7 @@ class GameState:
         holes_before = self.grid.count_holes()
 
         self.grid.place(shape_to_place, target_row, target_col)
-        self.shapes[shape_slot_index] = None
+        self.shapes[shape_slot_index] = None  # Remove placed shape
         self.game_score += len(shape_to_place.triangles)
         self.pieces_placed_this_episode += 1
 
@@ -2255,7 +2707,7 @@ class GameState:
         step_reward += self._calculate_line_clear_reward(lines_cleared)
 
         if triangles_cleared > 0:
-            self.game_score += triangles_cleared * 2
+            self.game_score += triangles_cleared * 2  # Bonus for cleared triangles
             self.blink_time = 0.5
             self.freeze_time = 0.5
             self.line_clear_flash_time = 0.3
@@ -2268,24 +2720,36 @@ class GameState:
         step_reward += self._calculate_state_penalty()
         step_reward += new_holes_created * self.rewards.PENALTY_NEW_HOLE
 
+        # Refill shapes if all slots are empty
         if all(s is None for s in self.shapes):
             self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
 
+        # Check for game over *after* placement and refill
         if self._check_fundamental_game_over():
             step_reward += self._handle_game_over_state_change()
 
         self._update_demo_selection_after_placement(shape_slot_index)
-
         return step_reward
 
     def step(self, action_index: int) -> Tuple[float, bool]:
+        """Performs one game step based on the action index."""
         self._update_timers()
 
         if self.game_over:
             return (0.0, True)
 
+        # If frozen (e.g., during line clear animation), only apply alive reward and PBRS
         if self.is_frozen():
-            return (self.rewards.REWARD_ALIVE_STEP, False)
+            current_potential = self._calculate_potential()
+            pbrs_reward = (
+                self.ppo_config.GAMMA * current_potential - self._last_potential
+            )
+            self._last_potential = current_potential
+            total_reward = self.rewards.REWARD_ALIVE_STEP + (
+                pbrs_reward if self.rewards.ENABLE_PBRS else 0.0
+            )
+            self.score += total_reward
+            return (total_reward, False)
 
         shape_slot_index, target_row, target_col = self.decode_action(action_index)
 
@@ -2298,26 +2762,38 @@ class GameState:
             shape_to_place, target_row, target_col
         )
 
+        potential_before_action = self._calculate_potential()
+
         if is_valid_placement:
-            step_reward = self._handle_valid_placement(
+            extrinsic_reward = self._handle_valid_placement(
                 shape_to_place, shape_slot_index, target_row, target_col
             )
         else:
-            step_reward = self._handle_invalid_placement()
+            extrinsic_reward = self._handle_invalid_placement()
+            # Check for game over immediately after invalid move if it leads to no possible moves
             if self._check_fundamental_game_over():
-                step_reward += self._handle_game_over_state_change()
+                extrinsic_reward += self._handle_game_over_state_change()
 
+        # Add alive reward if not game over
         if not self.game_over:
-            step_reward += self.rewards.REWARD_ALIVE_STEP
+            extrinsic_reward += self.rewards.REWARD_ALIVE_STEP
 
-        self.score += step_reward
-        return (step_reward, self.game_over)
+        # Calculate Potential-Based Reward Shaping (PBRS)
+        potential_after_action = self._calculate_potential()
+        pbrs_reward = 0.0
+        if self.rewards.ENABLE_PBRS:
+            pbrs_reward = (
+                self.ppo_config.GAMMA * potential_after_action - potential_before_action
+            )
+
+        total_reward = extrinsic_reward + pbrs_reward
+        self._last_potential = potential_after_action  # Update potential for next step
+
+        self.score += total_reward
+        return (total_reward, self.game_over)
 
     def _calculate_potential_placement_outcomes(self) -> Dict[str, float]:
-        """
-        Simulates all valid placements to find summary outcome statistics.
-        Returns a dictionary with keys: 'max_lines', 'min_holes', 'min_height', 'min_bump'.
-        """
+        """Calculates potential outcomes (lines, holes, height, bumpiness) for valid moves."""
         valid_actions = self.valid_actions()
         if not valid_actions:
             return {
@@ -2331,13 +2807,11 @@ class GameState:
         min_new_holes = float("inf")
         min_resulting_height = float("inf")
         min_resulting_bumpiness = float("inf")
-
         initial_holes = self.grid.count_holes()
 
         for action_index in valid_actions:
             shape_slot_index, target_row, target_col = self.decode_action(action_index)
             shape_to_place = self.shapes[shape_slot_index]
-
             if shape_to_place is None:
                 continue
 
@@ -2347,7 +2821,6 @@ class GameState:
             holes_after = temp_grid.count_holes()
             height_after = temp_grid.get_max_height()
             bumpiness_after = temp_grid.get_bumpiness()
-
             new_holes_created = max(0, holes_after - initial_holes)
 
             max_lines_cleared = max(max_lines_cleared, lines_cleared)
@@ -2355,6 +2828,7 @@ class GameState:
             min_resulting_height = min(min_resulting_height, height_after)
             min_resulting_bumpiness = min(min_resulting_bumpiness, bumpiness_after)
 
+        # Handle cases where no valid moves were found despite valid_actions list
         if min_new_holes == float("inf"):
             min_new_holes = 0.0
         if min_resulting_height == float("inf"):
@@ -2370,18 +2844,18 @@ class GameState:
         }
 
     def get_state(self) -> StateType:
-        grid_state = self.grid.get_feature_matrix()
+        """Returns the current game state as a dictionary of numpy arrays."""
+        grid_state = self.grid.get_feature_matrix()  # (C, H, W)
 
+        # Shape Features
         shape_features_per = self.env_config.SHAPE_FEATURES_PER_SHAPE
         num_shapes_expected = self.env_config.NUM_SHAPE_SLOTS
         shape_feature_matrix = np.zeros(
             (num_shapes_expected, shape_features_per), dtype=np.float32
         )
-
-        max_tris_norm = 6.0
+        max_tris_norm = 6.0  # Normalize features based on expected max values
         max_h_norm = float(self.grid.rows)
         max_w_norm = float(self.grid.cols)
-
         for i in range(num_shapes_expected):
             s = self.shapes[i] if i < len(self.shapes) else None
             if s:
@@ -2392,7 +2866,6 @@ class GameState:
                 min_r, min_c, max_r, max_c = s.bbox()
                 height = max_r - min_r + 1
                 width = max_c - min_c + 1
-
                 shape_feature_matrix[i, 0] = np.clip(
                     float(n_tris) / max_tris_norm, 0.0, 1.0
                 )
@@ -2409,24 +2882,23 @@ class GameState:
                     float(width) / max_w_norm, 0.0, 1.0
                 )
 
+        # Shape Availability
         shape_availability_dim = self.env_config.SHAPE_AVAILABILITY_DIM
         shape_availability_vector = np.zeros(shape_availability_dim, dtype=np.float32)
         for i in range(min(num_shapes_expected, shape_availability_dim)):
             if i < len(self.shapes) and self.shapes[i] is not None:
                 shape_availability_vector[i] = 1.0
 
+        # Explicit Features
         explicit_features_dim = self.env_config.EXPLICIT_FEATURES_DIM
         explicit_features_vector = np.zeros(explicit_features_dim, dtype=np.float32)
-
         num_holes = self.grid.count_holes()
         col_heights = self.grid.get_column_heights()
         avg_height = np.mean(col_heights) if col_heights else 0
         max_height = max(col_heights) if col_heights else 0
         bumpiness = self.grid.get_bumpiness()
-
         max_possible_holes = self.env_config.ROWS * self.env_config.COLS
         max_possible_bumpiness = self.env_config.ROWS * (self.env_config.COLS - 1)
-
         explicit_features_vector[0] = np.clip(
             num_holes / max(1, max_possible_holes), 0.0, 1.0
         )
@@ -2441,17 +2913,16 @@ class GameState:
         )
         explicit_features_vector[4] = np.clip(
             self.lines_cleared_this_episode / 100.0, 0.0, 1.0
-        )
+        )  # Normalize episode stats
         explicit_features_vector[5] = np.clip(
             self.pieces_placed_this_episode / 500.0, 0.0, 1.0
         )
 
-        # --- MODIFIED: Conditionally calculate potential outcomes ---
+        # Optional: Potential Placement Outcomes
         if self.env_config.CALCULATE_POTENTIAL_OUTCOMES_IN_STATE:
             potential_outcomes = self._calculate_potential_placement_outcomes()
             max_possible_lines = self.env_config.ROWS
             max_possible_new_holes = max_possible_holes
-
             explicit_features_vector[6] = np.clip(
                 potential_outcomes["max_lines"] / max(1, max_possible_lines), 0.0, 1.0
             )
@@ -2469,13 +2940,13 @@ class GameState:
                 1.0,
             )
         else:
-            # Set placeholder values (e.g., 0) if not calculated
-            explicit_features_vector[6:10] = 0.0
-        # --- END MODIFIED ---
+            explicit_features_vector[6:10] = 0.0  # Zero out if not calculated
 
         state_dict: StateType = {
             "grid": grid_state.astype(np.float32),
-            "shapes": shape_feature_matrix.astype(np.float32),
+            "shapes": shape_feature_matrix.reshape(-1).astype(
+                np.float32
+            ),  # Flatten shape features
             "shape_availability": shape_availability_vector.astype(np.float32),
             "explicit_features": explicit_features_vector.astype(np.float32),
         }
@@ -2484,18 +2955,19 @@ class GameState:
     def get_shapes(self) -> List[Optional[Shape]]:
         return self.shapes
 
+    # --- Demo Mode Methods ---
     def _update_demo_selection_after_placement(self, placed_slot_index: int):
+        """Selects the next available shape slot after placement in demo mode."""
         num_slots = self.env_config.NUM_SHAPE_SLOTS
         if num_slots <= 0:
             return
-
         next_idx = (placed_slot_index + 1) % num_slots
         for _ in range(num_slots):
             if 0 <= next_idx < len(self.shapes) and self.shapes[next_idx] is not None:
                 self.demo_selected_shape_idx = next_idx
                 return
             next_idx = (next_idx + 1) % num_slots
-
+        # If all became None (e.g., after refill), find the first available one
         if all(s is None for s in self.shapes):
             first_available = next(
                 (i for i, s in enumerate(self.shapes) if s is not None), 0
@@ -2503,29 +2975,28 @@ class GameState:
             self.demo_selected_shape_idx = first_available
 
     def cycle_shape(self, direction: int):
+        """Cycles the selected shape in demo mode among available shapes."""
         if self.game_over or self.freeze_time > 0:
             return
         num_slots = self.env_config.NUM_SHAPE_SLOTS
         if num_slots <= 0:
             return
-
         available_indices = [
             i for i, s in enumerate(self.shapes) if s is not None and 0 <= i < num_slots
         ]
         if not available_indices:
             return
-
         try:
             current_list_idx = available_indices.index(self.demo_selected_shape_idx)
         except ValueError:
-            current_list_idx = 0
-            if self.demo_selected_shape_idx not in available_indices:
-                self.demo_selected_shape_idx = available_indices[0]
-
+            current_list_idx = 0  # Default if current selection is somehow invalid
+        if self.demo_selected_shape_idx not in available_indices:
+            self.demo_selected_shape_idx = available_indices[0]
         new_list_idx = (current_list_idx + direction) % len(available_indices)
         self.demo_selected_shape_idx = available_indices[new_list_idx]
 
     def move_target(self, delta_row: int, delta_col: int):
+        """Moves the placement target cursor in demo mode."""
         if self.game_over or self.freeze_time > 0:
             return
         self.demo_target_row = np.clip(
@@ -2536,9 +3007,9 @@ class GameState:
         )
 
     def get_action_for_current_selection(self) -> Optional[int]:
+        """Gets the action index corresponding to the current demo selection, if valid."""
         if self.game_over or self.freeze_time > 0:
             return None
-
         shape_slot_index = self.demo_selected_shape_idx
         current_shape = (
             self.shapes[shape_slot_index]
@@ -2547,9 +3018,7 @@ class GameState:
         )
         if current_shape is None:
             return None
-
         target_row, target_col = self.demo_target_row, self.demo_target_col
-
         if self.grid.can_place(current_shape, target_row, target_col):
             locations_per_shape = self.grid.rows * self.grid.cols
             action_index = shape_slot_index * locations_per_shape + (
@@ -2557,9 +3026,10 @@ class GameState:
             )
             return action_index
         else:
-            return None
+            return None  # Invalid placement
 
     def get_current_selection_info(self) -> Tuple[Optional[Shape], int, int]:
+        """Returns the currently selected shape object and target coordinates for demo rendering."""
         shape_slot_index = self.demo_selected_shape_idx
         current_shape = (
             self.shapes[shape_slot_index]
@@ -2572,25 +3042,30 @@ class GameState:
 File: environment\grid.py
 # File: environment/grid.py
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Any
+
+# --- MOVED IMPORT TO TOP LEVEL ---
+from config import EnvConfig
+
+# --- END MOVED IMPORT ---
+
 from .triangle import Triangle
 from .shape import Shape
-from config import EnvConfig
 
 
 class Grid:
     """Represents the game board composed of Triangles."""
 
-    def __init__(self, env_config: EnvConfig):
+    def __init__(self, env_config: EnvConfig):  # Accept EnvConfig instance
         self.rows = env_config.ROWS
         self.cols = env_config.COLS
         self.triangles: List[List[Triangle]] = []
-        self._create()
+        self._create(env_config)  # Pass config to _create
 
-    def _create(self) -> None:
-        # Determine playable columns based on row index (example pattern)
-        # This specific pattern defines a hexagon-like board within the grid bounds
-        cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]  # Example for 8 rows
+    def _create(self, env_config: EnvConfig) -> None:
+        """Initializes the grid with playable and death cells."""
+        # Example pattern for a hexagon-like board within the grid bounds
+        cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]  # Specific to 8 rows
 
         if len(cols_per_row) != self.rows:
             raise ValueError(
@@ -2603,29 +3078,22 @@ class Grid:
 
         self.triangles = []
         for r in range(self.rows):
-            rowt = []
+            row_triangles: List[Triangle] = []
             base_playable_cols = cols_per_row[r]
 
-            # Calculate padding for death cells based on total cols and playable cols
-            if base_playable_cols <= 0:
-                initial_death_cols_left = self.cols  # All death if 0 playable
-            elif base_playable_cols >= self.cols:
-                initial_death_cols_left = 0  # No death if playable >= total
-            else:
-                initial_death_cols_left = (self.cols - base_playable_cols) // 2
-
-            # Calculate the column index where death cells start on the right
+            # Calculate padding for death cells
+            initial_death_cols_left = (
+                (self.cols - base_playable_cols) // 2
+                if base_playable_cols < self.cols
+                else 0
+            )
             initial_first_death_col_right = initial_death_cols_left + base_playable_cols
 
-            # --- Adjustment for Specific Hex Grid Pattern ---
-            # This adjustment slightly shifts the death zones inward for the hex pattern
-            # If you want a simple rectangle, remove this adjustment
+            # Adjustment for Specific Hex Grid Pattern (makes it slightly narrower)
             adjusted_death_cols_left = initial_death_cols_left + 1
             adjusted_first_death_col_right = initial_first_death_col_right - 1
-            # --- End Adjustment ---
 
             for c in range(self.cols):
-                # Determine if the cell is a death cell based on adjusted boundaries
                 is_death_cell = (
                     (c < adjusted_death_cols_left)
                     or (
@@ -2634,85 +3102,78 @@ class Grid:
                     )
                     or (base_playable_cols <= 2)  # Treat very narrow rows as death
                 )
-
-                # Determine triangle orientation based on row and column index
-                is_up_cell = (r + c) % 2 == 0
-                tri = Triangle(r, c, is_up=is_up_cell, is_death=is_death_cell)
-                rowt.append(tri)
-            self.triangles.append(rowt)
+                is_up_cell = (r + c) % 2 == 0  # Checkerboard pattern for orientation
+                triangle = Triangle(r, c, is_up=is_up_cell, is_death=is_death_cell)
+                row_triangles.append(triangle)
+            self.triangles.append(row_triangles)
 
     def valid(self, r: int, c: int) -> bool:
+        """Checks if coordinates are within grid bounds."""
         return 0 <= r < self.rows and 0 <= c < self.cols
 
-    def can_place(self, shp: Shape, rr: int, cc: int) -> bool:
-        for dr, dc, up in shp.triangles:
-            nr, nc = rr + dr, cc + dc
+    def can_place(
+        self, shape_to_place: Shape, target_row: int, target_col: int
+    ) -> bool:
+        """Checks if a shape can be placed at the target location."""
+        for dr, dc, is_up_shape_tri in shape_to_place.triangles:
+            nr, nc = target_row + dr, target_col + dc
             if not self.valid(nr, nc):
-                return False
-            # Check bounds for self.triangles access
-            if not (
-                0 <= nr < len(self.triangles) and 0 <= nc < len(self.triangles[nr])
+                return False  # Out of bounds
+            grid_triangle = self.triangles[nr][nc]
+            # Cannot place on death cells, occupied cells, or cells with mismatching orientation
+            if (
+                grid_triangle.is_death
+                or grid_triangle.is_occupied
+                or (grid_triangle.is_up != is_up_shape_tri)
             ):
-                return False  # Should not happen if self.valid passed, but safety check
-            tri = self.triangles[nr][nc]
-            if tri.is_death or tri.is_occupied or (tri.is_up != up):
                 return False
-        return True
+        return True  # All shape triangles can be placed
 
-    def place(self, shp: Shape, rr: int, cc: int) -> None:
-        for dr, dc, _ in shp.triangles:
-            nr, nc = rr + dr, cc + dc
+    def place(self, shape_to_place: Shape, target_row: int, target_col: int) -> None:
+        """Places a shape onto the grid (assumes can_place was checked)."""
+        for dr, dc, _ in shape_to_place.triangles:
+            nr, nc = target_row + dr, target_col + dc
             if self.valid(nr, nc):
-                # Check bounds again before accessing
-                if not (
-                    0 <= nr < len(self.triangles) and 0 <= nc < len(self.triangles[nr])
-                ):
-                    continue
-                tri = self.triangles[nr][nc]
-                # Only place if the target cell is valid (not death, not occupied)
-                if not tri.is_death and not tri.is_occupied:
-                    tri.is_occupied = True
-                    tri.color = shp.color  # Assign shape color
+                grid_triangle = self.triangles[nr][nc]
+                # Only occupy non-death, non-occupied cells
+                if not grid_triangle.is_death and not grid_triangle.is_occupied:
+                    grid_triangle.is_occupied = True
+                    grid_triangle.color = shape_to_place.color
 
     def clear_filled_rows(self) -> Tuple[int, int, List[Tuple[int, int]]]:
+        """Clears fully occupied rows and returns stats."""
         lines_cleared = 0
         triangles_cleared = 0
-        rows_to_clear_indices = []
+        rows_to_clear_indices: List[int] = []
         cleared_triangles_coords: List[Tuple[int, int]] = []
 
-        # Identify full rows
+        # Identify rows to clear
         for r in range(self.rows):
-            if not (0 <= r < len(self.triangles)):
-                continue  # Bounds check
-            rowt = self.triangles[r]
+            row_triangles = self.triangles[r]
             is_row_full = True
             num_placeable_triangles_in_row = 0
-            for t in rowt:
-                if not t.is_death:
+            for triangle in row_triangles:
+                if not triangle.is_death:
                     num_placeable_triangles_in_row += 1
-                    if not t.is_occupied:
+                    if not triangle.is_occupied:
                         is_row_full = False
-                        break  # Can stop checking this row
-
-            # A row is considered full if all non-death cells are occupied
+                        break  # Row is not full
+            # Clear if all placeable triangles are occupied (and there are placeable triangles)
             if is_row_full and num_placeable_triangles_in_row > 0:
                 rows_to_clear_indices.append(r)
                 lines_cleared += 1
 
         # Clear the identified rows
         for r_idx in rows_to_clear_indices:
-            if not (0 <= r_idx < len(self.triangles)):
-                continue  # Bounds check
-            for t in self.triangles[r_idx]:
-                if not t.is_death and t.is_occupied:
+            for triangle in self.triangles[r_idx]:
+                if not triangle.is_death and triangle.is_occupied:
                     triangles_cleared += 1
-                    t.is_occupied = False
-                    t.color = None
-                    cleared_triangles_coords.append(
-                        (r_idx, t.col)
-                    )  # Store coords for visualization
+                    triangle.is_occupied = False
+                    triangle.color = None
+                    cleared_triangles_coords.append((r_idx, triangle.col))
 
-        # (No gravity/dropping logic is implemented here)
+        # Note: This implementation doesn't shift rows down.
+        # Depending on the game rules, row shifting might be needed here.
 
         return lines_cleared, triangles_cleared, cleared_triangles_coords
 
@@ -2720,23 +3181,20 @@ class Grid:
         """Calculates the height of occupied cells in each column."""
         heights = [0] * self.cols
         for c in range(self.cols):
-            for r in range(self.rows - 1, -1, -1):
-                # Check bounds before accessing triangles
-                if 0 <= r < len(self.triangles) and 0 <= c < len(self.triangles[r]):
-                    tri = self.triangles[r][c]
-                    # Check if the cell is occupied and not a death cell
-                    if tri.is_occupied and not tri.is_death:
-                        heights[c] = r + 1  # Height is row index + 1
-                        break  # Found highest occupied cell in this column
+            for r in range(self.rows - 1, -1, -1):  # Iterate from top down
+                triangle = self.triangles[r][c]
+                if triangle.is_occupied and not triangle.is_death:
+                    heights[c] = r + 1  # Height is row index + 1
+                    break  # Found highest occupied cell in this column
         return heights
 
     def get_max_height(self) -> int:
-        """Calculates the maximum height across all columns."""
+        """Returns the maximum height across all columns."""
         heights = self.get_column_heights()
         return max(heights) if heights else 0
 
     def get_bumpiness(self) -> int:
-        """Calculates the sum of absolute height differences between adjacent columns."""
+        """Calculates the total absolute difference between adjacent column heights."""
         heights = self.get_column_heights()
         bumpiness = 0
         for i in range(len(heights) - 1):
@@ -2747,59 +3205,41 @@ class Grid:
         """Counts the number of empty, non-death cells below an occupied cell in the same column."""
         holes = 0
         for c in range(self.cols):
-            occupied_above = False
-            for r in range(self.rows):  # Iterate from top to bottom
-                # Check bounds before accessing triangles
-                if not (
-                    0 <= r < len(self.triangles) and 0 <= c < len(self.triangles[r])
-                ):
-                    continue  # Skip if out of bounds
-                tri = self.triangles[r][c]
-
-                # Skip death cells entirely, they don't count as holes or blockers
-                if tri.is_death:
-                    # If we hit a death cell below the highest block, reset occupied_above?
-                    # Or just skip? Let's just skip for simplicity. Holes are non-death cells.
+            occupied_above_found = False
+            for r in range(self.rows):  # Iterate from bottom up
+                triangle = self.triangles[r][c]
+                if triangle.is_death:
                     continue
-
-                if tri.is_occupied:
-                    occupied_above = (
-                        True  # Mark that we've seen an occupied cell in this column
-                    )
-                elif not tri.is_occupied and occupied_above:
-                    # This is an empty, non-death cell below an occupied cell in the same column
+                if triangle.is_occupied:
+                    occupied_above_found = True
+                elif not triangle.is_occupied and occupied_above_found:
+                    # Found an empty cell below an occupied one in this column
                     holes += 1
         return holes
 
     def get_feature_matrix(self) -> np.ndarray:
-        """Creates a 2-channel feature matrix: [occupied, is_up]."""
-        # Channel 0: Occupied (1.0) or Empty (0.0) - only for non-death cells
-        # Channel 1: Orientation (1.0 if Up, 0.0 if Down) - only for non-death cells
+        """Returns the grid state as a 2-channel numpy array (Occupancy, Orientation)."""
+        # Channel 0: Occupancy (1.0 if occupied and not death, 0.0 otherwise)
+        # Channel 1: Orientation (1.0 if pointing up and not death, 0.0 otherwise)
         grid_state = np.zeros((2, self.rows, self.cols), dtype=np.float32)
         for r in range(self.rows):
             for c in range(self.cols):
-                # Check bounds before accessing triangles
-                if not (
-                    0 <= r < len(self.triangles) and 0 <= c < len(self.triangles[r])
-                ):
-                    continue  # Skip if out of bounds
-                t = self.triangles[r][c]
-                # Only populate features for non-death cells
-                if not t.is_death:
-                    grid_state[0, r, c] = 1.0 if t.is_occupied else 0.0
-                    grid_state[1, r, c] = 1.0 if t.is_up else 0.0
-                    # Optionally add more channels here (e.g., cell age, color?)
+                triangle = self.triangles[r][c]
+                if not triangle.is_death:
+                    grid_state[0, r, c] = 1.0 if triangle.is_occupied else 0.0
+                    grid_state[1, r, c] = 1.0 if triangle.is_up else 0.0
         return grid_state
 
 
 File: environment\shape.py
 # File: environment/shape.py
-# (No changes needed)
 import random
 from typing import List, Tuple
-from config import EnvConfig, VisConfig  # Needs VisConfig only for colors
 
-GOOGLE_COLORS = VisConfig.GOOGLE_COLORS  # Use colors from VisConfig
+# --- MODIFIED: Import from constants ---
+from config.constants import GOOGLE_COLORS
+
+# --- END MODIFIED ---
 
 
 class Shape:
@@ -2808,42 +3248,54 @@ class Shape:
     def __init__(self) -> None:
         # List of (relative_row, relative_col, is_up) tuples defining the shape
         self.triangles: List[Tuple[int, int, bool]] = []
+        # GOOGLE_COLORS is now imported from constants
         self.color: Tuple[int, int, int] = random.choice(GOOGLE_COLORS)
         self._generate()  # Generate the shape structure
 
     def _generate(self) -> None:
         """Generates a random shape by adding adjacent triangles."""
-        n = random.randint(1, 5)  # Number of triangles in the shape
-        first_up = random.choice([True, False])  # Orientation of the root triangle
-        self.triangles.append((0, 0, first_up))  # Add the root triangle at (0,0)
+        num_triangles_in_shape = random.randint(1, 5)
+        first_triangle_is_up = random.choice([True, False])
+        # Add the root triangle at relative coordinates (0,0)
+        self.triangles.append((0, 0, first_triangle_is_up))
 
         # Add remaining triangles adjacent to existing ones
-        for _ in range(n - 1):
+        for _ in range(num_triangles_in_shape - 1):
             # Find valid neighbors of the *last added* triangle
-            lr, lc, lu = self.triangles[-1]
-            nbrs = self._find_valid_neighbors(lr, lc, lu)
-            if nbrs:
-                self.triangles.append(random.choice(nbrs))
+            if not self.triangles:
+                break  # Should not happen
+            last_rel_row, last_rel_col, last_is_up = self.triangles[-1]
+            valid_neighbors = self._find_valid_neighbors(
+                last_rel_row, last_rel_col, last_is_up
+            )
+            if valid_neighbors:
+                self.triangles.append(random.choice(valid_neighbors))
             # else: Could break early if no valid neighbors found, shape < n
 
     def _find_valid_neighbors(
-        self, r: int, c: int, up: bool
+        self, r: int, c: int, is_up: bool
     ) -> List[Tuple[int, int, bool]]:
         """Finds potential neighbor triangles that are not already part of the shape."""
-        if up:  # Neighbors of an UP triangle are DOWN triangles
-            ns = [(r, c - 1, False), (r, c + 1, False), (r + 1, c, False)]
+        potential_neighbors: List[Tuple[int, int, bool]]
+        if is_up:  # Neighbors of an UP triangle are DOWN triangles
+            potential_neighbors = [
+                (r, c - 1, False),
+                (r, c + 1, False),
+                (r + 1, c, False),
+            ]
         else:  # Neighbors of a DOWN triangle are UP triangles
-            ns = [(r, c - 1, True), (r, c + 1, True), (r - 1, c, True)]
+            potential_neighbors = [(r, c - 1, True), (r, c + 1, True), (r - 1, c, True)]
         # Return only neighbors that are not already in self.triangles
-        return [n for n in ns if n not in self.triangles]
+        valid_neighbors = [n for n in potential_neighbors if n not in self.triangles]
+        return valid_neighbors
 
     def bbox(self) -> Tuple[int, int, int, int]:
         """Calculates the bounding box (min_r, min_c, max_r, max_c) of the shape."""
         if not self.triangles:
             return (0, 0, 0, 0)
-        rr = [t[0] for t in self.triangles]
-        cc = [t[1] for t in self.triangles]
-        return (min(rr), min(cc), max(rr), max(cc))
+        rows = [t[0] for t in self.triangles]
+        cols = [t[1] for t in self.triangles]
+        return (min(rows), min(cols), max(rows), max(cols))
 
 
 File: environment\triangle.py
@@ -2901,37 +3353,32 @@ from config import (
     StatsConfig,
     RewardConfig,
     TensorBoardConfig,
-    DEVICE,
+    ObsNormConfig,
+    TransformerConfig,
+    # DEVICE, # Removed direct import
     MODEL_SAVE_PATH,
     get_config_dict,
 )
-
-try:
-    from environment.game_state import GameState, StateType
-except ImportError as e:
-    print(f"Error importing environment: {e}")
-    sys.exit(1)
-
+from environment.game_state import GameState, StateType
 from agent.ppo_agent import PPOAgent
 from training.trainer import Trainer
 from stats.stats_recorder import StatsRecorderBase
 from stats.aggregator import StatsAggregator
 from stats.simple_stats_recorder import SimpleStatsRecorder
 from stats.tensorboard_logger import TensorBoardStatsRecorder
+from utils.running_mean_std import RunningMeanStd  # Keep import for context
 
 
 def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
-    """Initializes the specified number of game environments."""
+    """Initializes parallel game environments and performs basic state checks."""
     print(f"Initializing {num_envs} game environments...")
     try:
         envs = [GameState() for _ in range(num_envs)]
-        # Basic validation on the first environment
+        # Perform checks on the first environment's initial state
         s_test_dict = envs[0].reset()
-
         if not isinstance(s_test_dict, dict):
             raise TypeError("Env reset did not return a dictionary state.")
-
-        # --- Check Grid ---
+        # Check grid
         if "grid" not in s_test_dict:
             raise KeyError("State dict missing 'grid'")
         grid_state = s_test_dict["grid"]
@@ -2943,16 +3390,11 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
             raise ValueError(
                 f"Initial grid state shape mismatch! Env:{grid_state.shape}, Cfg:{expected_grid_shape}"
             )
-        print(f"Initial 'grid' state shape check PASSED: {grid_state.shape}")
-
-        # --- Check Shapes Features ---
+        # Check shapes features (flattened)
         if "shapes" not in s_test_dict:
             raise KeyError("State dict missing 'shapes'")
         shape_state = s_test_dict["shapes"]
-        expected_shape_feature_shape = (
-            env_config.NUM_SHAPE_SLOTS,
-            env_config.SHAPE_FEATURES_PER_SHAPE,
-        )
+        expected_shape_feature_shape = (env_config.SHAPE_STATE_DIM,)  # Flattened
         if (
             not isinstance(shape_state, np.ndarray)
             or shape_state.shape != expected_shape_feature_shape
@@ -2960,9 +3402,7 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
             raise ValueError(
                 f"Initial shape feature shape mismatch! Env:{shape_state.shape}, Cfg:{expected_shape_feature_shape}"
             )
-        print(f"Initial 'shapes' feature shape check PASSED: {shape_state.shape}")
-
-        # --- Check Shape Availability ---
+        # Check availability
         if "shape_availability" not in s_test_dict:
             raise KeyError("State dict missing 'shape_availability'")
         availability_state = s_test_dict["shape_availability"]
@@ -2974,11 +3414,7 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
             raise ValueError(
                 f"Initial shape availability shape mismatch! Env:{availability_state.shape}, Cfg:{expected_availability_shape}"
             )
-        print(
-            f"Initial 'shape_availability' state shape check PASSED: {availability_state.shape}"
-        )
-
-        # --- UPDATED: Check Explicit Features (with new dimension) ---
+        # Check explicit features
         if "explicit_features" not in s_test_dict:
             raise KeyError("State dict missing 'explicit_features'")
         explicit_features_state = s_test_dict["explicit_features"]
@@ -2990,26 +3426,14 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
             raise ValueError(
                 f"Initial explicit features shape mismatch! Env:{explicit_features_state.shape}, Cfg:{expected_explicit_features_shape}"
             )
-        print(
-            f"Initial 'explicit_features' state shape check PASSED: {explicit_features_state.shape}"
-        )
-        # --- END UPDATED ---
 
-        # Test step with a valid action if available
-        valid_acts_init = envs[0].valid_actions()
-        if valid_acts_init:
-            _, _ = envs[0].step(valid_acts_init[0])
-        else:
-            print(
-                "Warning: No valid actions available after initial reset for testing step()."
-            )
-
+        print("Initial state shape checks PASSED.")
         print(f"Successfully initialized {num_envs} environments.")
         return envs
     except Exception as e:
         print(f"FATAL ERROR during env init: {e}")
         traceback.print_exc()
-        raise e
+        raise e  # Re-raise after logging
 
 
 def initialize_agent(
@@ -3017,14 +3441,18 @@ def initialize_agent(
     ppo_config: PPOConfig,
     rnn_config: RNNConfig,
     env_config: EnvConfig,
+    transformer_config: TransformerConfig,
+    device: torch.device,  # --- MODIFIED: Added device ---
 ) -> PPOAgent:
-    """Initializes the PPO Agent."""
+    """Initializes the PPO agent."""
     print("Initializing PPO Agent...")
     agent = PPOAgent(
         model_config=model_config,
         ppo_config=ppo_config,
         rnn_config=rnn_config,
         env_config=env_config,
+        transformer_config=transformer_config,
+        device=device,  # --- MODIFIED: Pass device ---
     )
     print("PPO Agent initialized.")
     return agent
@@ -3034,12 +3462,13 @@ def initialize_stats_recorder(
     stats_config: StatsConfig,
     tb_config: TensorBoardConfig,
     config_dict: Dict[str, Any],
-    agent: Optional[PPOAgent],
+    agent: Optional[PPOAgent],  # Agent needed for graph logging
     env_config: EnvConfig,
     rnn_config: RNNConfig,
-    is_reinit: bool = False,
+    transformer_config: TransformerConfig,
+    is_reinit: bool = False,  # Flag to skip graph logging on re-init
 ) -> StatsRecorderBase:
-    """Initializes the statistics recording components."""
+    """Initializes the statistics recording components (Aggregator, Console, TensorBoard)."""
     print(f"Initializing Statistics Components... Re-init: {is_reinit}")
     stats_aggregator = StatsAggregator(
         avg_windows=stats_config.STATS_AVG_WINDOW,
@@ -3050,108 +3479,29 @@ def initialize_stats_recorder(
         console_log_interval=stats_config.CONSOLE_LOG_FREQ,
     )
 
+    # --- MODIFIED: Disable graph logging unconditionally to fix tracing error ---
     model_for_graph_cpu = None
     dummy_input_tuple = None
+    print("[Stats Init] Model graph logging DISABLED.")
+    # --- END MODIFIED ---
 
-    if not is_reinit and agent and agent.network:
-        print("[Stats Init] Preparing model copy and dummy input for graph...")
-        try:
-            # Prepare dummy input on CPU
-            expected_grid_shape = env_config.GRID_STATE_SHAPE
-            expected_shape_feat_dim = env_config.SHAPE_STATE_DIM
-            expected_availability_dim = env_config.SHAPE_AVAILABILITY_DIM
-            # --- UPDATED: Expected explicit features dim ---
-            expected_explicit_feat_dim = env_config.EXPLICIT_FEATURES_DIM
-            # --- END UPDATED ---
-
-            dummy_grid_np = np.zeros(expected_grid_shape, dtype=np.float32)
-            dummy_shapes_np = np.zeros(expected_shape_feat_dim, dtype=np.float32)
-            dummy_availability_np = np.zeros(
-                expected_availability_dim, dtype=np.float32
-            )
-            # --- UPDATED: Dummy explicit features ---
-            dummy_explicit_features_np = np.zeros(
-                expected_explicit_feat_dim, dtype=np.float32
-            )
-            # --- END UPDATED ---
-
-            batch_dim = 1
-            seq_dim = 1 if rnn_config.USE_RNN else 0
-
-            def shape_with_batch_seq(base_shape):
-                dims = ([batch_dim, seq_dim] if seq_dim else [batch_dim]) + list(
-                    base_shape
-                )
-                if not base_shape:  # Handle scalar base shape
-                    dims = [batch_dim, seq_dim] if seq_dim else [batch_dim]
-                return tuple(dim for dim in dims if dim > 0)  # Filter out seq_dim if 0
-
-            grid_dims = shape_with_batch_seq(expected_grid_shape)
-            shape_dims = shape_with_batch_seq((expected_shape_feat_dim,))
-            availability_dims = shape_with_batch_seq((expected_availability_dim,))
-            # --- UPDATED: Explicit feature dims ---
-            explicit_feat_dims = shape_with_batch_seq((expected_explicit_feat_dim,))
-            # --- END UPDATED ---
-
-            dummy_grid_cpu = torch.tensor(dummy_grid_np).reshape(grid_dims).to("cpu")
-            dummy_shapes_cpu = (
-                torch.tensor(dummy_shapes_np).reshape(shape_dims).to("cpu")
-            )
-            dummy_availability_cpu = (
-                torch.tensor(dummy_availability_np).reshape(availability_dims).to("cpu")
-            )
-            # --- UPDATED: Explicit feature tensor ---
-            dummy_explicit_features_cpu = (
-                torch.tensor(dummy_explicit_features_np)
-                .reshape(explicit_feat_dims)
-                .to("cpu")
-            )
-            # --- END UPDATED ---
-
-            # Create a copy of the network on CPU for graph tracing
-            model_for_graph_cpu = type(agent.network)(
-                env_config=env_config,
-                action_dim=env_config.ACTION_DIM,
-                model_config=agent.network.config,  # Use loaded agent's network config
-                rnn_config=rnn_config,
-            ).to("cpu")
-
-            model_for_graph_cpu.load_state_dict(agent.network.state_dict())
-            model_for_graph_cpu.eval()
-
-            # --- MODIFIED: Prepare dummy input tuple (grid, shapes, availability, explicit_features) ---
-            dummy_input_tuple = (
-                dummy_grid_cpu,
-                dummy_shapes_cpu,
-                dummy_availability_cpu,
-                dummy_explicit_features_cpu,  # Add explicit features
-            )
-            # --- END MODIFIED ---
-
-            print("[Stats Init] Prepared model copy and dummy input on CPU for graph.")
-        except Exception as e:
-            print(f"Warning: Failed to prepare model/input for graph logging: {e}")
-            traceback.print_exc()
-            model_for_graph_cpu, dummy_input_tuple = None, None
-    elif is_reinit:
-        print("[Stats Init] Skipping graph model preparation during re-initialization.")
-
+    # Initialize TensorBoard Recorder
     print(f"Using TensorBoard Logger (Log Dir: {tb_config.LOG_DIR})")
     try:
         tb_recorder = TensorBoardStatsRecorder(
             aggregator=stats_aggregator,
             console_recorder=console_recorder,
             log_dir=tb_config.LOG_DIR,
-            hparam_dict=config_dict if not is_reinit else None,
-            model_for_graph=model_for_graph_cpu,
-            dummy_input_for_graph=dummy_input_tuple,  # Pass the new tuple
+            hparam_dict=(
+                config_dict if not is_reinit else None
+            ),  # Log hparams only initially
+            model_for_graph=model_for_graph_cpu,  # Will be None
+            dummy_input_for_graph=dummy_input_tuple,  # Will be None
             histogram_log_interval=(
                 tb_config.HISTOGRAM_LOG_FREQ if tb_config.LOG_HISTOGRAMS else -1
             ),
-            image_log_interval=(
-                tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1
-            ),
-            env_config=env_config,
+            image_log_interval=tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1,
+            env_config=env_config,  # Pass configs for context if needed later
             rnn_config=rnn_config,
         )
         print("Statistics Components initialized successfully.")
@@ -3171,6 +3521,9 @@ def initialize_trainer(
     rnn_config: RNNConfig,
     train_config: TrainConfig,
     model_config: ModelConfig,
+    obs_norm_config: ObsNormConfig,  # Added
+    transformer_config: TransformerConfig,  # Added
+    device: torch.device,  # --- MODIFIED: Added device ---
 ) -> Trainer:
     """Initializes the PPO Trainer."""
     print("Initializing PPO Trainer...")
@@ -3183,8 +3536,11 @@ def initialize_trainer(
         rnn_config=rnn_config,
         train_config=train_config,
         model_config=model_config,
+        obs_norm_config=obs_norm_config,
+        transformer_config=transformer_config,
         model_save_path=MODEL_SAVE_PATH,
         load_checkpoint_path=train_config.LOAD_CHECKPOINT_PATH,
+        device=device,
     )
     print("PPO Trainer initialization finished.")
     return trainer
@@ -3467,6 +3823,7 @@ from collections import deque
 from typing import Deque, Dict, Any, Optional, Union, List
 import numpy as np
 import torch
+
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
 from config import StatsConfig
@@ -3489,10 +3846,10 @@ class SimpleStatsRecorder(StatsRecorderBase):
             max(1, console_log_interval) if console_log_interval > 0 else -1
         )
         self.last_log_time: float = time.time()
-        self.last_log_step: int = 0
         self.start_time: float = time.time()
         self.summary_avg_window = self.aggregator.summary_avg_window
         self.rollouts_since_last_log = 0  # Track rollouts for logging frequency
+
         print(
             f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} rollouts"
         )
@@ -3509,6 +3866,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
     ):
+        """Records episode stats and prints new bests to console."""
         update_info = self.aggregator.record_episode(
             episode_score,
             episode_length,
@@ -3524,6 +3882,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         )
         step_info = f"at Step ~{current_step/1e6:.1f}M"
 
+        # Print new bests immediately
         if update_info.get("new_best_rl"):
             prev_str = (
                 f"{self.aggregator.previous_best_score:.2f}"
@@ -3542,7 +3901,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
             print(
                 f"--- 🎮 New Best Game: {self.aggregator.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
             )
-        if update_info.get("new_best_loss"):
+        if update_info.get("new_best_loss"):  # Check loss here too, though less likely
             prev_str = (
                 f"{self.aggregator.previous_best_value_loss:.4f}"
                 if self.aggregator.previous_best_value_loss < float("inf")
@@ -3553,9 +3912,11 @@ class SimpleStatsRecorder(StatsRecorderBase):
             )
 
     def record_step(self, step_data: Dict[str, Any]):
+        """Records step stats and triggers console logging if interval met."""
         update_info = self.aggregator.record_step(step_data)
         g_step = step_data.get("global_step", self.aggregator.current_global_step)
 
+        # Print new best loss immediately if it occurred during this step's update
         if update_info.get("new_best_loss"):
             prev_str = (
                 f"{self.aggregator.previous_best_value_loss:.4f}"
@@ -3567,18 +3928,21 @@ class SimpleStatsRecorder(StatsRecorderBase):
                 f"---📉 New Best Loss: {self.aggregator.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
             )
 
-        # Check if an agent update occurred (indicated by presence of loss keys)
+        # Increment rollout counter if an agent update occurred (indicated by loss keys)
         if "policy_loss" in step_data or "value_loss" in step_data:
             self.rollouts_since_last_log += 1
             self.log_summary(g_step)  # Attempt to log after each agent update
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
+        """Gets the summary dictionary from the aggregator."""
         return self.aggregator.get_summary(current_global_step)
 
     def get_plot_data(self) -> Dict[str, Deque]:
+        """Gets the plot data deques from the aggregator."""
         return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
+        """Logs the current summary statistics to the console if interval is met."""
         # Log based on number of rollouts (agent updates) since last log
         if (
             self.console_log_interval <= 0
@@ -3601,7 +3965,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
             else "N/A"
         )
 
-        # --- MODIFIED: Use 'value_loss' key for the average loss display ---
+        # --- CORRECTED: Use 'value_loss' key for the average loss display ---
         avg_window_size = summary.get("summary_avg_window_size", "?")
         log_str = (
             f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
@@ -3610,16 +3974,15 @@ class SimpleStatsRecorder(StatsRecorderBase):
             f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "  # Corrected key
             f"LR: {summary['current_lr']:.1e}"
         )
-        # --- END MODIFIED ---
+        # --- END CORRECTED ---
 
+        # Add optional fields if present
         epsilon = summary.get("epsilon")
         if epsilon is not None and epsilon < 1.0:
             log_str += f" | Eps: {epsilon:.3f}"
-
         beta = summary.get("beta")
         if beta is not None and beta > 0.0 and beta < 1.0:
             log_str += f" | Beta: {beta:.3f}"
-
         buffer_size = summary.get("buffer_size")
         if buffer_size is not None and buffer_size > 0:
             log_str += f" | Buf: {buffer_size/1e6:.2f}M"
@@ -3627,9 +3990,9 @@ class SimpleStatsRecorder(StatsRecorderBase):
         print(log_str)
 
         self.last_log_time = time.time()
-        self.last_log_step = global_step
         self.rollouts_since_last_log = 0  # Reset counter after logging
 
+    # --- No-op methods for other logging types ---
     def record_histogram(
         self,
         tag: str,
@@ -3652,6 +4015,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         pass
 
     def close(self):
+        """Closes the recorder (no action needed for simple console logger)."""
         print("[SimpleStatsRecorder] Closed.")
 
 
@@ -3758,7 +4122,10 @@ from config import (
     RNNConfig,
     VisConfig,
     StatsConfig,
+    # DEVICE, # Removed direct import
 )
+
+# Import ActorCriticNetwork for type hinting graph model
 from agent.networks.agent_network import ActorCriticNetwork
 
 
@@ -3775,11 +4142,13 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         log_dir: str,
         hparam_dict: Optional[Dict[str, Any]] = None,
         model_for_graph: Optional[ActorCriticNetwork] = None,
-        dummy_input_for_graph: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        dummy_input_for_graph: Optional[
+            Tuple
+        ] = None,  # Use generic Tuple for dummy input
         histogram_log_interval: int = TensorBoardConfig.HISTOGRAM_LOG_FREQ,
         image_log_interval: int = TensorBoardConfig.IMAGE_LOG_FREQ,
-        env_config: Optional[EnvConfig] = None,
-        rnn_config: Optional[RNNConfig] = None,
+        env_config: Optional[EnvConfig] = None,  # Keep for context
+        rnn_config: Optional[RNNConfig] = None,  # Keep for context
     ):
         self.aggregator = aggregator
         self.console_recorder = console_recorder
@@ -3796,12 +4165,16 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         self.last_image_log_step = -1
         self.env_config = env_config
         self.rnn_config = rnn_config
-        self.vis_config = VisConfig()
+        self.vis_config = VisConfig()  # Needed for image rendering utils potentially
         self.summary_avg_window = self.aggregator.summary_avg_window
 
+        # --- MODIFIED: Add counter for TB logging frequency ---
+        self.rollouts_since_last_tb_log = 0
+        # --- END MODIFIED ---
+
         print(f"[TensorBoardStatsRecorder] Initialized. Logging to: {self.log_dir}")
-        print(f"  Histogram Log Interval: {self.histogram_log_interval}")
-        print(f"  Image Log Interval: {self.image_log_interval}")
+        print(f"  Histogram Log Interval: {self.histogram_log_interval} rollouts")
+        print(f"  Image Log Interval: {self.image_log_interval} rollouts")
         print(f"  Summary Avg Window: {self.summary_avg_window}")
 
         if model_for_graph and dummy_input_for_graph:
@@ -3817,11 +4190,14 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
     def _log_hparams_initial(self):
         """Logs hyperparameters at the beginning of the run."""
         try:
+            # Define initial metrics to avoid errors if no episodes complete before closing
             initial_metrics = {
-                "hparam/initial_best_rl_score": -float("inf"),
-                "hparam/initial_best_game_score": -float("inf"),
-                "hparam/initial_best_loss": float("inf"),
+                "hparam/final_best_rl_score": -float("inf"),
+                "hparam/final_best_game_score": -float("inf"),
+                "hparam/final_best_loss": float("inf"),
+                "hparam/final_total_episodes": 0,
             }
+            # Filter hparams to only include loggable types
             filtered_hparams = {
                 k: v
                 for k, v in self.hparam_dict.items()
@@ -3831,6 +4207,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print("[TensorBoardStatsRecorder] Hyperparameters logged.")
         except Exception as e:
             print(f"Error logging initial hyperparameters: {e}")
+            traceback.print_exc()
 
     def record_episode(
         self,
@@ -3841,7 +4218,8 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         game_score: Optional[int] = None,
         lines_cleared: Optional[int] = None,
     ):
-        # --- MODIFICATION: Call aggregator first to get update_info ---
+        """Records episode stats to TensorBoard and delegates to console recorder."""
+        # Call aggregator first to update internal state and get update_info
         update_info = self.aggregator.record_episode(
             episode_score,
             episode_length,
@@ -3850,8 +4228,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             game_score,
             lines_cleared,
         )
-        # --- END MODIFICATION ---
-
         g_step = (
             global_step
             if global_step is not None
@@ -3867,90 +4243,113 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             self.writer.add_scalar("Episode/Lines Cleared", lines_cleared, g_step)
         self.writer.add_scalar("Progress/Total Episodes", episode_num, g_step)
 
-        # Log best scores if they were updated (using update_info from aggregator)
+        # Log best scores if they were updated
         if update_info.get("new_best_rl"):
             self.writer.add_scalar(
                 "Best Performance/RL Score", self.aggregator.best_score, g_step
             )
-            # Optional: Keep console print here or rely on console_recorder's print
-            # print(f"--- 🏆 TB Logged New Best RL: {self.aggregator.best_score:.2f} at Step ~{g_step/1e6:.1f}M (Prev: {self.aggregator.previous_best_score:.2f}) ---")
-
         if update_info.get("new_best_game"):
             self.writer.add_scalar(
                 "Best Performance/Game Score", self.aggregator.best_game_score, g_step
             )
-            # Optional: Keep console print here or rely on console_recorder's print
-            # print(f"--- 🎮 TB Logged New Best Game: {self.aggregator.best_game_score:.0f} at Step ~{g_step/1e6:.1f}M (Prev: {self.aggregator.previous_best_game_score:.0f}) ---")
 
-        # --- MODIFICATION: Delegate to console recorder AFTER aggregator ---
-        # Pass the original arguments to the console recorder
+        # Delegate to console recorder AFTER aggregator and TB logging
         self.console_recorder.record_episode(
             episode_score,
             episode_length,
             episode_num,
-            global_step,  # Pass original global_step
+            global_step,
             game_score,
             lines_cleared,
         )
-        # --- END MODIFICATION ---
 
     def record_step(self, step_data: Dict[str, Any]):
-        # --- MODIFICATION: Call aggregator first to get update_info ---
+        """Records step stats to TensorBoard and delegates to console recorder."""
+        # Call aggregator first
         update_info = self.aggregator.record_step(step_data)
-        # --- END MODIFICATION ---
-
         g_step = step_data.get("global_step", self.aggregator.current_global_step)
 
         # Log scalar values from step_data
-        if "policy_loss" in step_data:
-            self.writer.add_scalar("Loss/Policy Loss", step_data["policy_loss"], g_step)
-        if "value_loss" in step_data:
-            self.writer.add_scalar("Loss/Value Loss", step_data["value_loss"], g_step)
-        if "entropy" in step_data:
-            self.writer.add_scalar("Loss/Entropy", step_data["entropy"], g_step)
-        if "grad_norm" in step_data:
-            self.writer.add_scalar("Debug/Grad Norm", step_data["grad_norm"], g_step)
-        if "avg_max_q" in step_data:
-            self.writer.add_scalar("Debug/Avg Max Q", step_data["avg_max_q"], g_step)
-        if "beta" in step_data:
-            self.writer.add_scalar("Debug/Beta", step_data["beta"], g_step)
-        if "buffer_size" in step_data:
-            self.writer.add_scalar(
-                "Debug/Buffer Size", step_data["buffer_size"], g_step
-            )
-        if "lr" in step_data:
-            self.writer.add_scalar("Train/Learning Rate", step_data["lr"], g_step)
-        if "epsilon" in step_data:
-            self.writer.add_scalar("Train/Epsilon", step_data["epsilon"], g_step)
-        if "sps_collection" in step_data:
-            self.writer.add_scalar(
-                "Performance/SPS Collection", step_data["sps_collection"], g_step
-            )
-        if "update_time" in step_data:
-            self.writer.add_scalar(
-                "Performance/Update Time", step_data["update_time"], g_step
-            )
-        if "step_time" in step_data:
-            self.writer.add_scalar(
-                "Performance/Total Step Time", step_data["step_time"], g_step
-            )
-            if step_data["step_time"] > 1e-9:
-                num_steps = step_data.get("num_steps_processed", 1)
-                sps_total = num_steps / step_data["step_time"]
-                self.writer.add_scalar("Performance/SPS Total", sps_total, g_step)
+        scalar_map = {
+            "policy_loss": "Loss/Policy Loss",
+            "value_loss": "Loss/Value Loss",
+            "entropy": "Loss/Entropy",
+            "grad_norm": "Debug/Grad Norm",
+            "avg_max_q": "Debug/Avg Max Q",
+            "beta": "Debug/Beta",
+            "buffer_size": "Debug/Buffer Size",
+            "lr": "Train/Learning Rate",
+            "epsilon": "Train/Epsilon",
+            "sps_collection": "Performance/SPS Collection",
+            "update_time": "Performance/Update Time",
+            "step_time": "Performance/Total Step Time",
+        }
+        for key, tag in scalar_map.items():
+            if key in step_data and step_data[key] is not None:
+                self.writer.add_scalar(tag, step_data[key], g_step)
 
-        # Log best loss if updated (using update_info from aggregator)
+        # Log total SPS if step_time is available
+        if "step_time" in step_data and step_data["step_time"] > 1e-9:
+            num_steps = step_data.get("num_steps_processed", 1)
+            sps_total = num_steps / step_data["step_time"]
+            self.writer.add_scalar("Performance/SPS Total", sps_total, g_step)
+
+        # Log best loss if updated
         if update_info.get("new_best_loss"):
             self.writer.add_scalar(
                 "Best Performance/Loss", self.aggregator.best_value_loss, g_step
             )
-            # Optional: Keep console print here or rely on console_recorder's print
-            # print(f"---📉 TB Logged New Best Loss: {self.aggregator.best_value_loss:.4f} at Step ~{g_step/1e6:.1f}M (Prev: {self.aggregator.previous_best_value_loss:.4f}) ---")
 
-        # --- MODIFICATION: Delegate to console recorder AFTER aggregator ---
-        # Pass the original step_data dictionary
+        # Delegate to console recorder AFTER aggregator and TB logging
         self.console_recorder.record_step(step_data)
-        # --- END MODIFICATION ---
+
+        # --- MODIFIED: Use internal counter for TB logging frequency ---
+        # Check if histograms/images should be logged (based on rollouts/updates)
+        if (
+            "policy_loss" in step_data
+        ):  # Use loss presence as proxy for update completion
+            self.rollouts_since_last_tb_log += 1  # Increment internal counter
+
+            # Check histogram logging
+            if (
+                self.histogram_log_interval > 0
+                and self.rollouts_since_last_tb_log >= self.histogram_log_interval
+            ):
+                if g_step > self.last_histogram_log_step:
+                    # Add histogram logging calls here if needed, e.g., for weights/grads
+                    # self.record_histogram("Agent/Actor Weights", agent.actor.parameters(), g_step)
+                    self.last_histogram_log_step = g_step  # Update last log step
+                    # Reset counter only if histograms were logged
+                    # self.rollouts_since_last_tb_log = 0 # Resetting here might skip image logging
+
+            # Check image logging
+            if (
+                self.image_log_interval > 0
+                and self.rollouts_since_last_tb_log >= self.image_log_interval
+            ):
+                if g_step > self.last_image_log_step:
+                    # Add image logging calls here if needed
+                    # self.record_image("Environment/Sample", get_env_image(...), g_step)
+                    self.last_image_log_step = g_step  # Update last log step
+                    # Reset counter only if images were logged
+                    # self.rollouts_since_last_tb_log = 0 # Resetting here might skip histogram logging
+
+            # Reset counter if either histogram or image interval was met and logging occurred
+            # This ensures the counter resets correctly even if intervals differ.
+            if (
+                self.histogram_log_interval > 0
+                and self.rollouts_since_last_tb_log >= self.histogram_log_interval
+            ) or (
+                self.image_log_interval > 0
+                and self.rollouts_since_last_tb_log >= self.image_log_interval
+            ):
+                # Check if actual logging happened for either (based on step)
+                if (
+                    g_step == self.last_histogram_log_step
+                    or g_step == self.last_image_log_step
+                ):
+                    self.rollouts_since_last_tb_log = 0  # Reset counter
+        # --- END MODIFIED ---
 
     def record_histogram(
         self,
@@ -3958,86 +4357,53 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         values: Union[np.ndarray, torch.Tensor, List[float]],
         global_step: int,
     ):
-        if self.histogram_log_interval <= 0:
-            return
-        # Log only at specified intervals based on global_step
-        # Use modulo for periodic logging relative to start
-        if (
-            global_step
-            // (
-                self.aggregator.num_envs
-                * self.aggregator.ppo_config.NUM_STEPS_PER_ROLLOUT
-            )
-            % self.histogram_log_interval
-            == 0
-        ):
-            # Check if we already logged for this update cycle step
-            if global_step > self.last_histogram_log_step:
-                try:
-                    self.writer.add_histogram(tag, values, global_step)
-                    self.last_histogram_log_step = global_step
-                except Exception as e:
-                    print(f"Error logging histogram '{tag}': {e}")
+        """Records a histogram to TensorBoard."""
+        # This method is now primarily called internally based on interval,
+        # but can still be called externally if needed.
+        try:
+            self.writer.add_histogram(tag, values, global_step)
+        except Exception as e:
+            print(f"Error logging histogram '{tag}': {e}")
 
     def record_image(
         self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
     ):
-        if self.image_log_interval <= 0:
-            return
-        # Log only at specified intervals based on global_step
-        if (
-            global_step
-            // (
-                self.aggregator.num_envs
-                * self.aggregator.ppo_config.NUM_STEPS_PER_ROLLOUT
-            )
-            % self.image_log_interval
-            == 0
-        ):
-            if global_step > self.last_image_log_step:
-                try:
-                    # Ensure image has channel-first format (C, H, W) or (N, C, H, W)
-                    if isinstance(image, np.ndarray):
-                        if image.ndim == 3 and image.shape[-1] in [
-                            1,
-                            3,
-                            4,
-                        ]:  # HWC -> CHW
-                            image_tensor = torch.from_numpy(image).permute(2, 0, 1)
-                        elif image.ndim == 2:  # HW -> CHW (add channel dim)
-                            image_tensor = torch.from_numpy(image).unsqueeze(0)
-                        else:  # Assume CHW or NCHW
-                            image_tensor = torch.from_numpy(image)
-                    elif isinstance(image, torch.Tensor):
-                        if image.ndim == 3 and image.shape[0] not in [
-                            1,
-                            3,
-                            4,
-                        ]:  # HWC? -> CHW
-                            if image.shape[-1] in [1, 3, 4]:
-                                image_tensor = image.permute(2, 0, 1)
-                            else:  # Assume CHW
-                                image_tensor = image
-                        elif image.ndim == 2:  # HW -> CHW
-                            image_tensor = image.unsqueeze(0)
-                        else:  # Assume CHW or NCHW
-                            image_tensor = image
+        """Records an image to TensorBoard, ensuring correct data format."""
+        # This method is now primarily called internally based on interval,
+        # but can still be called externally if needed.
+        try:
+            # Ensure image has channel-first format (C, H, W) or (N, C, H, W)
+            if isinstance(image, np.ndarray):
+                if image.ndim == 3 and image.shape[-1] in [1, 3, 4]:
+                    image_tensor = torch.from_numpy(image).permute(
+                        2, 0, 1
+                    )  # HWC -> CHW
+                elif image.ndim == 2:
+                    image_tensor = torch.from_numpy(image).unsqueeze(0)  # HW -> CHW
+                else:
+                    image_tensor = torch.from_numpy(image)  # Assume CHW or NCHW
+            elif isinstance(image, torch.Tensor):
+                if image.ndim == 3 and image.shape[0] not in [1, 3, 4]:  # HWC? -> CHW
+                    if image.shape[-1] in [1, 3, 4]:
+                        image_tensor = image.permute(2, 0, 1)
                     else:
-                        print(
-                            f"Warning: Unsupported image type for tag '{tag}': {type(image)}"
-                        )
-                        return
+                        image_tensor = image  # Assume CHW
+                elif image.ndim == 2:
+                    image_tensor = image.unsqueeze(0)  # HW -> CHW
+                else:
+                    image_tensor = image  # Assume CHW or NCHW
+            else:
+                print(f"Warning: Unsupported image type for tag '{tag}': {type(image)}")
+                return
 
-                    self.writer.add_image(
-                        tag, image_tensor, global_step, dataformats="CHW"
-                    )
-                    self.last_image_log_step = global_step
-                except Exception as e:
-                    print(f"Error logging image '{tag}': {e}")
+            self.writer.add_image(tag, image_tensor, global_step, dataformats="CHW")
+        except Exception as e:
+            print(f"Error logging image '{tag}': {e}")
 
     def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
         """Records final hyperparameters and metrics."""
         try:
+            # Filter hparams and metrics to loggable types
             filtered_hparams = {
                 k: v
                 for k, v in hparam_dict.items()
@@ -4050,50 +4416,72 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print("[TensorBoardStatsRecorder] Final hparams and metrics logged.")
         except Exception as e:
             print(f"Error logging final hyperparameters/metrics: {e}")
+            traceback.print_exc()
 
     def record_graph(
         self, model: torch.nn.Module, input_to_model: Optional[Any] = None
     ):
-        """Records the model graph."""
+        """Records the model graph to TensorBoard."""
         if input_to_model is None:
             print("Warning: Cannot record graph without dummy input.")
             return
         try:
+            # Ensure model and input are on CPU for graph tracing
+            original_device = next(model.parameters()).device
             model.cpu()
+            dummy_input_cpu: Any
             if isinstance(input_to_model, tuple):
-                dummy_input_cpu = tuple(
-                    t.cpu() for t in input_to_model if isinstance(t, torch.Tensor)
-                )
+                # Ensure all tensors in the tuple are moved to CPU
+                dummy_input_cpu_list = []
+                for item in input_to_model:
+                    if isinstance(item, torch.Tensor):
+                        dummy_input_cpu_list.append(item.cpu())
+                    elif isinstance(
+                        item, tuple
+                    ):  # Handle nested tuples (like LSTM state)
+                        dummy_input_cpu_list.append(
+                            tuple(
+                                t.cpu() if isinstance(t, torch.Tensor) else t
+                                for t in item
+                            )
+                        )
+                    else:
+                        dummy_input_cpu_list.append(item)
+                dummy_input_cpu = tuple(dummy_input_cpu_list)
             elif isinstance(input_to_model, torch.Tensor):
                 dummy_input_cpu = input_to_model.cpu()
             else:
-                dummy_input_cpu = input_to_model
+                dummy_input_cpu = input_to_model  # Assume non-tensor input is fine
 
             self.writer.add_graph(model, dummy_input_cpu, verbose=False)
             print("[TensorBoardStatsRecorder] Model graph logged.")
-            # Move model back to original device
-            if hasattr(model, "device"):  # Check if model has device attr
-                model.to(model.device)
-            elif self.env_config:  # Fallback to general device
-                model.to(DEVICE)
-
+            model.to(original_device)  # Move model back
         except Exception as e:
             print(f"Error logging model graph: {e}. Graph logging can be tricky.")
+            traceback.print_exc()
+            # Attempt to move model back even if logging failed
+            try:
+                model.to(original_device)
+            except:
+                pass
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
+        """Gets the summary dictionary from the aggregator."""
         return self.aggregator.get_summary(current_global_step)
 
     def get_plot_data(self) -> Dict[str, Deque]:
+        """Gets the plot data deques from the aggregator."""
         return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
-        # Delegate to console logger
+        """Delegates console logging to the SimpleStatsRecorder."""
         self.console_recorder.log_summary(global_step)
 
     def close(self):
         """Closes the TensorBoard writer and logs final hparams."""
         print("[TensorBoardStatsRecorder] Closing writer...")
         try:
+            # Log final metrics using the latest summary
             final_summary = self.get_summary(self.aggregator.current_global_step)
             final_metrics = {
                 "hparam/final_best_rl_score": final_summary.get(
@@ -4105,7 +4493,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 "hparam/final_best_loss": final_summary.get("best_loss", float("inf")),
                 "hparam/final_total_episodes": final_summary.get("total_episodes", 0),
             }
-            # Ensure hparam_dict exists before logging
             if self.hparam_dict:
                 self.record_hparams(self.hparam_dict, final_metrics)
             else:
@@ -4118,6 +4505,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print("[TensorBoardStatsRecorder] Writer closed.")
         except Exception as e:
             print(f"Error during TensorBoard writer close: {e}")
+            traceback.print_exc()
         # Close console recorder as well
         self.console_recorder.close()
 
@@ -4146,9 +4534,14 @@ from typing import Optional, Dict, Any, Tuple
 
 from agent.ppo_agent import PPOAgent
 
+# --- MODIFIED: Import RunningMeanStd ---
+from utils.running_mean_std import RunningMeanStd
+
+# --- END MODIFIED ---
+
 
 class CheckpointManager:
-    """Handles loading and saving of PPO agent states."""
+    """Handles loading and saving of agent states and observation normalization stats."""
 
     def __init__(
         self,
@@ -4156,70 +4549,134 @@ class CheckpointManager:
         model_save_path: str,
         load_checkpoint_path: Optional[str],
         device: torch.device,
+        # --- MODIFIED: Accept optional RunningMeanStd instances ---
+        obs_rms_dict: Optional[Dict[str, RunningMeanStd]] = None,
+        # --- END MODIFIED ---
     ):
         self.agent = agent
         self.model_save_path = model_save_path
         self.device = device
+        # --- MODIFIED: Store Obs RMS dict ---
+        self.obs_rms_dict = obs_rms_dict if obs_rms_dict else {}
+        # --- END MODIFIED ---
 
         self.global_step = 0
         self.episode_count = 0
 
         if load_checkpoint_path:
-            self.load_agent_checkpoint(load_checkpoint_path)
+            self.load_checkpoint(load_checkpoint_path)
         else:
-            print(
-                "[CheckpointManager-PPO] No agent checkpoint specified, starting fresh."
-            )
+            print("[CheckpointManager] No checkpoint specified, starting fresh.")
 
-    def load_agent_checkpoint(self, path_to_load: str):
+    def load_checkpoint(self, path_to_load: str):
+        """Loads agent state and observation normalization stats from a checkpoint file."""
         if not os.path.isfile(path_to_load):
             print(
-                f"[CheckpointManager-PPO] LOAD WARNING: Agent ckpt not found: {path_to_load}"
+                f"[CheckpointManager] LOAD WARNING: Checkpoint not found: {path_to_load}"
             )
             return
-        print(f"[CheckpointManager-PPO] Loading agent checkpoint from: {path_to_load}")
+        print(f"[CheckpointManager] Loading checkpoint from: {path_to_load}")
         try:
             checkpoint = torch.load(path_to_load, map_location=self.device)
-            self.agent.load_state_dict(checkpoint)
 
+            # Load agent state
+            if "agent_state_dict" in checkpoint:
+                self.agent.load_state_dict(checkpoint["agent_state_dict"])
+            else:
+                print(
+                    "  -> Agent state dict not found at 'agent_state_dict', attempting legacy load..."
+                )
+                self.agent.load_state_dict(
+                    checkpoint
+                )  # May raise error if incompatible
+
+            # Load global step and episode count
             self.global_step = checkpoint.get("global_step", 0)
             self.episode_count = checkpoint.get("episode_count", 0)
             print(
                 f"  -> Resuming from Step: {self.global_step}, Ep: {self.episode_count}"
             )
+
+            # --- MODIFIED: Load observation normalization stats ---
+            if "obs_rms_state_dict" in checkpoint and self.obs_rms_dict:
+                rms_state_dict = checkpoint["obs_rms_state_dict"]
+                loaded_keys = set()
+                for key, rms_instance in self.obs_rms_dict.items():
+                    if key in rms_state_dict:
+                        rms_instance.load_state_dict(rms_state_dict[key])
+                        loaded_keys.add(key)
+                        print(f"  -> Loaded Obs RMS for '{key}'")
+                    else:
+                        print(
+                            f"  -> WARNING: Obs RMS state for '{key}' not found in checkpoint."
+                        )
+                # Check for extra keys in checkpoint not in current config
+                extra_keys = set(rms_state_dict.keys()) - loaded_keys
+                if extra_keys:
+                    print(
+                        f"  -> WARNING: Checkpoint contains unused Obs RMS keys: {extra_keys}"
+                    )
+            elif self.obs_rms_dict:
+                print(
+                    "  -> WARNING: Obs RMS state dict not found in checkpoint, using initial RMS."
+                )
+            # --- END MODIFIED ---
+
         except KeyError as e:
             print(
-                f"  -> ERROR loading agent checkpoint: Missing key '{e}'. Check compatibility."
+                f"  -> ERROR loading checkpoint: Missing key '{e}'. Check compatibility."
             )
             self.global_step = 0
             self.episode_count = 0
+            for rms in self.obs_rms_dict.values():
+                rms.reset()  # Reset RMS on critical load failure
         except Exception as e:
-            print(f"  -> ERROR loading agent checkpoint ('{e}'). Check compatibility.")
+            print(f"  -> ERROR loading checkpoint ('{e}'). Check compatibility.")
             traceback.print_exc()
             self.global_step = 0
             self.episode_count = 0
+            for rms in self.obs_rms_dict.values():
+                rms.reset()
 
     def save_checkpoint(
         self, global_step: int, episode_count: int, is_final: bool = False
     ):
+        """Saves agent state and observation normalization stats to a checkpoint file."""
         prefix = "FINAL" if is_final else f"step_{global_step}"
         save_dir = os.path.dirname(self.model_save_path)
         os.makedirs(save_dir, exist_ok=True)
+        filename = f"{prefix}_agent_state.pth"
+        full_save_path = os.path.join(save_dir, filename)  # Use specific filename
 
-        print(f"[CheckpointManager-PPO] Saving agent checkpoint ({prefix})...")
+        print(f"[CheckpointManager] Saving checkpoint ({prefix})...")
         try:
             agent_save_data = self.agent.get_state_dict()
-            agent_save_data["global_step"] = global_step
-            agent_save_data["episode_count"] = episode_count
-            torch.save(agent_save_data, self.model_save_path)
-            print(
-                f"  -> Agent checkpoint saved: {os.path.basename(self.model_save_path)}"
-            )
+
+            # --- MODIFIED: Prepare Obs RMS state ---
+            obs_rms_save_data = {}
+            if self.obs_rms_dict:
+                for key, rms_instance in self.obs_rms_dict.items():
+                    obs_rms_save_data[key] = rms_instance.state_dict()
+            # --- END MODIFIED ---
+
+            # Combine into a single checkpoint dictionary
+            checkpoint_data = {
+                "global_step": global_step,
+                "episode_count": episode_count,
+                "agent_state_dict": agent_save_data,
+                "obs_rms_state_dict": obs_rms_save_data,  # Add RMS state
+            }
+
+            torch.save(checkpoint_data, full_save_path)  # Save to specific file
+            # Optionally update the main save path symlink or keep track of latest
+            # For simplicity, we just save with a step/final prefix now.
+            print(f"  -> Checkpoint saved: {filename}")
         except Exception as e:
-            print(f"  -> ERROR saving agent checkpoint: {e}")
+            print(f"  -> ERROR saving checkpoint: {e}")
             traceback.print_exc()
 
     def get_initial_state(self) -> Tuple[int, int]:
+        """Returns the initial global step and episode count after potential loading."""
         return self.global_step, self.episode_count
 
 
@@ -4238,19 +4695,26 @@ from config import (
     TensorBoardConfig,
     PPOConfig,
     RNNConfig,
-    DEVICE,
+    ObsNormConfig,
+    TransformerConfig,
+    # DEVICE, # Removed direct import
 )
 from environment.game_state import GameState, StateType
 from agent.ppo_agent import PPOAgent
 from stats.stats_recorder import StatsRecorderBase
 from utils.types import ActionType
+
+# --- MODIFIED: Import RunningMeanStd ---
+from utils.running_mean_std import RunningMeanStd
+
+# --- END MODIFIED ---
 from .rollout_storage import RolloutStorage
 
 
 class RolloutCollector:
     """
     Handles interaction with parallel environments to collect rollouts for PPO.
-    Includes staggered start of interaction to desynchronize environments.
+    Includes optional observation normalization using RunningMeanStd.
     """
 
     def __init__(
@@ -4263,6 +4727,8 @@ class RolloutCollector:
         rnn_config: RNNConfig,
         reward_config: RewardConfig,
         tb_config: TensorBoardConfig,
+        obs_norm_config: ObsNormConfig,  # Added
+        device: torch.device,  # --- MODIFIED: Added device ---
     ):
         self.envs = envs
         self.agent = agent
@@ -4273,7 +4739,8 @@ class RolloutCollector:
         self.rnn_config = rnn_config
         self.reward_config = reward_config
         self.tb_config = tb_config
-        self.device = DEVICE
+        self.obs_norm_config = obs_norm_config  # Store config
+        self.device = device  # --- MODIFIED: Use passed device ---
 
         self.rollout_storage = RolloutStorage(
             ppo_config.NUM_STEPS_PER_ROLLOUT,
@@ -4283,21 +4750,61 @@ class RolloutCollector:
             self.device,
         )
 
-        # CPU Buffers for current step's observations and dones
-        self.current_obs_grid_cpu = np.zeros(
+        # --- MODIFIED: Observation Normalization Setup ---
+        self.obs_rms: Dict[str, RunningMeanStd] = {}
+        if self.obs_norm_config.ENABLE_OBS_NORMALIZATION:
+            print("[RolloutCollector] Observation Normalization ENABLED.")
+            if self.obs_norm_config.NORMALIZE_GRID:
+                # Grid shape is (C, H, W)
+                self.obs_rms["grid"] = RunningMeanStd(
+                    shape=self.env_config.GRID_STATE_SHAPE,
+                    epsilon=self.obs_norm_config.EPSILON,
+                )
+                print(
+                    f"  - Normalizing Grid (shape: {self.env_config.GRID_STATE_SHAPE})"
+                )
+            if self.obs_norm_config.NORMALIZE_SHAPES:
+                # Shape features are flattened in state dict
+                self.obs_rms["shapes"] = RunningMeanStd(
+                    shape=(self.env_config.SHAPE_STATE_DIM,),
+                    epsilon=self.obs_norm_config.EPSILON,
+                )
+                print(
+                    f"  - Normalizing Shapes (shape: {(self.env_config.SHAPE_STATE_DIM,)})"
+                )
+            if self.obs_norm_config.NORMALIZE_AVAILABILITY:
+                self.obs_rms["shape_availability"] = RunningMeanStd(
+                    shape=(self.env_config.SHAPE_AVAILABILITY_DIM,),
+                    epsilon=self.obs_norm_config.EPSILON,
+                )
+                print(
+                    f"  - Normalizing Availability (shape: {(self.env_config.SHAPE_AVAILABILITY_DIM,)})"
+                )
+            if self.obs_norm_config.NORMALIZE_EXPLICIT_FEATURES:
+                self.obs_rms["explicit_features"] = RunningMeanStd(
+                    shape=(self.env_config.EXPLICIT_FEATURES_DIM,),
+                    epsilon=self.obs_norm_config.EPSILON,
+                )
+                print(
+                    f"  - Normalizing Explicit Features (shape: {(self.env_config.EXPLICIT_FEATURES_DIM,)})"
+                )
+        else:
+            print("[RolloutCollector] Observation Normalization DISABLED.")
+        # --- END MODIFIED ---
+
+        # CPU Buffers for current step's RAW observations and dones
+        self.current_raw_obs_grid_cpu = np.zeros(
             (self.num_envs, *self.env_config.GRID_STATE_SHAPE), dtype=np.float32
         )
-        self.current_obs_shapes_cpu = np.zeros(
+        self.current_raw_obs_shapes_cpu = np.zeros(
             (self.num_envs, self.env_config.SHAPE_STATE_DIM), dtype=np.float32
         )
-        self.current_obs_availability_cpu = np.zeros(
+        self.current_raw_obs_availability_cpu = np.zeros(
             (self.num_envs, self.env_config.SHAPE_AVAILABILITY_DIM), dtype=np.float32
         )
-        # --- UPDATED: Use correct dimension for explicit features ---
-        self.current_obs_explicit_features_cpu = np.zeros(
+        self.current_raw_obs_explicit_features_cpu = np.zeros(
             (self.num_envs, self.env_config.EXPLICIT_FEATURES_DIM), dtype=np.float32
         )
-        # --- END UPDATED ---
         self.current_dones_cpu = np.zeros(self.num_envs, dtype=bool)
 
         # Episode trackers
@@ -4316,22 +4823,48 @@ class RolloutCollector:
                 self.num_envs
             )
 
-        # --- NEW: Staggered Start ---
-        # Assign a start step delay for each environment (simple sequential stagger)
-        # Ensures interaction starts spread out over the first rollout steps.
-        self.env_start_step_delay = (
-            np.arange(self.num_envs) % self.ppo_config.NUM_STEPS_PER_ROLLOUT
-        )
-        print(
-            f"[RolloutCollector] Interaction start steps staggered up to step {np.max(self.env_start_step_delay)}."
-        )
-        # --- END NEW ---
-
         # Reset environments and populate initial observations
         self._reset_all_envs()
-        self._copy_initial_observations_to_storage()
+        # --- MODIFIED: Update RMS with initial obs before copying ---
+        self._update_obs_rms(self.current_raw_obs_grid_cpu, "grid")
+        self._update_obs_rms(self.current_raw_obs_shapes_cpu, "shapes")
+        self._update_obs_rms(
+            self.current_raw_obs_availability_cpu, "shape_availability"
+        )
+        self._update_obs_rms(
+            self.current_raw_obs_explicit_features_cpu, "explicit_features"
+        )
+        self._copy_initial_observations_to_storage()  # Now copies potentially normalized obs
+        # --- END MODIFIED ---
 
         print(f"[RolloutCollector] Initialized for {self.num_envs} environments.")
+
+    # --- MODIFIED: Observation Normalization Methods ---
+    def _update_obs_rms(self, obs_batch: np.ndarray, key: str):
+        """Update the running mean/std for a given observation key if enabled."""
+        if key in self.obs_rms:
+            self.obs_rms[key].update(obs_batch)
+
+    def _normalize_obs(self, obs_batch: np.ndarray, key: str) -> np.ndarray:
+        """Normalize observations using running mean/std if enabled."""
+        if key in self.obs_rms:
+            normalized_obs = self.obs_rms[key].normalize(obs_batch)
+            # Clip normalized observations
+            clipped_obs = np.clip(
+                normalized_obs,
+                -self.obs_norm_config.OBS_CLIP,
+                self.obs_norm_config.OBS_CLIP,
+            )
+            return clipped_obs.astype(np.float32)
+        else:
+            # Return raw observations if normalization for this key is disabled
+            return obs_batch.astype(np.float32)
+
+    def get_obs_rms_dict(self) -> Dict[str, RunningMeanStd]:
+        """Returns the dictionary containing the RunningMeanStd instances for checkpointing."""
+        return self.obs_rms
+
+    # --- END MODIFIED ---
 
     def _reset_env(self, env_index: int) -> StateType:
         """Resets a single environment and returns its initial state dict."""
@@ -4342,74 +4875,72 @@ class RolloutCollector:
             self.current_episode_game_scores[env_index] = 0
             self.current_episode_lines_cleared[env_index] = 0
             return state_dict
-        except KeyError as e:
-            print(
-                f"FATAL ERROR: Env {env_index} reset missing key '{e}'. Check GameState.reset()"
-            )
-            raise e
         except Exception as e:
             print(f"ERROR resetting env {env_index}: {e}")
+            traceback.print_exc()
+            # Return a dummy state to avoid crashing, mark as done
             dummy_state: StateType = {
                 "grid": np.zeros(self.env_config.GRID_STATE_SHAPE, dtype=np.float32),
-                "shapes": np.zeros(
-                    (
-                        self.env_config.NUM_SHAPE_SLOTS,
-                        self.env_config.SHAPE_FEATURES_PER_SHAPE,
-                    ),
-                    dtype=np.float32,
-                ),
+                "shapes": np.zeros(self.env_config.SHAPE_STATE_DIM, dtype=np.float32),
                 "shape_availability": np.zeros(
                     self.env_config.SHAPE_AVAILABILITY_DIM, dtype=np.float32
                 ),
-                # --- UPDATED: Use correct dimension for dummy explicit features ---
                 "explicit_features": np.zeros(
                     self.env_config.EXPLICIT_FEATURES_DIM, dtype=np.float32
                 ),
-                # --- END UPDATED ---
             }
-            self.current_dones_cpu[env_index] = True
+            self.current_dones_cpu[env_index] = True  # Mark as done if reset failed
             return dummy_state
 
-    def _update_obs_from_state_dict(self, env_index: int, state_dict: StateType):
-        """Updates the CPU observation buffers for a given environment index."""
-        self.current_obs_grid_cpu[env_index] = state_dict["grid"]
-        self.current_obs_shapes_cpu[env_index] = state_dict["shapes"].reshape(-1)[
-            : self.env_config.SHAPE_STATE_DIM
+    def _update_raw_obs_from_state_dict(self, env_index: int, state_dict: StateType):
+        """Updates the CPU RAW observation buffers for a given environment index."""
+        self.current_raw_obs_grid_cpu[env_index] = state_dict["grid"]
+        self.current_raw_obs_shapes_cpu[env_index] = state_dict[
+            "shapes"
+        ]  # Assumes already flat
+        self.current_raw_obs_availability_cpu[env_index] = state_dict[
+            "shape_availability"
         ]
-        self.current_obs_availability_cpu[env_index] = state_dict["shape_availability"]
-        # --- UPDATED: Copy explicit features ---
-        self.current_obs_explicit_features_cpu[env_index] = state_dict[
+        self.current_raw_obs_explicit_features_cpu[env_index] = state_dict[
             "explicit_features"
         ]
-        # --- END UPDATED ---
 
     def _reset_all_envs(self):
-        """Resets all environments and updates initial observations."""
+        """Resets all environments and updates initial raw observations."""
         for i in range(self.num_envs):
             initial_state = self._reset_env(i)
-            self._update_obs_from_state_dict(i, initial_state)
-            self.current_dones_cpu[i] = False
+            self._update_raw_obs_from_state_dict(i, initial_state)
+            self.current_dones_cpu[i] = False  # Reset done flag
         if self.rnn_config.USE_RNN:
             self.current_lstm_state_device = self.agent.get_initial_hidden_state(
                 self.num_envs
             )
 
     def _copy_initial_observations_to_storage(self):
-        """Copies the initial observations from CPU buffers to the RolloutStorage."""
-        initial_obs_grid_t = torch.from_numpy(self.current_obs_grid_cpu).to(
+        """Normalizes (if enabled) and copies initial observations to RolloutStorage."""
+        # --- MODIFIED: Normalize before copying ---
+        obs_grid_norm = self._normalize_obs(self.current_raw_obs_grid_cpu, "grid")
+        obs_shapes_norm = self._normalize_obs(self.current_raw_obs_shapes_cpu, "shapes")
+        obs_availability_norm = self._normalize_obs(
+            self.current_raw_obs_availability_cpu, "shape_availability"
+        )
+        obs_explicit_features_norm = self._normalize_obs(
+            self.current_raw_obs_explicit_features_cpu, "explicit_features"
+        )
+        # --- END MODIFIED ---
+
+        initial_obs_grid_t = torch.from_numpy(obs_grid_norm).to(
             self.rollout_storage.device
         )
-        initial_obs_shapes_t = torch.from_numpy(self.current_obs_shapes_cpu).to(
+        initial_obs_shapes_t = torch.from_numpy(obs_shapes_norm).to(
             self.rollout_storage.device
         )
-        initial_obs_availability_t = torch.from_numpy(
-            self.current_obs_availability_cpu
-        ).to(self.rollout_storage.device)
-        # --- UPDATED: Copy explicit features ---
+        initial_obs_availability_t = torch.from_numpy(obs_availability_norm).to(
+            self.rollout_storage.device
+        )
         initial_obs_explicit_features_t = torch.from_numpy(
-            self.current_obs_explicit_features_cpu
+            obs_explicit_features_norm
         ).to(self.rollout_storage.device)
-        # --- END UPDATED ---
         initial_dones_t = (
             torch.from_numpy(self.current_dones_cpu)
             .float()
@@ -4417,14 +4948,13 @@ class RolloutCollector:
             .to(self.rollout_storage.device)
         )
 
+        # Copy to storage at index 0
         self.rollout_storage.obs_grid[0].copy_(initial_obs_grid_t)
         self.rollout_storage.obs_shapes[0].copy_(initial_obs_shapes_t)
         self.rollout_storage.obs_availability[0].copy_(initial_obs_availability_t)
-        # --- UPDATED: Copy explicit features to storage ---
         self.rollout_storage.obs_explicit_features[0].copy_(
             initial_obs_explicit_features_t
         )
-        # --- END UPDATED ---
         self.rollout_storage.dones[0].copy_(initial_dones_t)
 
         if self.rnn_config.USE_RNN and self.current_lstm_state_device is not None:
@@ -4442,33 +4972,31 @@ class RolloutCollector:
     def _record_episode_stats(
         self, env_index: int, final_reward_adjustment: float, current_global_step: int
     ):
-        """Helper function to record stats for a finished episode."""
-        # Only record stats if the environment has actually started interacting
-        if current_global_step >= self.env_start_step_delay[env_index]:
-            self.episode_count += 1
-            final_episode_score = (
-                self.current_episode_scores[env_index] + final_reward_adjustment
-            )
-            final_episode_length = self.current_episode_lengths[env_index]
-            final_game_score = self.current_episode_game_scores[env_index]
-            final_lines_cleared = self.current_episode_lines_cleared[env_index]
-
-            approx_global_step_for_log = current_global_step + env_index + 1
-
-            self.stats_recorder.record_episode(
-                episode_score=final_episode_score,
-                episode_length=final_episode_length,
-                episode_num=self.episode_count,
-                global_step=approx_global_step_for_log,
-                game_score=final_game_score,
-                lines_cleared=final_lines_cleared,
-            )
+        """Records completed episode statistics."""
+        self.episode_count += 1
+        final_episode_score = (
+            self.current_episode_scores[env_index] + final_reward_adjustment
+        )
+        final_episode_length = self.current_episode_lengths[env_index]
+        final_game_score = self.current_episode_game_scores[env_index]
+        final_lines_cleared = self.current_episode_lines_cleared[env_index]
+        # Use the actual global step for logging
+        self.stats_recorder.record_episode(
+            episode_score=final_episode_score,
+            episode_length=final_episode_length,
+            episode_num=self.episode_count,
+            global_step=current_global_step,
+            game_score=final_game_score,
+            lines_cleared=final_lines_cleared,
+        )
 
     def _reset_rnn_state_for_env(self, env_index: int):
-        """Resets the RNN hidden state for a specific environment index."""
+        """Resets the hidden state for a specific environment index if RNN is used."""
         if self.rnn_config.USE_RNN and self.current_lstm_state_device is not None:
+            # Get initial state for a single environment
             reset_h, reset_c = self.agent.get_initial_hidden_state(1)
             if reset_h is not None and reset_c is not None:
+                # Ensure state is on the same device and assign to the specific env index
                 reset_h = reset_h.to(self.current_lstm_state_device[0].device)
                 reset_c = reset_c.to(self.current_lstm_state_device[1].device)
                 self.current_lstm_state_device[0][
@@ -4479,68 +5007,77 @@ class RolloutCollector:
                 ] = reset_c
 
     def collect_one_step(self, current_global_step: int) -> int:
-        """Collects one step of experience from all environments using batching."""
+        """Collects one step of experience from all environments."""
         step_start_time = time.time()
-        current_rollout_step = (
-            self.rollout_storage.step
-        )  # Get current step within the rollout
+        current_rollout_step = self.rollout_storage.step
 
-        # --- 1. Identify active, frozen, waiting, and truly done environments ---
+        # 1. Identify active environments and get valid actions
         active_env_indices: List[int] = []
-        frozen_env_indices: List[int] = []
-        waiting_env_indices: List[int] = (
-            []
-        )  # NEW: Envs that haven't reached start delay
-        envs_done_pre_action: List[int] = (
-            []
-        )  # Truly done (no moves, not frozen/waiting)
         valid_actions_list: List[Optional[List[int]]] = [None] * self.num_envs
+        envs_done_pre_action: List[int] = []  # Envs that become done without an action
 
         for i in range(self.num_envs):
-            self.envs[i]._update_timers()  # Update timers first
-
+            self.envs[i]._update_timers()  # Update internal timers if any
             if self.current_dones_cpu[i]:
-                # Already done from previous step, will be reset later
-                continue
-
-            # --- NEW: Check if waiting to start ---
-            if current_rollout_step < self.env_start_step_delay[i]:
-                waiting_env_indices.append(i)
-                continue  # Skip checks below if waiting
-            # --- END NEW ---
-
+                continue  # Skip already done envs (will be reset later)
             if self.envs[i].is_frozen():
-                frozen_env_indices.append(i)
-                continue  # Skip action selection
+                continue  # Skip frozen envs (e.g., during animation)
 
             valid_actions = self.envs[i].valid_actions()
             if not valid_actions:
+                # If no valid actions, the env is effectively done
                 envs_done_pre_action.append(i)
             else:
                 valid_actions_list[i] = valid_actions
                 active_env_indices.append(i)
 
-        # --- 2. Select actions ONLY for active environments ---
+        # 2. Select actions ONLY for active environments
         actions_np = np.zeros(self.num_envs, dtype=np.int64)
         log_probs_np = np.zeros(self.num_envs, dtype=np.float32)
         values_np = np.zeros(self.num_envs, dtype=np.float32)
-        next_lstm_state_device = self.current_lstm_state_device
+        next_lstm_state_device = (
+            self.current_lstm_state_device
+        )  # Start with current state
 
-        if active_env_indices:  # Only run agent if there are active envs
+        if active_env_indices:
             active_indices_tensor = torch.tensor(active_env_indices, dtype=torch.long)
 
-            batch_obs_grid_cpu = self.current_obs_grid_cpu[active_env_indices]
-            batch_obs_shapes_cpu = self.current_obs_shapes_cpu[active_env_indices]
-            batch_obs_availability_cpu = self.current_obs_availability_cpu[
+            # --- MODIFIED: Normalize observations before feeding to agent ---
+            batch_obs_grid_raw = self.current_raw_obs_grid_cpu[active_env_indices]
+            batch_obs_shapes_raw = self.current_raw_obs_shapes_cpu[active_env_indices]
+            batch_obs_availability_raw = self.current_raw_obs_availability_cpu[
                 active_env_indices
             ]
-            # --- UPDATED: Get explicit features for active envs ---
-            batch_obs_explicit_features_cpu = self.current_obs_explicit_features_cpu[
-                active_env_indices
-            ]
-            # --- END UPDATED ---
+            batch_obs_explicit_features_raw = (
+                self.current_raw_obs_explicit_features_cpu[active_env_indices]
+            )
+
+            batch_obs_grid_norm = self._normalize_obs(batch_obs_grid_raw, "grid")
+            batch_obs_shapes_norm = self._normalize_obs(batch_obs_shapes_raw, "shapes")
+            batch_obs_availability_norm = self._normalize_obs(
+                batch_obs_availability_raw, "shape_availability"
+            )
+            batch_obs_explicit_features_norm = self._normalize_obs(
+                batch_obs_explicit_features_raw, "explicit_features"
+            )
+
+            batch_obs_grid_t = torch.from_numpy(batch_obs_grid_norm).to(
+                self.agent.device
+            )
+            batch_obs_shapes_t = torch.from_numpy(batch_obs_shapes_norm).to(
+                self.agent.device
+            )
+            batch_obs_availability_t = torch.from_numpy(batch_obs_availability_norm).to(
+                self.agent.device
+            )
+            batch_obs_explicit_features_t = torch.from_numpy(
+                batch_obs_explicit_features_norm
+            ).to(self.agent.device)
+            # --- END MODIFIED ---
+
             batch_valid_actions = [valid_actions_list[i] for i in active_env_indices]
 
+            # Select hidden state corresponding to active envs
             batch_hidden_state_device = None
             if self.rnn_config.USE_RNN and self.current_lstm_state_device is not None:
                 h_n, c_n = self.current_lstm_state_device
@@ -4549,21 +5086,7 @@ class RolloutCollector:
                     c_n[:, active_indices_tensor, :].contiguous(),
                 )
 
-            batch_obs_grid_t = torch.from_numpy(batch_obs_grid_cpu).to(
-                self.agent.device
-            )
-            batch_obs_shapes_t = torch.from_numpy(batch_obs_shapes_cpu).to(
-                self.agent.device
-            )
-            batch_obs_availability_t = torch.from_numpy(batch_obs_availability_cpu).to(
-                self.agent.device
-            )
-            # --- UPDATED: Convert explicit features to tensor ---
-            batch_obs_explicit_features_t = torch.from_numpy(
-                batch_obs_explicit_features_cpu
-            ).to(self.agent.device)
-            # --- END UPDATED ---
-
+            # Get actions, log_probs, values, and next hidden state from agent
             with torch.no_grad():
                 (
                     batch_actions_t,
@@ -4574,17 +5097,17 @@ class RolloutCollector:
                     batch_obs_grid_t,
                     batch_obs_shapes_t,
                     batch_obs_availability_t,
-                    # --- UPDATED: Pass explicit features tensor ---
                     batch_obs_explicit_features_t,
-                    # --- END UPDATED ---
                     batch_hidden_state_device,
                     batch_valid_actions,
                 )
 
+            # Store results back into numpy arrays for all envs
             actions_np[active_env_indices] = batch_actions_t.cpu().numpy()
             log_probs_np[active_env_indices] = batch_log_probs_t.cpu().numpy()
             values_np[active_env_indices] = batch_values_t.cpu().numpy()
 
+            # Update the full hidden state with results from active envs
             if self.rnn_config.USE_RNN and batch_next_lstm_state_device is not None:
                 next_h = self.current_lstm_state_device[0].clone()
                 next_c = self.current_lstm_state_device[1].clone()
@@ -4592,125 +5115,119 @@ class RolloutCollector:
                 next_c[:, active_indices_tensor, :] = batch_next_lstm_state_device[1]
                 next_lstm_state_device = (next_h, next_c)
 
-        # --- 3. Step environments, handle resets, and update observations ---
-        next_obs_grid_cpu = np.copy(self.current_obs_grid_cpu)
-        next_obs_shapes_cpu = np.copy(self.current_obs_shapes_cpu)
-        next_obs_availability_cpu = np.copy(self.current_obs_availability_cpu)
-        # --- UPDATED: Copy explicit features ---
-        next_obs_explicit_features_cpu = np.copy(self.current_obs_explicit_features_cpu)
-        # --- END UPDATED ---
+        # 3. Step environments, handle resets, update RAW observations
+        next_raw_obs_grid_cpu = np.copy(self.current_raw_obs_grid_cpu)
+        next_raw_obs_shapes_cpu = np.copy(self.current_raw_obs_shapes_cpu)
+        next_raw_obs_availability_cpu = np.copy(self.current_raw_obs_availability_cpu)
+        next_raw_obs_explicit_features_cpu = np.copy(
+            self.current_raw_obs_explicit_features_cpu
+        )
         step_rewards_np = np.zeros(self.num_envs, dtype=np.float32)
-        step_dones_np = np.copy(self.current_dones_cpu)
+        step_dones_np = np.copy(self.current_dones_cpu)  # Start with previous dones
 
         for i in range(self.num_envs):
-            is_done_this_step = False
-            final_reward_adj = 0.0
+            final_reward_adj = 0.0  # Adjustment for game over penalty
 
-            if self.current_dones_cpu[i]:
-                # --- Was already done, reset ---
+            if self.current_dones_cpu[i]:  # If env was done at the start of this step
                 new_state_dict = self._reset_env(i)
-                self._update_obs_from_state_dict(i, new_state_dict)
+                self._update_raw_obs_from_state_dict(i, new_state_dict)
                 self._reset_rnn_state_for_env(i)
-                step_dones_np[i] = False
-                is_done_this_step = True
-
-            # --- NEW: Handle waiting environments ---
-            elif i in waiting_env_indices:
-                step_rewards_np[i] = 0.0  # No reward while waiting
-                step_dones_np[i] = False  # Not done
-                is_done_this_step = False
-                # Observations and LSTM state remain the same (initial state)
-            # --- END NEW ---
-
-            elif i in frozen_env_indices:
-                # --- Was frozen, do not step ---
-                step_rewards_np[i] = self.reward_config.REWARD_ALIVE_STEP
-                step_dones_np[i] = False
-                is_done_this_step = False
-                # Observations and LSTM state remain the same
-
-            elif i in envs_done_pre_action:
-                # --- Became done (no valid moves), reset ---
+                step_dones_np[i] = False  # Mark as not done for the *next* step
+            elif (
+                i in envs_done_pre_action
+            ):  # Env became done because no actions were possible
                 final_reward_adj = self.reward_config.PENALTY_GAME_OVER
                 log_probs_np[i] = -1e9
-                values_np[i] = 0.0
-                self.current_episode_lengths[i] += 1
-
+                values_np[i] = 0.0  # Assign dummy values
+                self.current_episode_lengths[
+                    i
+                ] += 1  # Increment length for the step leading to game over
                 self._record_episode_stats(i, final_reward_adj, current_global_step)
                 new_state_dict = self._reset_env(i)
-                self._update_obs_from_state_dict(i, new_state_dict)
+                self._update_raw_obs_from_state_dict(i, new_state_dict)
                 self._reset_rnn_state_for_env(i)
-                step_dones_np[i] = True
-                is_done_this_step = True
-
-            else:
-                # --- Environment is active, perform step ---
+                step_dones_np[i] = True  # Mark as done for storage
+            elif i in active_env_indices:  # Env was active, took an action
                 action_to_take = actions_np[i]
                 try:
                     reward, done = self.envs[i].step(action_to_take)
                     step_rewards_np[i] = reward
                     step_dones_np[i] = done
-
-                    # Update episode trackers only if the env has started interacting
-                    if current_rollout_step >= self.env_start_step_delay[i]:
-                        self.current_episode_scores[i] += reward
-                        self.current_episode_lengths[i] += 1
-                        self.current_episode_game_scores[i] = self.envs[i].game_score
-                        self.current_episode_lines_cleared[i] = self.envs[
-                            i
-                        ].lines_cleared_this_episode
-
+                    # Update episode trackers
+                    self.current_episode_scores[i] += reward
+                    self.current_episode_lengths[i] += 1
+                    self.current_episode_game_scores[i] = self.envs[i].game_score
+                    self.current_episode_lines_cleared[i] = self.envs[
+                        i
+                    ].lines_cleared_this_episode
                     if done:
-                        self._record_episode_stats(i, 0.0, current_global_step)
+                        self._record_episode_stats(
+                            i, 0.0, current_global_step
+                        )  # Record completed episode
                         new_state_dict = self._reset_env(i)
-                        self._update_obs_from_state_dict(i, new_state_dict)
+                        self._update_raw_obs_from_state_dict(i, new_state_dict)
                         self._reset_rnn_state_for_env(i)
-                        is_done_this_step = True
                     else:
+                        # Get the next state for non-done environments
                         next_state_dict = self.envs[i].get_state()
-                        self._update_obs_from_state_dict(i, next_state_dict)
-                        is_done_this_step = False
-
+                        self._update_raw_obs_from_state_dict(i, next_state_dict)
                 except Exception as e:
                     print(f"ERROR: Env {i} step failed (Action: {action_to_take}): {e}")
                     traceback.print_exc()
-                    step_rewards_np[i] = self.reward_config.PENALTY_GAME_OVER
-                    step_dones_np[i] = True
-                    # Update length even on error if it was interacting
-                    if current_rollout_step >= self.env_start_step_delay[i]:
-                        self.current_episode_lengths[i] += 1
-
-                    self._record_episode_stats(i, 0.0, current_global_step)
+                    step_rewards_np[i] = (
+                        self.reward_config.PENALTY_GAME_OVER
+                    )  # Penalize
+                    step_dones_np[i] = True  # Mark as done
+                    self.current_episode_lengths[i] += 1
+                    self._record_episode_stats(
+                        i, 0.0, current_global_step
+                    )  # Record failed episode
                     new_state_dict = self._reset_env(i)
-                    self._update_obs_from_state_dict(i, new_state_dict)
+                    self._update_raw_obs_from_state_dict(i, new_state_dict)
                     self._reset_rnn_state_for_env(i)
-                    is_done_this_step = True
+            # else: Environment was frozen, no action taken, state remains the same
 
-            # Update the observation buffers for the *next* step (S_{t+1})
-            next_obs_grid_cpu[i] = self.current_obs_grid_cpu[i]
-            next_obs_shapes_cpu[i] = self.current_obs_shapes_cpu[i]
-            next_obs_availability_cpu[i] = self.current_obs_availability_cpu[i]
-            # --- UPDATED: Update next explicit features ---
-            next_obs_explicit_features_cpu[i] = self.current_obs_explicit_features_cpu[
-                i
-            ]
-            # --- END UPDATED ---
+            # Update the RAW observation buffers for the *next* step's input
+            next_raw_obs_grid_cpu[i] = self.current_raw_obs_grid_cpu[i]
+            next_raw_obs_shapes_cpu[i] = self.current_raw_obs_shapes_cpu[i]
+            next_raw_obs_availability_cpu[i] = self.current_raw_obs_availability_cpu[i]
+            next_raw_obs_explicit_features_cpu[i] = (
+                self.current_raw_obs_explicit_features_cpu[i]
+            )
 
-        # --- 4. Store results in RolloutStorage ---
-        obs_grid_t = torch.from_numpy(self.current_obs_grid_cpu).to(
+        # 4. Update RMS with the RAW observations collected *before* this step
+        # --- MODIFIED: Update RMS stats ---
+        self._update_obs_rms(self.current_raw_obs_grid_cpu, "grid")
+        self._update_obs_rms(self.current_raw_obs_shapes_cpu, "shapes")
+        self._update_obs_rms(
+            self.current_raw_obs_availability_cpu, "shape_availability"
+        )
+        self._update_obs_rms(
+            self.current_raw_obs_explicit_features_cpu, "explicit_features"
+        )
+        # --- END MODIFIED ---
+
+        # 5. Store potentially NORMALIZED results in RolloutStorage
+        # --- MODIFIED: Normalize observations before storing ---
+        obs_grid_norm = self._normalize_obs(self.current_raw_obs_grid_cpu, "grid")
+        obs_shapes_norm = self._normalize_obs(self.current_raw_obs_shapes_cpu, "shapes")
+        obs_availability_norm = self._normalize_obs(
+            self.current_raw_obs_availability_cpu, "shape_availability"
+        )
+        obs_explicit_features_norm = self._normalize_obs(
+            self.current_raw_obs_explicit_features_cpu, "explicit_features"
+        )
+        # --- END MODIFIED ---
+
+        obs_grid_t = torch.from_numpy(obs_grid_norm).to(self.rollout_storage.device)
+        obs_shapes_t = torch.from_numpy(obs_shapes_norm).to(self.rollout_storage.device)
+        obs_availability_t = torch.from_numpy(obs_availability_norm).to(
             self.rollout_storage.device
         )
-        obs_shapes_t = torch.from_numpy(self.current_obs_shapes_cpu).to(
+        obs_explicit_features_t = torch.from_numpy(obs_explicit_features_norm).to(
             self.rollout_storage.device
         )
-        obs_availability_t = torch.from_numpy(self.current_obs_availability_cpu).to(
-            self.rollout_storage.device
-        )
-        # --- UPDATED: Convert explicit features to tensor ---
-        obs_explicit_features_t = torch.from_numpy(
-            self.current_obs_explicit_features_cpu
-        ).to(self.rollout_storage.device)
-        # --- END UPDATED ---
+
         actions_t = (
             torch.from_numpy(actions_np)
             .long()
@@ -4744,6 +5261,7 @@ class RolloutCollector:
 
         lstm_state_to_store = None
         if self.rnn_config.USE_RNN and self.current_lstm_state_device is not None:
+            # Store the hidden state *before* this step was processed by the agent
             lstm_state_to_store = (
                 self.current_lstm_state_device[0].to(self.rollout_storage.device),
                 self.current_lstm_state_device[1].to(self.rollout_storage.device),
@@ -4753,9 +5271,7 @@ class RolloutCollector:
             obs_grid_t,
             obs_shapes_t,
             obs_availability_t,
-            # --- UPDATED: Pass explicit features to storage ---
             obs_explicit_features_t,
-            # --- END UPDATED ---
             actions_t,
             log_probs_t,
             values_t,
@@ -4764,42 +5280,53 @@ class RolloutCollector:
             lstm_state_to_store,
         )
 
-        # --- 5. Update collector's current state for the *next* iteration ---
-        self.current_obs_grid_cpu = next_obs_grid_cpu
-        self.current_obs_shapes_cpu = next_obs_shapes_cpu
-        self.current_obs_availability_cpu = next_obs_availability_cpu
-        # --- UPDATED: Update current explicit features ---
-        self.current_obs_explicit_features_cpu = next_obs_explicit_features_cpu
-        # --- END UPDATED ---
-        self.current_dones_cpu = step_dones_np
-        self.current_lstm_state_device = next_lstm_state_device
+        # 6. Update collector's current RAW state for the *next* iteration
+        self.current_raw_obs_grid_cpu = next_raw_obs_grid_cpu
+        self.current_raw_obs_shapes_cpu = next_raw_obs_shapes_cpu
+        self.current_raw_obs_availability_cpu = next_raw_obs_availability_cpu
+        self.current_raw_obs_explicit_features_cpu = next_raw_obs_explicit_features_cpu
+        self.current_dones_cpu = step_dones_np  # Update dones for the next step's check
+        self.current_lstm_state_device = next_lstm_state_device  # Update LSTM state
 
-        # --- 6. Record performance ---
+        # 7. Record performance
         collection_time = time.time() - step_start_time
         sps = self.num_envs / max(1e-9, collection_time)
         self.stats_recorder.record_step(
             {"sps_collection": sps, "rollout_collection_time": collection_time}
         )
 
-        return self.num_envs
+        return self.num_envs  # Return number of steps collected (one per env)
 
     def compute_advantages_for_storage(self):
         """Computes GAE advantages using the data in RolloutStorage."""
         with torch.no_grad():
-            final_obs_grid_t = torch.from_numpy(self.current_obs_grid_cpu).to(
+            # --- MODIFIED: Normalize final observation before value prediction ---
+            final_obs_grid_norm = self._normalize_obs(
+                self.current_raw_obs_grid_cpu, "grid"
+            )
+            final_obs_shapes_norm = self._normalize_obs(
+                self.current_raw_obs_shapes_cpu, "shapes"
+            )
+            final_obs_availability_norm = self._normalize_obs(
+                self.current_raw_obs_availability_cpu, "shape_availability"
+            )
+            final_obs_explicit_features_norm = self._normalize_obs(
+                self.current_raw_obs_explicit_features_cpu, "explicit_features"
+            )
+
+            final_obs_grid_t = torch.from_numpy(final_obs_grid_norm).to(
                 self.agent.device
             )
-            final_obs_shapes_t = torch.from_numpy(self.current_obs_shapes_cpu).to(
+            final_obs_shapes_t = torch.from_numpy(final_obs_shapes_norm).to(
                 self.agent.device
             )
-            final_obs_availability_t = torch.from_numpy(
-                self.current_obs_availability_cpu
-            ).to(self.agent.device)
-            # --- UPDATED: Get final explicit features ---
+            final_obs_availability_t = torch.from_numpy(final_obs_availability_norm).to(
+                self.agent.device
+            )
             final_obs_explicit_features_t = torch.from_numpy(
-                self.current_obs_explicit_features_cpu
+                final_obs_explicit_features_norm
             ).to(self.agent.device)
-            # --- END UPDATED ---
+            # --- END MODIFIED ---
 
             final_lstm_state = None
             if self.rnn_config.USE_RNN and self.current_lstm_state_device is not None:
@@ -4808,32 +5335,35 @@ class RolloutCollector:
                     self.current_lstm_state_device[1].to(self.agent.device),
                 )
 
-            if self.rnn_config.USE_RNN:
+            # Add sequence dimension if needed by network for value prediction
+            needs_sequence_dim = (
+                self.rnn_config.USE_RNN or self.agent.transformer_config.USE_TRANSFORMER
+            )
+            if needs_sequence_dim:
                 final_obs_grid_t = final_obs_grid_t.unsqueeze(1)
                 final_obs_shapes_t = final_obs_shapes_t.unsqueeze(1)
                 final_obs_availability_t = final_obs_availability_t.unsqueeze(1)
-                # --- UPDATED: Add sequence dim if RNN ---
                 final_obs_explicit_features_t = final_obs_explicit_features_t.unsqueeze(
                     1
                 )
-                # --- END UPDATED ---
 
+            # Get value of the final state (s_T)
             _, next_value, _ = self.agent.network(
                 final_obs_grid_t,
                 final_obs_shapes_t,
                 final_obs_availability_t,
-                # --- UPDATED: Pass final explicit features ---
                 final_obs_explicit_features_t,
-                # --- END UPDATED ---
                 final_lstm_state,
+                padding_mask=None,
             )
 
-            if self.rnn_config.USE_RNN:
+            # Remove sequence dim if added
+            if needs_sequence_dim:
                 next_value = next_value.squeeze(1)
-
             if next_value.ndim == 1:
-                next_value = next_value.unsqueeze(-1)
+                next_value = next_value.unsqueeze(-1)  # Ensure shape (B, 1)
 
+            # Get dones corresponding to the final state
             final_dones = (
                 torch.from_numpy(self.current_dones_cpu)
                 .float()
@@ -4841,11 +5371,13 @@ class RolloutCollector:
                 .to(self.device)
             )
 
+        # Compute returns and advantages in storage
         self.rollout_storage.compute_returns_and_advantages(
             next_value, final_dones, self.ppo_config.GAMMA, self.ppo_config.GAE_LAMBDA
         )
 
     def get_episode_count(self) -> int:
+        """Returns the total number of episodes completed across all environments."""
         return self.episode_count
 
 
@@ -4861,7 +5393,7 @@ from config import EnvConfig, PPOConfig, RNNConfig, DEVICE
 class RolloutStorage:
     """
     Stores rollout data collected from parallel environments for PPO.
-    Now includes storage for shape availability and explicit features.
+    Observations stored here are potentially normalized.
     """
 
     def __init__(
@@ -4878,14 +5410,13 @@ class RolloutStorage:
         self.rnn_config = rnn_config
         self.device = device
 
+        # Get observation dimensions from config
         grid_c, grid_h, grid_w = self.env_config.GRID_STATE_SHAPE
         shape_feat_dim = self.env_config.SHAPE_STATE_DIM
         shape_availability_dim = self.env_config.SHAPE_AVAILABILITY_DIM
-        # --- UPDATED: Get the potentially larger explicit features dim ---
         explicit_features_dim = self.env_config.EXPLICIT_FEATURES_DIM
-        # --- END UPDATED ---
 
-        # --- Standard PPO Data ---
+        # Initialize storage tensors (+1 for next_obs/next_value/next_done)
         self.obs_grid = torch.zeros(
             num_steps + 1, num_envs, grid_c, grid_h, grid_w, device=self.device
         )
@@ -4895,24 +5426,25 @@ class RolloutStorage:
         self.obs_availability = torch.zeros(
             num_steps + 1, num_envs, shape_availability_dim, device=self.device
         )
-        # --- UPDATED: Storage for explicit features with correct dimension ---
         self.obs_explicit_features = torch.zeros(
             num_steps + 1, num_envs, explicit_features_dim, device=self.device
         )
-        # --- END UPDATED ---
         self.actions = torch.zeros(num_steps, num_envs, 1, device=self.device).long()
         self.log_probs = torch.zeros(num_steps, num_envs, 1, device=self.device)
         self.rewards = torch.zeros(num_steps, num_envs, 1, device=self.device)
         self.dones = torch.zeros(num_steps + 1, num_envs, 1, device=self.device)
         self.values = torch.zeros(num_steps + 1, num_envs, 1, device=self.device)
-        self.returns = torch.zeros(num_steps, num_envs, 1, device=self.device)
+        self.returns = torch.zeros(
+            num_steps, num_envs, 1, device=self.device
+        )  # GAE returns
 
-        # --- RNN Specific Data ---
+        # RNN Specific Data
         self.hidden_states = None
         self.cell_states = None
         if self.rnn_config.USE_RNN:
             lstm_hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
             num_layers = self.rnn_config.LSTM_NUM_LAYERS
+            # Shape: (Steps+1, Layers, Envs, HiddenSize)
             self.hidden_states = torch.zeros(
                 num_steps + 1,
                 num_layers,
@@ -4928,7 +5460,7 @@ class RolloutStorage:
                 device=self.device,
             )
 
-        self.step = 0
+        self.step = 0  # Current index to insert data into
 
     def to(self, device: torch.device):
         """Move storage tensors to the specified device."""
@@ -4937,9 +5469,7 @@ class RolloutStorage:
         self.obs_grid = self.obs_grid.to(device)
         self.obs_shapes = self.obs_shapes.to(device)
         self.obs_availability = self.obs_availability.to(device)
-        # --- UPDATED: Move explicit features ---
         self.obs_explicit_features = self.obs_explicit_features.to(device)
-        # --- END UPDATED ---
         self.rewards = self.rewards.to(device)
         self.values = self.values.to(device)
         self.returns = self.returns.to(device)
@@ -4958,9 +5488,7 @@ class RolloutStorage:
         obs_grid: torch.Tensor,
         obs_shapes: torch.Tensor,
         obs_availability: torch.Tensor,
-        # --- UPDATED: Add explicit features ---
         obs_explicit_features: torch.Tensor,
-        # --- END UPDATED ---
         action: torch.Tensor,
         log_prob: torch.Tensor,
         value: torch.Tensor,
@@ -4976,52 +5504,41 @@ class RolloutStorage:
 
         current_step_index = self.step
 
+        # Store data for the current step
         self.obs_grid[current_step_index].copy_(obs_grid)
         self.obs_shapes[current_step_index].copy_(obs_shapes)
         self.obs_availability[current_step_index].copy_(obs_availability)
-        # --- UPDATED: Copy explicit features ---
         self.obs_explicit_features[current_step_index].copy_(obs_explicit_features)
-        # --- END UPDATED ---
         self.actions[current_step_index].copy_(action)
         self.log_probs[current_step_index].copy_(log_prob)
         self.values[current_step_index].copy_(value)
         self.rewards[current_step_index].copy_(reward)
-        self.dones[current_step_index].copy_(done)
+        self.dones[current_step_index].copy_(
+            done
+        )  # Done state *before* taking action at this step
 
         if self.rnn_config.USE_RNN and lstm_state is not None:
             if self.hidden_states is not None and self.cell_states is not None:
+                # Store the hidden state corresponding to the observation at current_step_index
                 self.hidden_states[current_step_index].copy_(lstm_state[0])
                 self.cell_states[current_step_index].copy_(lstm_state[1])
-            else:
-                print(
-                    "Warning: LSTM state provided but storage tensors not initialized."
-                )
 
         # Store the *next* observation/done state at step+1 index
-        # These will be overwritten by the next insert or used in after_update/compute_returns
+        # These are placeholders until the next insert or used in compute_returns
         next_step_index = current_step_index + 1
-        if next_step_index <= self.num_steps:  # Prevent index out of bounds
-            self.obs_grid[next_step_index].copy_(
-                obs_grid
-            )  # These are placeholders for the *next* actual obs
-            self.obs_shapes[next_step_index].copy_(obs_shapes)
-            self.obs_availability[next_step_index].copy_(obs_availability)
-            # --- UPDATED: Copy next explicit features ---
-            self.obs_explicit_features[next_step_index].copy_(obs_explicit_features)
-            # --- END UPDATED ---
-            self.dones[next_step_index].copy_(
-                done
-            )  # Store the done state corresponding to the obs at current_step_index
-            if self.rnn_config.USE_RNN and lstm_state is not None:
-                # The LSTM state stored at step+1 should correspond to the state *after* processing obs at step
-                if self.hidden_states is not None:
-                    self.hidden_states[next_step_index].copy_(
-                        lstm_state[0]
-                    )  # Store the *next* hidden state
-                if self.cell_states is not None:
-                    self.cell_states[next_step_index].copy_(
-                        lstm_state[1]
-                    )  # Store the *next* cell state
+        # Copy the observation that resulted *from* the action at current_step_index
+        self.obs_grid[next_step_index].copy_(obs_grid)
+        self.obs_shapes[next_step_index].copy_(obs_shapes)
+        self.obs_availability[next_step_index].copy_(obs_availability)
+        self.obs_explicit_features[next_step_index].copy_(obs_explicit_features)
+        # Store the done state corresponding to the observation at next_step_index
+        self.dones[next_step_index].copy_(done)
+        # Store the LSTM state corresponding to the observation at next_step_index
+        if self.rnn_config.USE_RNN and lstm_state is not None:
+            if self.hidden_states is not None:
+                self.hidden_states[next_step_index].copy_(lstm_state[0])
+            if self.cell_states is not None:
+                self.cell_states[next_step_index].copy_(lstm_state[1])
 
         self.step += 1  # Increment step *after* storing
 
@@ -5032,9 +5549,7 @@ class RolloutStorage:
         self.obs_grid[0].copy_(self.obs_grid[last_step_index])
         self.obs_shapes[0].copy_(self.obs_shapes[last_step_index])
         self.obs_availability[0].copy_(self.obs_availability[last_step_index])
-        # --- UPDATED: Copy last explicit features ---
         self.obs_explicit_features[0].copy_(self.obs_explicit_features[last_step_index])
-        # --- END UPDATED ---
         self.dones[0].copy_(self.dones[last_step_index])
 
         if self.rnn_config.USE_RNN:
@@ -5042,12 +5557,12 @@ class RolloutStorage:
                 self.hidden_states[0].copy_(self.hidden_states[last_step_index])
             if self.cell_states is not None:
                 self.cell_states[0].copy_(self.cell_states[last_step_index])
-        self.step = 0
+        self.step = 0  # Reset step counter
 
     def compute_returns_and_advantages(
         self,
-        next_value: torch.Tensor,
-        final_dones: torch.Tensor,
+        next_value: torch.Tensor,  # Value of state s_T
+        final_dones: torch.Tensor,  # Done state after action a_{T-1}
         gamma: float,
         gae_lambda: float,
     ):
@@ -5060,15 +5575,17 @@ class RolloutStorage:
         effective_num_steps = self.step  # Use actual steps filled if not full
         last_step_index = effective_num_steps
 
-        # The value of the state *after* the last step in the rollout
+        # Store the value of the state *after* the last step in the rollout
         self.values[last_step_index] = next_value.to(self.device)
-        # The done state *after* the last step in the rollout
+        # Store the done state *after* the last step in the rollout
         self.dones[last_step_index] = final_dones.to(self.device)
 
         gae = 0.0
         for step in reversed(range(effective_num_steps)):
             # delta = R_t + gamma * V(s_{t+1}) * (1-done_{t+1}) - V(s_t)
             # Note: self.dones[step + 1] is the done flag *after* taking action at step `step`
+            #       self.values[step + 1] is V(s_{t+1})
+            #       self.values[step] is V(s_t)
             delta = (
                 self.rewards[step]
                 + gamma * self.values[step + 1] * (1.0 - self.dones[step + 1])
@@ -5086,9 +5603,10 @@ class RolloutStorage:
         """
         effective_num_steps = self.step
         if effective_num_steps == 0:
-            return {}
+            return {}  # No data collected
 
         # Advantages are calculated based on returns and values up to the effective step count
+        # advantage = GAE_Return - V(s_t)
         advantages = (
             self.returns[:effective_num_steps] - self.values[:effective_num_steps]
         )
@@ -5096,6 +5614,7 @@ class RolloutStorage:
         num_samples = effective_num_steps * self.num_envs
 
         def _flatten(tensor: torch.Tensor, steps: int) -> torch.Tensor:
+            # Reshape from (Steps, Envs, ...) to (Steps * Envs, ...)
             return tensor[:steps].reshape(steps * self.num_envs, *tensor.shape[2:])
 
         initial_lstm_state = None
@@ -5105,27 +5624,28 @@ class RolloutStorage:
             and self.cell_states is not None
         ):
             # State at the very beginning of the rollout (index 0)
+            # Shape: (Layers, Envs, HiddenSize)
             initial_lstm_state = (self.hidden_states[0], self.cell_states[0])
 
         data = {
             "obs_grid": _flatten(self.obs_grid, effective_num_steps),
             "obs_shapes": _flatten(self.obs_shapes, effective_num_steps),
             "obs_availability": _flatten(self.obs_availability, effective_num_steps),
-            # --- UPDATED: Flatten explicit features ---
             "obs_explicit_features": _flatten(
                 self.obs_explicit_features, effective_num_steps
             ),
-            # --- END UPDATED ---
-            "actions": _flatten(self.actions, effective_num_steps).squeeze(-1),
+            "actions": _flatten(self.actions, effective_num_steps).squeeze(
+                -1
+            ),  # Remove last dim
             "log_probs": _flatten(self.log_probs, effective_num_steps).squeeze(-1),
             "values": _flatten(self.values, effective_num_steps).squeeze(
                 -1
-            ),  # Values V(s_0) to V(s_{T-1})
+            ),  # V(s_0) to V(s_{T-1})
             "returns": _flatten(self.returns, effective_num_steps).squeeze(
                 -1
-            ),  # Returns GAE(s_0) to GAE(s_{T-1})
+            ),  # GAE returns
             "advantages": _flatten(advantages, effective_num_steps).squeeze(-1),
-            "initial_lstm_state": initial_lstm_state,  # Pass the initial LSTM state for sequence evaluation
+            "initial_lstm_state": initial_lstm_state,  # Initial state for sequence evaluation
             # Dones corresponding to obs t=0 to t=T-1 (i.e., d_0 to d_{T-1})
             # Shape [B, T] for potential RNN sequence processing needs
             "dones": self.dones[:effective_num_steps].permute(1, 0, 2).squeeze(-1),
@@ -5140,6 +5660,7 @@ import torch
 import numpy as np
 import traceback
 import random
+import math  # Added for cosine annealing
 from typing import List, Optional, Dict, Any, Union
 
 from config import (
@@ -5148,7 +5669,9 @@ from config import (
     RNNConfig,
     TrainConfig,
     ModelConfig,
-    DEVICE,
+    ObsNormConfig,
+    TransformerConfig,  # Added configs
+    # DEVICE, # Removed direct import
     TensorBoardConfig,
     VisConfig,
     RewardConfig,
@@ -5165,7 +5688,7 @@ from .training_utils import get_env_image_as_numpy
 
 
 class Trainer:
-    """Orchestrates the PPO training process."""
+    """Orchestrates the PPO training process, including LR scheduling."""
 
     def __init__(
         self,
@@ -5177,34 +5700,32 @@ class Trainer:
         rnn_config: RNNConfig,
         train_config: TrainConfig,
         model_config: ModelConfig,
+        obs_norm_config: ObsNormConfig,
+        transformer_config: TransformerConfig,
         model_save_path: str,
-        load_checkpoint_path: Optional[str] = None,
+        device: torch.device,  # --- MODIFIED: Moved device parameter ---
+        load_checkpoint_path: Optional[
+            str
+        ] = None,  # Default parameter now comes after non-default
     ):
         print("[Trainer-PPO] Initializing...")
         self.envs = envs
         self.agent = agent
         self.stats_recorder = stats_recorder
         self.num_envs = env_config.NUM_ENVS
-        self.device = DEVICE
+        self.device = device  # --- MODIFIED: Use passed device ---
         self.env_config = env_config
         self.ppo_config = ppo_config
         self.rnn_config = rnn_config
         self.train_config = train_config
         self.model_config = model_config
+        self.obs_norm_config = obs_norm_config  # Store config
+        self.transformer_config = transformer_config  # Store config
         self.reward_config = RewardConfig()
         self.tb_config = TensorBoardConfig()
         self.vis_config = VisConfig()
 
-        self.checkpoint_manager = CheckpointManager(
-            agent=self.agent,
-            model_save_path=model_save_path,
-            load_checkpoint_path=load_checkpoint_path,
-            device=self.device,
-        )
-        self.global_step, initial_episode_count = (
-            self.checkpoint_manager.get_initial_state()
-        )
-
+        # Initialize Rollout Collector (which initializes RMS if enabled)
         self.rollout_collector = RolloutCollector(
             envs=self.envs,
             agent=self.agent,
@@ -5214,32 +5735,47 @@ class Trainer:
             rnn_config=self.rnn_config,
             reward_config=self.reward_config,
             tb_config=self.tb_config,
+            obs_norm_config=self.obs_norm_config,  # Pass config
+            device=self.device,  # --- MODIFIED: Pass device ---
         )
-        self.rollout_collector.episode_count = initial_episode_count
-
-        self.last_image_log_step = -1
-        self.last_checkpoint_step = 0
-        self.rollouts_completed_since_last_checkpoint = 0
-
-        self.steps_collected_this_rollout = 0
         self.rollout_storage = self.rollout_collector.rollout_storage
 
-        self.current_phase = "Collecting"  # Track current phase
+        # Initialize Checkpoint Manager (AFTER collector to get RMS instances)
+        self.checkpoint_manager = CheckpointManager(
+            agent=self.agent,
+            model_save_path=model_save_path,
+            load_checkpoint_path=load_checkpoint_path,
+            device=self.device,
+            obs_rms_dict=self.rollout_collector.get_obs_rms_dict(),  # Pass RMS dict
+        )
+        self.global_step, initial_episode_count = (
+            self.checkpoint_manager.get_initial_state()
+        )
+        self.rollout_collector.episode_count = (
+            initial_episode_count  # Sync episode count
+        )
+
+        self.last_image_log_step = -1
+        self.last_checkpoint_step = self.global_step  # Initialize based on loaded step
+        self.rollouts_completed_since_last_checkpoint = 0
+        self.steps_collected_this_rollout = 0
+        self.current_phase = "Collecting"  # Initial phase
 
         self._log_initial_state()
         print("[Trainer-PPO] Initialization complete.")
 
     def get_current_phase(self) -> str:
-        """Returns the current phase: 'Collecting' or 'Updating'."""
+        """Returns the current phase ('Collecting' or 'Updating')."""
         return self.current_phase
 
     def get_update_progress(self) -> float:
-        """Returns the agent's update progress if in 'Updating' phase."""
+        """Returns the progress of the agent update phase (0.0 to 1.0)."""
         if self.current_phase == "Updating":
             return self.agent.get_update_progress()
         return 0.0
 
     def _log_initial_state(self):
+        """Logs the initial state after potential checkpoint loading."""
         initial_lr = self._get_current_lr()
         self.stats_recorder.record_step(
             {
@@ -5253,30 +5789,86 @@ class Trainer:
         )
 
     def _get_current_lr(self) -> float:
-        if hasattr(self.agent, "optimizer") and self.agent.optimizer.param_groups:
-            return self.agent.optimizer.param_groups[0]["lr"]
-        else:
-            return self.ppo_config.LEARNING_RATE
+        """Safely gets the current learning rate from the optimizer."""
+        try:
+            # Ensure optimizer and param_groups exist
+            if hasattr(self.agent, "optimizer") and self.agent.optimizer.param_groups:
+                return self.agent.optimizer.param_groups[0]["lr"]
+            else:
+                print(
+                    "Warning: Optimizer or param_groups not found, returning default LR."
+                )
+                return self.ppo_config.LEARNING_RATE
+        except (AttributeError, IndexError, TypeError) as e:
+            print(f"Warning: Error getting LR ({e}), returning default LR.")
+            return self.ppo_config.LEARNING_RATE  # Fallback
 
+    # --- MODIFIED: Learning Rate Scheduler ---
     def _update_learning_rate(self):
+        """Updates the learning rate based on the configured schedule."""
         if not self.ppo_config.USE_LR_SCHEDULER:
             return
+
         total_steps = max(1, TOTAL_TRAINING_STEPS)
-        frac = 1.0 - (self.global_step / total_steps)
-        frac = max(self.ppo_config.LR_SCHEDULER_END_FRACTION, frac)
-        new_lr = self.ppo_config.LEARNING_RATE * frac
-        if hasattr(self.agent, "optimizer"):
-            for param_group in self.agent.optimizer.param_groups:
-                param_group["lr"] = new_lr
+        current_progress = self.global_step / total_steps
+        initial_lr = self.ppo_config.LEARNING_RATE
+
+        # --- MODIFIED: Check for LR_SCHEDULE_TYPE before accessing ---
+        schedule_type = getattr(
+            self.ppo_config, "LR_SCHEDULE_TYPE", "linear"
+        )  # Default to linear if missing
+
+        if schedule_type == "linear":
+            end_fraction = getattr(
+                self.ppo_config, "LR_LINEAR_END_FRACTION", 0.0
+            )  # Default if missing
+            decay_fraction = max(0.0, 1.0 - current_progress)
+            new_lr = initial_lr * (end_fraction + (1.0 - end_fraction) * decay_fraction)
+        elif schedule_type == "cosine":
+            min_factor = getattr(
+                self.ppo_config, "LR_COSINE_MIN_FACTOR", 0.01
+            )  # Default if missing
+            # Cosine annealing formula: lr = min_lr + 0.5 * (max_lr - min_lr) * (1 + cos(pi * progress))
+            min_lr = initial_lr * min_factor
+            new_lr = min_lr + 0.5 * (initial_lr - min_lr) * (
+                1 + math.cos(math.pi * current_progress)
+            )
+        else:
+            # Default or unknown type: No change
+            print(
+                f"Warning: Unknown LR_SCHEDULE_TYPE '{schedule_type}'. Using current LR."
+            )
+            new_lr = self._get_current_lr()
+        # --- END MODIFIED ---
+
+        # Ensure LR doesn't drop below min (using cosine min factor as a general floor)
+        min_factor_floor = getattr(self.ppo_config, "LR_COSINE_MIN_FACTOR", 0.0)
+        new_lr = max(new_lr, initial_lr * min_factor_floor)
+
+        # Apply the new learning rate to the optimizer
+        try:
+            # Ensure optimizer and param_groups exist before trying to update
+            if hasattr(self.agent, "optimizer") and self.agent.optimizer.param_groups:
+                for param_group in self.agent.optimizer.param_groups:
+                    param_group["lr"] = new_lr
+            else:
+                print(
+                    "Warning: Could not update LR, optimizer or param_groups not found."
+                )
+        except AttributeError:
+            print("Warning: Could not update LR, optimizer attribute missing.")
+        except Exception as e:
+            print(f"Warning: Unexpected error updating LR: {e}")
+
+    # --- END MODIFIED ---
 
     def perform_training_iteration(self):
-        """Performs one step of environment interaction and potentially an agent update."""
+        """Performs one iteration of collection and potential update."""
         step_start_time = time.time()
-
-        # Ensure phase is 'Collecting' before starting collection
         if self.current_phase != "Collecting":
             self.current_phase = "Collecting"
 
+        # Collect one step from all environments
         steps_collected_this_iter = self.rollout_collector.collect_one_step(
             self.global_step
         )
@@ -5284,45 +5876,44 @@ class Trainer:
         self.steps_collected_this_rollout += 1
 
         update_metrics = {}
-
+        # Check if rollout buffer is full
         if self.steps_collected_this_rollout >= self.ppo_config.NUM_STEPS_PER_ROLLOUT:
-            # print(f"[Trainer Debug] Rollout complete...") # Removed
-            self.current_phase = "Updating"  # Set phase before update
+            self.current_phase = "Updating"
             update_start_time = time.time()
 
+            # Compute advantages using the collected rollout
             self.rollout_collector.compute_advantages_for_storage()
-
-            self.rollout_storage.to(self.agent.device)
+            self.rollout_storage.to(
+                self.agent.device
+            )  # Move storage to agent device for update
             update_data = self.rollout_storage.get_data_for_update()
-
-            # print(f"[Trainer Debug] update_data keys: ...") # Removed detailed print
-            # for key, value in update_data.items(): ... # Removed detailed print
 
             if update_data:
                 try:
                     update_metrics = self.agent.update(update_data)
-                    # print(f"[Trainer Debug] update_metrics received...") # Removed
                 except Exception as agent_update_err:
                     print(f"CRITICAL ERROR during agent.update: {agent_update_err}")
                     traceback.print_exc()
-                    update_metrics = {}
+                    update_metrics = {}  # Prevent crash, continue loop
             else:
                 print(
-                    "[Trainer Warning] No data retrieved from rollout storage for update. Skipping agent update."
+                    "[Trainer Warning] No data retrieved from rollout storage for update."
                 )
                 update_metrics = {}
 
-            self.rollout_storage.after_update()
+            self.rollout_storage.after_update()  # Reset storage, keep last obs/state
             self.steps_collected_this_rollout = 0
             self.rollouts_completed_since_last_checkpoint += 1
-            self.current_phase = "Collecting"  # Reset phase after update
-
+            self.current_phase = "Collecting"  # Switch back after update
             update_duration = time.time() - update_start_time
 
+            # Update LR *after* the agent update
             self._update_learning_rate()
+            # Checkpoint and log images based on completed rollouts
             self.maybe_save_checkpoint()
             self._maybe_log_image()
 
+            # Record update-specific metrics
             step_record_data_update = {
                 "update_time": update_duration,
                 "lr": self._get_current_lr(),
@@ -5330,14 +5921,9 @@ class Trainer:
             }
             if isinstance(update_metrics, dict):
                 step_record_data_update.update(update_metrics)
-            else:
-                print(
-                    f"[Trainer Warning] agent.update did not return a dictionary. Received: {type(update_metrics)}"
-                )
-
-            # print(f"[Trainer Debug] Data being sent to stats_recorder...") # Removed
             self.stats_recorder.record_step(step_record_data_update)
 
+        # Record timing and basic info for every step (collection or update)
         step_end_time = time.time()
         step_duration = step_end_time - step_start_time
         step_record_data_timing = {
@@ -5346,12 +5932,12 @@ class Trainer:
             "global_step": self.global_step,
             "lr": self._get_current_lr(),
         }
-
-        if not update_metrics:  # Only log step time if no update happened
+        # Avoid double-logging if an update happened this iteration
+        if not update_metrics:
             self.stats_recorder.record_step(step_record_data_timing)
 
     def maybe_save_checkpoint(self, force_save=False):
-        """Saves agent state based on frequency or if forced."""
+        """Saves a checkpoint based on frequency or if forced."""
         save_freq_rollouts = self.train_config.CHECKPOINT_SAVE_FREQ
         should_save_freq = (
             save_freq_rollouts > 0
@@ -5365,18 +5951,18 @@ class Trainer:
             self.checkpoint_manager.save_checkpoint(
                 self.global_step, self.rollout_collector.get_episode_count()
             )
-            self.rollouts_completed_since_last_checkpoint = 0
+            self.rollouts_completed_since_last_checkpoint = 0  # Reset counter
             self.last_checkpoint_step = self.global_step
 
     def _maybe_log_image(self):
-        """Logs a sample environment state image to TensorBoard periodically."""
+        """Logs a sample environment image to TensorBoard based on frequency."""
         if not self.tb_config.LOG_IMAGES or self.tb_config.IMAGE_LOG_FREQ <= 0:
             return
 
         image_log_freq_rollouts = self.tb_config.IMAGE_LOG_FREQ
-        # Log based on rollouts completed *since last checkpoint*
-        # Check if the *current* rollout number (1-based) is a multiple of the freq
+        # Use rollouts completed since *last* checkpoint for frequency check
         current_rollout_num_since_chkpt = self.rollouts_completed_since_last_checkpoint
+        # Log if frequency is met AND we haven't logged for this exact step already
         if (
             current_rollout_num_since_chkpt > 0
             and current_rollout_num_since_chkpt % image_log_freq_rollouts == 0
@@ -5389,19 +5975,22 @@ class Trainer:
                         self.envs[env_idx], self.env_config, self.vis_config
                     )
                     if img_array is not None:
+                        # Convert HWC to CHW for TensorBoard
                         img_tensor = torch.from_numpy(img_array).permute(2, 0, 1)
                         self.stats_recorder.record_image(
                             f"Environment/Sample State Env {env_idx}",
                             img_tensor,
                             self.global_step,
                         )
-                        self.last_image_log_step = self.global_step
+                        self.last_image_log_step = (
+                            self.global_step
+                        )  # Update last log step
                 except Exception as e:
                     print(f"Error logging environment image: {e}")
                     traceback.print_exc()
 
     def train_loop(self):
-        """Main training loop until max steps."""
+        """Main training loop."""
         print("[Trainer-PPO] Starting training loop...")
         try:
             while self.global_step < TOTAL_TRAINING_STEPS:
@@ -5413,10 +6002,10 @@ class Trainer:
             traceback.print_exc()
         finally:
             print("[Trainer-PPO] Training loop finished or terminated.")
-            self.cleanup(save_final=True)
+            self.cleanup(save_final=True)  # Attempt cleanup and final save
 
     def cleanup(self, save_final: bool = True):
-        """Performs cleanup actions like saving final state and closing logger."""
+        """Cleans up resources, optionally saving a final checkpoint."""
         print("[Trainer-PPO] Cleaning up resources...")
         if save_final:
             print("[Trainer-PPO] Saving final checkpoint...")
@@ -5428,12 +6017,12 @@ class Trainer:
         else:
             print("[Trainer-PPO] Skipping final save as requested.")
 
+        # Close stats recorder (which closes TensorBoard writer)
         if hasattr(self.stats_recorder, "close"):
             try:
                 self.stats_recorder.close()
             except Exception as e:
                 print(f"Error closing stats recorder: {e}")
-
         print("[Trainer-PPO] Cleanup complete.")
 
 
@@ -5502,7 +6091,24 @@ import math
 import traceback
 from typing import Optional, Tuple
 
-from config import VisConfig, EnvConfig, DemoConfig
+# --- MODIFIED: Import constants ---
+from config import (
+    VisConfig,
+    EnvConfig,
+    DemoConfig,
+    RED,
+    BLUE,
+    WHITE,
+    LIGHTG,
+    GRAY,
+    DARK_RED,
+    YELLOW,
+    BLACK,
+)
+from config.constants import LINE_CLEAR_FLASH_COLOR, GAME_OVER_FLASH_COLOR
+
+# --- END MODIFIED ---
+
 from environment.game_state import GameState
 from .panels.game_area import GameAreaRenderer
 
@@ -5522,15 +6128,18 @@ class DemoRenderer:
         self.demo_config = demo_config
         self.game_area_renderer = game_area_renderer
         self._init_demo_fonts()
-        self.overlay_font = self.game_area_renderer.fonts.get("env_overlay")
-        if not self.overlay_font:
-            print("Warning: DemoRenderer could not get overlay font. Using default.")
-            self.overlay_font = pygame.font.Font(None, 36)
-        # --- NEW: Define invalid placement color ---
-        self.invalid_placement_color = (0, 0, 0, 150)  # Transparent Gray
-        # --- END NEW ---
+        self.overlay_font = self.game_area_renderer.fonts.get(
+            "env_overlay", pygame.font.Font(None, 36)
+        )
+        self.invalid_placement_color = (
+            0,
+            0,
+            0,
+            150,
+        )  # Transparent Gray for invalid preview
 
     def _init_demo_fonts(self):
+        """Initializes fonts used in demo mode."""
         try:
             self.demo_hud_font = pygame.font.SysFont(
                 None, self.demo_config.HUD_FONT_SIZE
@@ -5538,6 +6147,7 @@ class DemoRenderer:
             self.demo_help_font = pygame.font.SysFont(
                 None, self.demo_config.HELP_FONT_SIZE
             )
+            # Ensure game area fonts are also initialized if needed
             if not hasattr(
                 self.game_area_renderer, "fonts"
             ) or not self.game_area_renderer.fonts.get("ui"):
@@ -5550,6 +6160,7 @@ class DemoRenderer:
             )
 
     def render(self, demo_env: GameState, env_config: EnvConfig):
+        """Renders the entire demo mode screen."""
         if not demo_env:
             print("Error: DemoRenderer called with demo_env=None")
             return
@@ -5557,21 +6168,13 @@ class DemoRenderer:
         bg_color = self._determine_background_color(demo_env)
         self.screen.fill(bg_color)
 
-        sw, sh = self.screen.get_size()
+        screen_width, screen_height = self.screen.get_size()
         padding = 30
         hud_height = 60
         help_height = 30
-        max_game_h = sh - 2 * padding - hud_height - help_height
-        max_game_w = sw - 2 * padding
-
-        if max_game_h <= 0 or max_game_w <= 0:
-            self._render_too_small_message(
-                "Demo Area Too Small", self.screen.get_rect()
-            )
-            return
 
         game_rect, clipped_game_rect = self._calculate_game_area_rect(
-            sw, sh, padding, hud_height, help_height, env_config
+            screen_width, screen_height, padding, hud_height, help_height, env_config
         )
 
         if clipped_game_rect.width > 10 and clipped_game_rect.height > 10:
@@ -5579,21 +6182,23 @@ class DemoRenderer:
         else:
             self._render_too_small_message("Demo Area Too Small", clipped_game_rect)
 
-        self._render_shape_previews_area(demo_env, sw, clipped_game_rect, padding)
-        self._render_hud(demo_env, sw, game_rect.bottom + 10)
-        self._render_help_text(sw, sh)
+        self._render_shape_previews_area(
+            demo_env, screen_width, clipped_game_rect, padding
+        )
+        self._render_hud(demo_env, screen_width, game_rect.bottom + 10)
+        self._render_help_text(screen_width, screen_height)
 
     def _determine_background_color(self, demo_env: GameState) -> Tuple[int, int, int]:
+        """Determines the background color based on game state."""
         if demo_env.is_line_clearing():
-            return VisConfig.LINE_CLEAR_FLASH_COLOR
-        elif demo_env.is_game_over_flashing():
-            return VisConfig.GAME_OVER_FLASH_COLOR
-        elif demo_env.is_over():
-            return VisConfig.DARK_RED
-        elif demo_env.is_frozen():
-            return (30, 30, 100)
-        else:
-            return self.demo_config.BACKGROUND_COLOR
+            return LINE_CLEAR_FLASH_COLOR
+        if demo_env.is_game_over_flashing():
+            return GAME_OVER_FLASH_COLOR
+        if demo_env.is_over():
+            return DARK_RED
+        if demo_env.is_frozen():
+            return (30, 30, 100)  # Specific frozen color
+        return self.demo_config.BACKGROUND_COLOR
 
     def _calculate_game_area_rect(
         self,
@@ -5604,14 +6209,17 @@ class DemoRenderer:
         help_height: int,
         env_config: EnvConfig,
     ) -> Tuple[pygame.Rect, pygame.Rect]:
+        """Calculates the main game area rectangle, maintaining aspect ratio."""
         max_game_h = screen_height - 2 * padding - hud_height - help_height
         max_game_w = screen_width - 2 * padding
         aspect_ratio = (env_config.COLS * 0.75 + 0.25) / max(1, env_config.ROWS)
+
         game_w = max_game_w
         game_h = game_w / aspect_ratio if aspect_ratio > 0 else max_game_h
         if game_h > max_game_h:
             game_h = max_game_h
             game_w = game_h * aspect_ratio
+
         game_w = math.floor(min(game_w, max_game_w))
         game_h = math.floor(min(game_h, max_game_h))
         game_x = (screen_width - game_w) // 2
@@ -5627,14 +6235,17 @@ class DemoRenderer:
         clipped_game_rect: pygame.Rect,
         bg_color: Tuple[int, int, int],
     ):
+        """Renders the central game grid and placement preview."""
         try:
             game_surf = self.screen.subsurface(clipped_game_rect)
             game_surf.fill(bg_color)
 
+            # Render the grid itself
             self.game_area_renderer._render_single_env_grid(
                 game_surf, demo_env, env_config
             )
 
+            # Calculate triangle size for preview based on the rendered area
             preview_tri_cell_w, preview_tri_cell_h = self._calculate_demo_triangle_size(
                 clipped_game_rect.width, clipped_game_rect.height, env_config
             )
@@ -5642,6 +6253,7 @@ class DemoRenderer:
                 grid_ox, grid_oy = self._calculate_grid_offset(
                     clipped_game_rect.width, clipped_game_rect.height, env_config
                 )
+                # Render the placement preview overlay
                 self._render_placement_preview(
                     game_surf,
                     demo_env,
@@ -5651,18 +6263,19 @@ class DemoRenderer:
                     grid_oy,
                 )
 
+            # Render overlays like "GAME OVER"
             if demo_env.is_over():
-                self._render_demo_overlay_text(game_surf, "GAME OVER", VisConfig.RED)
+                self._render_demo_overlay_text(game_surf, "GAME OVER", RED)
             elif demo_env.is_line_clearing():
-                self._render_demo_overlay_text(game_surf, "Line Clear!", VisConfig.BLUE)
+                self._render_demo_overlay_text(game_surf, "Line Clear!", BLUE)
 
         except ValueError as e:
             print(f"Error subsurface demo game ({clipped_game_rect}): {e}")
-            pygame.draw.rect(self.screen, VisConfig.RED, clipped_game_rect, 1)
+            pygame.draw.rect(self.screen, RED, clipped_game_rect, 1)
         except Exception as render_e:
             print(f"Error rendering demo game area: {render_e}")
             traceback.print_exc()
-            pygame.draw.rect(self.screen, VisConfig.RED, clipped_game_rect, 1)
+            pygame.draw.rect(self.screen, RED, clipped_game_rect, 1)
 
     def _render_shape_previews_area(
         self,
@@ -5671,46 +6284,49 @@ class DemoRenderer:
         clipped_game_rect: pygame.Rect,
         padding: int,
     ):
+        """Renders the shape preview area to the right of the game grid."""
         preview_area_w = min(150, screen_width - clipped_game_rect.right - padding // 2)
-        if preview_area_w > 20:
-            preview_area_rect = pygame.Rect(
-                clipped_game_rect.right + padding // 2,
-                clipped_game_rect.top,
-                preview_area_w,
-                clipped_game_rect.height,
-            )
-            clipped_preview_area_rect = preview_area_rect.clip(self.screen.get_rect())
-            if (
-                clipped_preview_area_rect.width > 0
-                and clipped_preview_area_rect.height > 0
-            ):
-                try:
-                    preview_area_surf = self.screen.subsurface(
-                        clipped_preview_area_rect
-                    )
-                    self._render_demo_shape_previews(preview_area_surf, demo_env)
-                except ValueError as e:
-                    print(f"Error subsurface demo shape preview area: {e}")
-                    pygame.draw.rect(
-                        self.screen, VisConfig.RED, clipped_preview_area_rect, 1
-                    )
-                except Exception as e:
-                    print(f"Error rendering demo shape previews: {e}")
-                    traceback.print_exc()
+        if preview_area_w <= 20:
+            return  # Too small to render
+
+        preview_area_rect = pygame.Rect(
+            clipped_game_rect.right + padding // 2,
+            clipped_game_rect.top,
+            preview_area_w,
+            clipped_game_rect.height,
+        )
+        clipped_preview_area_rect = preview_area_rect.clip(self.screen.get_rect())
+        if (
+            clipped_preview_area_rect.width <= 0
+            or clipped_preview_area_rect.height <= 0
+        ):
+            return
+
+        try:
+            preview_area_surf = self.screen.subsurface(clipped_preview_area_rect)
+            self._render_demo_shape_previews(preview_area_surf, demo_env)
+        except ValueError as e:
+            print(f"Error subsurface demo shape preview area: {e}")
+            pygame.draw.rect(self.screen, RED, clipped_preview_area_rect, 1)
+        except Exception as e:
+            print(f"Error rendering demo shape previews: {e}")
+            traceback.print_exc()
 
     def _render_hud(self, demo_env: GameState, screen_width: int, hud_y: int):
+        """Renders the score and lines cleared HUD."""
         score_text = f"Score: {demo_env.game_score} | Lines: {demo_env.lines_cleared_this_episode}"
         try:
-            score_surf = self.demo_hud_font.render(score_text, True, VisConfig.WHITE)
+            score_surf = self.demo_hud_font.render(score_text, True, WHITE)
             score_rect = score_surf.get_rect(midtop=(screen_width // 2, hud_y))
             self.screen.blit(score_surf, score_rect)
         except Exception as e:
             print(f"HUD render error: {e}")
 
     def _render_help_text(self, screen_width: int, screen_height: int):
+        """Renders the control help text at the bottom."""
         try:
             help_surf = self.demo_help_font.render(
-                self.demo_config.HELP_TEXT, True, VisConfig.LIGHTG
+                self.demo_config.HELP_TEXT, True, LIGHTG
             )
             help_rect = help_surf.get_rect(
                 centerx=screen_width // 2, bottom=screen_height - 10
@@ -5722,15 +6338,10 @@ class DemoRenderer:
     def _render_demo_overlay_text(
         self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
     ):
+        """Renders centered overlay text (e.g., GAME OVER)."""
         try:
-            if not self.overlay_font:
-                print("Error: Overlay font not available for demo overlay.")
-                return
             text_surf = self.overlay_font.render(
-                text,
-                True,
-                VisConfig.WHITE,
-                (color[0] // 2, color[1] // 2, color[2] // 2, 220),
+                text, True, WHITE, (color[0] // 2, color[1] // 2, color[2] // 2, 220)
             )
             text_rect = text_surf.get_rect(center=surf.get_rect().center)
             surf.blit(text_surf, text_rect)
@@ -5740,6 +6351,7 @@ class DemoRenderer:
     def _calculate_demo_triangle_size(
         self, surf_w: int, surf_h: int, env_config: EnvConfig
     ) -> Tuple[int, int]:
+        """Calculates the size of triangles for rendering within the demo area."""
         padding = self.vis_config.ENV_GRID_PADDING
         drawable_w = max(1, surf_w - 2 * padding)
         drawable_h = max(1, surf_h - 2 * padding)
@@ -5747,17 +6359,22 @@ class DemoRenderer:
         grid_cols_eff_width = env_config.COLS * 0.75 + 0.25
         if grid_rows <= 0 or grid_cols_eff_width <= 0:
             return 0, 0
+
         scale_w = drawable_w / grid_cols_eff_width
         scale_h = drawable_h / grid_rows
         final_scale = min(scale_w, scale_h)
         if final_scale <= 0:
             return 0, 0
         tri_cell_size = max(1, int(final_scale))
-        return tri_cell_size, tri_cell_size
+        return (
+            tri_cell_size,
+            tri_cell_size,
+        )  # Use same size for width/height for simplicity
 
     def _calculate_grid_offset(
         self, surf_w: int, surf_h: int, env_config: EnvConfig
     ) -> Tuple[float, float]:
+        """Calculates the top-left offset for centering the grid rendering."""
         padding = self.vis_config.ENV_GRID_PADDING
         drawable_w = max(1, surf_w - 2 * padding)
         drawable_h = max(1, surf_h - 2 * padding)
@@ -5765,6 +6382,7 @@ class DemoRenderer:
         grid_cols_eff_width = env_config.COLS * 0.75 + 0.25
         if grid_rows <= 0 or grid_cols_eff_width <= 0:
             return float(padding), float(padding)
+
         scale_w = drawable_w / grid_cols_eff_width
         scale_h = drawable_h / grid_rows
         final_scale = min(scale_w, scale_h)
@@ -5783,52 +6401,47 @@ class DemoRenderer:
         offset_x: float,
         offset_y: float,
     ):
+        """Renders the semi-transparent preview of the selected shape at the target location."""
         if cell_w <= 0 or cell_h <= 0:
             return
-        shp, rr, cc = env.get_current_selection_info()
-        if shp is None:
+        selected_shape, target_row, target_col = env.get_current_selection_info()
+        if selected_shape is None:
             return
 
-        is_valid = env.grid.can_place(shp, rr, cc)
-
+        is_valid_placement = env.grid.can_place(selected_shape, target_row, target_col)
         preview_alpha = 150
-        if is_valid:
-            shape_rgb = shp.color
-            preview_color_to_use = (
+        preview_color_rgba = self.invalid_placement_color  # Default to invalid color
+        if is_valid_placement:
+            shape_rgb = selected_shape.color
+            preview_color_rgba = (
                 shape_rgb[0],
                 shape_rgb[1],
                 shape_rgb[2],
                 preview_alpha,
             )
-        else:
-            # --- MODIFIED: Use the defined gray color for invalid placement ---
-            preview_color_to_use = self.invalid_placement_color
-            # --- END MODIFIED ---
 
+        # Use a temporary surface for alpha blending
         temp_surface = pygame.Surface(surf.get_size(), pygame.SRCALPHA)
-        temp_surface.fill((0, 0, 0, 0))
+        temp_surface.fill((0, 0, 0, 0))  # Fully transparent
 
-        for dr, dc, up in shp.triangles:
-            nr, nc = rr + dr, cc + dc
-            if (
-                env.grid.valid(nr, nc)
-                and 0 <= nr < len(env.grid.triangles)
-                and 0 <= nc < len(env.grid.triangles[nr])
-                and not env.grid.triangles[nr][nc].is_death
-            ):
-                temp_tri = env.grid.triangles[nr][nc]
+        for dr, dc, _ in selected_shape.triangles:
+            nr, nc = target_row + dr, target_col + dc
+            # Check if the target cell is valid and not a death cell
+            if env.grid.valid(nr, nc) and not env.grid.triangles[nr][nc].is_death:
+                preview_triangle = env.grid.triangles[nr][nc]
                 try:
-                    pts = temp_tri.get_points(
+                    points = preview_triangle.get_points(
                         ox=offset_x, oy=offset_y, cw=cell_w, ch=cell_h
                     )
-                    pygame.draw.polygon(temp_surface, preview_color_to_use, pts)
-                except Exception as e:
-                    pass
+                    pygame.draw.polygon(temp_surface, preview_color_rgba, points)
+                except Exception:
+                    pass  # Ignore errors drawing single triangle
 
-        surf.blit(temp_surface, (0, 0))
+        surf.blit(temp_surface, (0, 0))  # Blit the preview onto the main surface
 
     def _render_demo_shape_previews(self, surf: pygame.Surface, env: GameState):
-        surf.fill((25, 25, 25))
+        """Renders the small previews of available shapes."""
+        surf.fill((25, 25, 25))  # Dark background for preview area
         all_slots = env.shapes
         selected_shape_obj = (
             all_slots[env.demo_selected_shape_idx]
@@ -5842,25 +6455,26 @@ class DemoRenderer:
         if num_slots <= 0:
             return
 
+        # Calculate dimensions for each preview box
         preview_h = max(20, (surf_h - (num_slots + 1) * preview_padding) / num_slots)
         preview_w = max(20, surf_w - 2 * preview_padding)
         current_preview_y = preview_padding
 
         for i in range(num_slots):
-            shp = all_slots[i] if i < len(all_slots) else None
+            shape_in_slot = all_slots[i] if i < len(all_slots) else None
             preview_rect = pygame.Rect(
                 preview_padding, current_preview_y, preview_w, preview_h
             )
             clipped_preview_rect = preview_rect.clip(surf.get_rect())
-
             if clipped_preview_rect.width <= 0 or clipped_preview_rect.height <= 0:
                 current_preview_y += preview_h + preview_padding
                 continue
 
+            # Determine border style based on selection
             bg_color = (40, 40, 40)
-            border_color = VisConfig.GRAY
+            border_color = GRAY
             border_width = 1
-            if shp is not None and shp == selected_shape_obj:
+            if shape_in_slot is not None and shape_in_slot == selected_shape_obj:
                 border_color = self.demo_config.SELECTED_SHAPE_HIGHLIGHT_COLOR
                 border_width = 2
 
@@ -5869,9 +6483,9 @@ class DemoRenderer:
                 surf, border_color, clipped_preview_rect, border_width, border_radius=3
             )
 
-            if shp is not None:
+            if shape_in_slot is not None:
                 self._render_single_shape_in_preview_box(
-                    surf, shp, preview_rect, clipped_preview_rect
+                    surf, shape_in_slot, preview_rect, clipped_preview_rect
                 )
 
             current_preview_y += preview_h + preview_padding
@@ -5879,10 +6493,11 @@ class DemoRenderer:
     def _render_single_shape_in_preview_box(
         self,
         surf: pygame.Surface,
-        shp,
+        shape_obj,
         preview_rect: pygame.Rect,
         clipped_preview_rect: pygame.Rect,
     ):
+        """Renders a single shape scaled to fit within its preview box."""
         try:
             inner_padding = 2
             shape_render_area_rect = pygame.Rect(
@@ -5891,39 +6506,43 @@ class DemoRenderer:
                 clipped_preview_rect.width - 2 * inner_padding,
                 clipped_preview_rect.height - 2 * inner_padding,
             )
-            if shape_render_area_rect.width > 0 and shape_render_area_rect.height > 0:
-                sub_surf_x = preview_rect.left + shape_render_area_rect.left
-                sub_surf_y = preview_rect.top + shape_render_area_rect.top
-                shape_sub_surf = surf.subsurface(
-                    sub_surf_x,
-                    sub_surf_y,
-                    shape_render_area_rect.width,
-                    shape_render_area_rect.height,
-                )
-                min_r, min_c, max_r, max_c = shp.bbox()
-                shape_h = max(1, max_r - min_r + 1)
-                shape_w_eff = max(1, (max_c - min_c + 1) * 0.75 + 0.25)
+            if shape_render_area_rect.width <= 0 or shape_render_area_rect.height <= 0:
+                return
 
-                scale_h = shape_render_area_rect.height / shape_h
-                scale_w = shape_render_area_rect.width / shape_w_eff
-                cell_size = max(1, min(scale_h, scale_w))
+            # Create a subsurface within the preview box for rendering the shape
+            sub_surf_x = preview_rect.left + shape_render_area_rect.left
+            sub_surf_y = preview_rect.top + shape_render_area_rect.top
+            shape_sub_surf = surf.subsurface(
+                sub_surf_x,
+                sub_surf_y,
+                shape_render_area_rect.width,
+                shape_render_area_rect.height,
+            )
 
-                self.game_area_renderer._render_single_shape(
-                    shape_sub_surf, shp, int(cell_size)
-                )
+            # Calculate scaling factor for the shape
+            min_r, min_c, max_r, max_c = shape_obj.bbox()
+            shape_h_cells = max(1, max_r - min_r + 1)
+            shape_w_cells_eff = max(1, (max_c - min_c + 1) * 0.75 + 0.25)
+            scale_h = shape_render_area_rect.height / shape_h_cells
+            scale_w = shape_render_area_rect.width / shape_w_cells_eff
+            cell_size = max(1, min(scale_h, scale_w))
+
+            # Render the shape onto the subsurface
+            self.game_area_renderer._render_single_shape(
+                shape_sub_surf, shape_obj, int(cell_size)
+            )
         except ValueError as sub_err:
             print(f"Error subsurface shape preview: {sub_err}")
-            pygame.draw.rect(surf, VisConfig.RED, clipped_preview_rect, 1)
+            pygame.draw.rect(surf, RED, clipped_preview_rect, 1)
         except Exception as e:
             print(f"Error rendering demo shape preview: {e}")
-            pygame.draw.rect(surf, VisConfig.RED, clipped_preview_rect, 1)
+            pygame.draw.rect(surf, RED, clipped_preview_rect, 1)
 
     def _render_too_small_message(self, text: str, area_rect: pygame.Rect):
+        """Renders a message indicating the area is too small."""
         try:
-            font = self.game_area_renderer.fonts.get("ui") or pygame.font.SysFont(
-                None, 24
-            )
-            err_surf = font.render(text, True, VisConfig.GRAY)
+            font = self.game_area_renderer.fonts.get("ui", pygame.font.Font(None, 24))
+            err_surf = font.render(text, True, GRAY)
             target_rect = err_surf.get_rect(center=area_rect.center)
             self.screen.blit(err_surf, target_rect)
         except Exception as e:
@@ -7699,17 +8318,25 @@ import os
 import time
 from typing import Dict, Any, Optional, Deque, Tuple
 
+# --- MODIFIED: Import DEVICE directly ---
 from config import (
     VisConfig,
     StatsConfig,
     PPOConfig,
     RNNConfig,
-    DEVICE,
     TensorBoardConfig,
+    WHITE,
+    YELLOW,
+    RED,
+    GOOGLE_COLORS,
+    LIGHTG,
+    BLUE,  # Import colors if needed
 )
-from config.general import TOTAL_TRAINING_STEPS
-from ui.plotter import Plotter
+from config.general import TOTAL_TRAINING_STEPS, DEVICE  # Import DEVICE here
 
+# --- END MODIFIED ---
+
+from ui.plotter import Plotter
 from .left_panel_components import (
     ButtonStatusRenderer,
     InfoTextRenderer,
@@ -7717,20 +8344,21 @@ from .left_panel_components import (
     PlotAreaRenderer,
 )
 
-TOOLTIP_TEXTS = {
+# --- MODIFIED: Remove direct DEVICE access from TOOLTIP_TEXTS definition ---
+TOOLTIP_TEXTS_BASE = {
     "Status": "Current application state: Ready, Collecting Experience, Updating Agent, Confirm Cleanup, Cleaning, or Error.",
     "Run Button": "Click to Start/Stop training run (or press 'P').",
     "Cleanup Button": "Click to DELETE agent ckpt for CURRENT run ONLY, then re-init.",
     "Play Demo Button": "Click to enter interactive play mode.",
-    "Device": f"Computation device detected ({DEVICE.type.upper()}).",
+    "Device": "Computation device detected.",  # Placeholder text
     "Network": f"Actor-Critic (CNN+MLP Fusion -> Optional LSTM:{RNNConfig.USE_RNN})",
     "TensorBoard Status": "Indicates TB logging status and log directory.",
-    # Add tooltips for compact status line elements if desired
     "Steps Info": "Global Steps / Total Planned Steps",
     "Episodes Info": "Total Completed Episodes",
     "SPS Info": "Steps Per Second (Collection + Update Avg)",
     "Update Progress": "Progress of the current agent neural network update cycle.",
 }
+# --- END MODIFIED ---
 
 
 class LeftPanelRenderer:
@@ -7751,7 +8379,9 @@ class LeftPanelRenderer:
         )
 
     def _init_fonts(self):
+        """Initializes fonts used in the left panel."""
         fonts = {}
+        # Define font configurations
         font_configs = {
             "ui": 24,
             "status": 28,
@@ -7759,8 +8389,10 @@ class LeftPanelRenderer:
             "plot_placeholder": 20,
             "notification_label": 16,
             "plot_title_values": 8,
-            "progress_bar": 14,  # Font for progress bar percentage
+            "progress_bar": 14,
+            "notification": 18,  # Added font used in NotificationRenderer
         }
+        # Load fonts, falling back to default if SysFont fails
         for key, size in font_configs.items():
             try:
                 fonts[key] = pygame.font.SysFont(None, size)
@@ -7778,16 +8410,18 @@ class LeftPanelRenderer:
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         app_state: str,
-        update_progress: float,  # Added update_progress
+        update_progress: float,
     ):
+        """Renders the entire left panel."""
         current_width, current_height = self.screen.get_size()
         lp_width = min(current_width, max(300, self.vis_config.LEFT_PANEL_WIDTH))
         lp_rect = pygame.Rect(0, 0, lp_width, current_height)
 
+        # Determine background color based on status
         status_color_map = {
             "Ready": (30, 30, 30),
-            "Collecting Experience": (30, 40, 30),  # Greenish tint
-            "Updating Agent": (30, 30, 50),  # Bluish tint
+            "Collecting Experience": (30, 40, 30),
+            "Updating Agent": (30, 30, 50),
             "Confirm Cleanup": (50, 20, 20),
             "Cleaning": (60, 30, 30),
             "Error": (60, 0, 0),
@@ -7796,11 +8430,11 @@ class LeftPanelRenderer:
         }
         bg_color = status_color_map.get(status, (30, 30, 30))
         pygame.draw.rect(self.screen, bg_color, lp_rect)
-        self.stat_rects.clear()
+        self.stat_rects.clear()  # Clear rects for the new frame
 
         current_y = 10
 
-        # Render Buttons and Compact Status Block (Pass update_progress)
+        # Render Buttons and Compact Status Block
         next_y, rects_bs = self.button_status_renderer.render(
             y_start=current_y,
             panel_width=lp_width,
@@ -7808,7 +8442,7 @@ class LeftPanelRenderer:
             is_training_running=is_training_running,
             status=status,
             stats_summary=stats_summary,
-            update_progress=update_progress,  # Pass progress
+            update_progress=update_progress,
         )
         self.stat_rects.update(rects_bs)
         current_y = next_y
@@ -7833,10 +8467,21 @@ class LeftPanelRenderer:
         )
 
     def get_stat_rects(self) -> Dict[str, pygame.Rect]:
+        """Returns the dictionary of rectangles for tooltip detection."""
         return self.stat_rects.copy()
 
+    # --- MODIFIED: Dynamically format Device tooltip ---
     def get_tooltip_texts(self) -> Dict[str, str]:
-        return TOOLTIP_TEXTS
+        """Returns the dictionary of tooltip texts, formatting dynamic ones."""
+        texts = TOOLTIP_TEXTS_BASE.copy()
+        # Ensure DEVICE is not None before accessing .type
+        device_type_str = "UNKNOWN"
+        if DEVICE and hasattr(DEVICE, "type"):
+            device_type_str = DEVICE.type.upper()
+        texts["Device"] = f"Computation device detected ({device_type_str})."
+        return texts
+
+    # --- END MODIFIED ---
 
 
 File: ui\panels\__init__.py
@@ -7850,7 +8495,20 @@ File: ui\panels\left_panel_components\button_status_renderer.py
 # File: ui/panels/left_panel_components/button_status_renderer.py
 import pygame
 from typing import Dict, Tuple, Optional, Any
-from config import VisConfig, TOTAL_TRAINING_STEPS
+
+# --- MODIFIED: Import constants ---
+from config import (
+    VisConfig,
+    TOTAL_TRAINING_STEPS,
+    WHITE,
+    YELLOW,
+    RED,
+    GOOGLE_COLORS,
+    LIGHTG,
+    BLUE,
+)
+
+# --- END MODIFIED ---
 
 
 class ButtonStatusRenderer:
@@ -7864,49 +8522,45 @@ class ButtonStatusRenderer:
             "notification_label", pygame.font.Font(None, 16)
         )
         self.progress_font = fonts.get("progress_bar", pygame.font.Font(None, 14))
+        self.ui_font = fonts.get("ui", pygame.font.Font(None, 24))
 
     def _draw_button(self, rect: pygame.Rect, text: str, color: Tuple[int, int, int]):
         """Helper to draw a single button."""
         pygame.draw.rect(self.screen, color, rect, border_radius=5)
-        ui_font = self.fonts.get("ui")
-        if ui_font:
-            lbl_surf = ui_font.render(text, True, VisConfig.WHITE)
-            self.screen.blit(lbl_surf, lbl_surf.get_rect(center=rect.center))
-        else:
-            pygame.draw.line(
-                self.screen, VisConfig.RED, rect.topleft, rect.bottomright, 2
-            )
-            pygame.draw.line(
-                self.screen, VisConfig.RED, rect.topright, rect.bottomleft, 2
-            )
+        if self.ui_font:
+            label_surface = self.ui_font.render(text, True, WHITE)
+            self.screen.blit(label_surface, label_surface.get_rect(center=rect.center))
+        else:  # Fallback if font failed
+            pygame.draw.line(self.screen, RED, rect.topleft, rect.bottomright, 2)
+            pygame.draw.line(self.screen, RED, rect.topright, rect.bottomleft, 2)
 
     def _render_compact_status(
         self, y_start: int, panel_width: int, status: str, stats_summary: Dict[str, Any]
     ) -> Tuple[int, Dict[str, pygame.Rect]]:
-        """Renders the compact status block."""
+        """Renders the compact status block below buttons."""
         stat_rects: Dict[str, pygame.Rect] = {}
         x_margin = 10
-        line_height = self.status_font.get_linesize()
-        label_line_height = self.status_label_font.get_linesize()
+        line_height_status = self.status_font.get_linesize()
+        line_height_label = self.status_label_font.get_linesize()
         current_y = y_start
 
-        # Line 1: Status
+        # Line 1: Status Text
         status_text = f"Status: {status}"
-        status_color = VisConfig.YELLOW
+        status_color = YELLOW  # Default
         if status == "Error":
-            status_color = VisConfig.RED
+            status_color = RED
         elif status == "Collecting Experience":
-            status_color = VisConfig.GOOGLE_COLORS[0]  # Green
+            status_color = GOOGLE_COLORS[0]  # Green
         elif status == "Updating Agent":
-            status_color = VisConfig.GOOGLE_COLORS[2]  # Blue
+            status_color = GOOGLE_COLORS[2]  # Blue
         elif status == "Ready":
-            status_color = VisConfig.WHITE
+            status_color = WHITE
 
-        status_surf = self.status_font.render(status_text, True, status_color)
-        status_rect = status_surf.get_rect(topleft=(x_margin, current_y))
-        self.screen.blit(status_surf, status_rect)
+        status_surface = self.status_font.render(status_text, True, status_color)
+        status_rect = status_surface.get_rect(topleft=(x_margin, current_y))
+        self.screen.blit(status_surface, status_rect)
         stat_rects["Status"] = status_rect
-        current_y += line_height
+        current_y += line_height_status
 
         # Line 2: Steps | Episodes | SPS
         global_step = stats_summary.get("global_step", 0)
@@ -7916,28 +8570,26 @@ class ButtonStatusRenderer:
         steps_str = f"{global_step/1e6:.2f}M/{TOTAL_TRAINING_STEPS/1e6:.1f}M Steps"
         eps_str = f"{total_episodes} Eps"
         sps_str = f"{sps:.0f} SPS"
-
         line2_text = f"{steps_str}  |  {eps_str}  |  {sps_str}"
-        line2_surf = self.status_label_font.render(line2_text, True, VisConfig.LIGHTG)
-        line2_rect = line2_surf.get_rect(topleft=(x_margin, current_y))
-        self.screen.blit(line2_surf, line2_rect)
+
+        line2_surface = self.status_label_font.render(line2_text, True, LIGHTG)
+        line2_rect = line2_surface.get_rect(topleft=(x_margin, current_y))
+        self.screen.blit(line2_surface, line2_rect)
 
         # Add individual rects for tooltips on line 2 elements
-        steps_surf = self.status_label_font.render(steps_str, True, VisConfig.LIGHTG)
-        eps_surf = self.status_label_font.render(eps_str, True, VisConfig.LIGHTG)
-        sps_surf = self.status_label_font.render(sps_str, True, VisConfig.LIGHTG)
-
-        steps_rect = steps_surf.get_rect(topleft=(x_margin, current_y))
-        eps_rect = eps_surf.get_rect(
+        steps_surface = self.status_label_font.render(steps_str, True, LIGHTG)
+        eps_surface = self.status_label_font.render(eps_str, True, LIGHTG)
+        sps_surface = self.status_label_font.render(sps_str, True, LIGHTG)
+        steps_rect = steps_surface.get_rect(topleft=(x_margin, current_y))
+        eps_rect = eps_surface.get_rect(
             midleft=(steps_rect.right + 10, steps_rect.centery)
         )
-        sps_rect = sps_surf.get_rect(midleft=(eps_rect.right + 10, eps_rect.centery))
-
+        sps_rect = sps_surface.get_rect(midleft=(eps_rect.right + 10, eps_rect.centery))
         stat_rects["Steps Info"] = steps_rect
         stat_rects["Episodes Info"] = eps_rect
         stat_rects["SPS Info"] = sps_rect
 
-        current_y += label_line_height + 2
+        current_y += line_height_label + 2  # Add padding below line 2
 
         return current_y, stat_rects
 
@@ -7955,30 +8607,32 @@ class ButtonStatusRenderer:
             return current_y, stat_rects
 
         # Background
-        bg_rect = pygame.Rect(x_margin, current_y, bar_width, bar_height)
+        background_rect = pygame.Rect(x_margin, current_y, bar_width, bar_height)
         pygame.draw.rect(
-            self.screen, (60, 60, 80), bg_rect, border_radius=3
+            self.screen, (60, 60, 80), background_rect, border_radius=3
         )  # Darker blue bg
 
         # Foreground (Progress)
         progress_width = int(bar_width * progress)
         if progress_width > 0:
-            fg_rect = pygame.Rect(x_margin, current_y, progress_width, bar_height)
+            foreground_rect = pygame.Rect(
+                x_margin, current_y, progress_width, bar_height
+            )
             pygame.draw.rect(
-                self.screen, VisConfig.GOOGLE_COLORS[2], fg_rect, border_radius=3
+                self.screen, GOOGLE_COLORS[2], foreground_rect, border_radius=3
             )  # Blue progress
 
         # Border
-        pygame.draw.rect(self.screen, VisConfig.LIGHTG, bg_rect, 1, border_radius=3)
+        pygame.draw.rect(self.screen, LIGHTG, background_rect, 1, border_radius=3)
 
         # Percentage Text
         if self.progress_font:
             progress_text = f"{progress:.0%}"
-            text_surf = self.progress_font.render(progress_text, True, VisConfig.WHITE)
-            text_rect = text_surf.get_rect(center=bg_rect.center)
-            self.screen.blit(text_surf, text_rect)
+            text_surface = self.progress_font.render(progress_text, True, WHITE)
+            text_rect = text_surface.get_rect(center=background_rect.center)
+            self.screen.blit(text_surface, text_rect)
 
-        stat_rects["Update Progress"] = bg_rect  # Tooltip for the whole bar
+        stat_rects["Update Progress"] = background_rect  # Tooltip for the whole bar
         current_y += bar_height + 5  # Add padding below bar
 
         return current_y, stat_rects
@@ -7991,7 +8645,7 @@ class ButtonStatusRenderer:
         is_training_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
-        update_progress: float,  # Added update_progress
+        update_progress: float,
     ) -> Tuple[int, Dict[str, pygame.Rect]]:
         """Renders buttons, status, and progress bar. Returns next_y, stat_rects."""
         stat_rects: Dict[str, pygame.Rect] = {}
@@ -7999,21 +8653,30 @@ class ButtonStatusRenderer:
 
         # Render Buttons (only in MainMenu)
         if app_state == "MainMenu":
-            button_h = 40
-            button_y = y_start
-            run_btn_w = 100
-            cleanup_btn_w = 160
-            demo_btn_w = 120
-            spacing = 10
+            button_height = 40
+            button_y_pos = y_start
+            run_button_width = 100
+            cleanup_button_width = 160
+            demo_button_width = 120
+            button_spacing = 10
 
-            run_btn_rect = pygame.Rect(spacing, button_y, run_btn_w, button_h)
-            cleanup_btn_rect = pygame.Rect(
-                run_btn_rect.right + spacing, button_y, cleanup_btn_w, button_h
+            run_button_rect = pygame.Rect(
+                button_spacing, button_y_pos, run_button_width, button_height
             )
-            demo_btn_rect = pygame.Rect(
-                cleanup_btn_rect.right + spacing, button_y, demo_btn_w, button_h
+            cleanup_button_rect = pygame.Rect(
+                run_button_rect.right + button_spacing,
+                button_y_pos,
+                cleanup_button_width,
+                button_height,
+            )
+            demo_button_rect = pygame.Rect(
+                cleanup_button_rect.right + button_spacing,
+                button_y_pos,
+                demo_button_width,
+                button_height,
             )
 
+            # Determine Run button text and color based on state
             run_button_text = "Run"
             run_button_color = (70, 70, 70)  # Default gray
             if is_training_running:
@@ -8027,20 +8690,22 @@ class ButtonStatusRenderer:
             elif status == "Ready":
                 run_button_color = (40, 40, 80)  # Ready blue
 
-            self._draw_button(run_btn_rect, run_button_text, run_button_color)
-            self._draw_button(cleanup_btn_rect, "Cleanup This Run", (100, 40, 40))
-            self._draw_button(demo_btn_rect, "Play Demo", (40, 100, 40))
+            self._draw_button(run_button_rect, run_button_text, run_button_color)
+            self._draw_button(
+                cleanup_button_rect, "Cleanup This Run", (100, 40, 40)
+            )  # Red
+            self._draw_button(demo_button_rect, "Play Demo", (40, 100, 40))  # Green
 
-            stat_rects["Run Button"] = run_btn_rect
-            stat_rects["Cleanup Button"] = cleanup_btn_rect
-            stat_rects["Play Demo Button"] = demo_btn_rect
+            stat_rects["Run Button"] = run_button_rect
+            stat_rects["Cleanup Button"] = cleanup_button_rect
+            stat_rects["Play Demo Button"] = demo_button_rect
 
-            next_y = run_btn_rect.bottom + 10
+            next_y = run_button_rect.bottom + 10  # Position below buttons
 
         # Render Compact Status Block
-        status_y = next_y if app_state == "MainMenu" else y_start
+        status_block_y = next_y if app_state == "MainMenu" else y_start
         next_y, status_rects = self._render_compact_status(
-            status_y, panel_width, status, stats_summary
+            status_block_y, panel_width, status, stats_summary
         )
         stat_rects.update(status_rects)
 
@@ -8058,14 +8723,19 @@ File: ui\panels\left_panel_components\info_text_renderer.py
 # File: ui/panels/left_panel_components/info_text_renderer.py
 import pygame
 from typing import Dict, Any, Tuple
+
+# --- MODIFIED: Import DEVICE directly ---
 from config import (
     VisConfig,
     StatsConfig,
     PPOConfig,
-    RNNConfig,
-    DEVICE,
-    TOTAL_TRAINING_STEPS,
+    RNNConfig,  # Keep other necessary configs if used
+    WHITE,
+    LIGHTG,  # Import colors
 )
+from config.general import DEVICE  # Import DEVICE from config.general
+
+# --- END MODIFIED ---
 
 
 class InfoTextRenderer:
@@ -8089,17 +8759,18 @@ class InfoTextRenderer:
 
         line_height = ui_font.get_linesize()
 
-        # --- Kept essential, non-plotted info ---
+        # --- MODIFIED: Get device type dynamically ---
+        device_type_str = "UNKNOWN"
+        if DEVICE and hasattr(DEVICE, "type"):
+            device_type_str = DEVICE.type.upper()
+        # --- END MODIFIED ---
+
+        # Define info lines within the render method
         info_lines = [
-            ("Device", f"{DEVICE.type.upper()}"),
-            (
-                "Network",
-                f"Actor-Critic (CNN+MLP->LSTM:{RNNConfig.USE_RNN})",
-            ),
+            ("Device", device_type_str),  # Use the dynamically fetched string
+            ("Network", f"Actor-Critic (CNN+MLP->LSTM:{RNNConfig.USE_RNN})"),
             # Add any other essential non-plotted info here if needed
         ]
-        # --- Removed: Global Steps, Episodes, SPS (moved to status) ---
-        # --- Removed: Policy Loss, Value Loss, Entropy, LR (plotted) ---
 
         last_y = y_start
         x_pos_key, x_pos_val_offset = 10, 5
@@ -8110,11 +8781,11 @@ class InfoTextRenderer:
         for idx, (key, value_str) in enumerate(info_lines):
             line_y = current_y + idx * line_height
             try:
-                key_surf = ui_font.render(f"{key}:", True, VisConfig.LIGHTG)
+                key_surf = ui_font.render(f"{key}:", True, LIGHTG)
                 key_rect = key_surf.get_rect(topleft=(x_pos_key, line_y))
                 self.screen.blit(key_surf, key_rect)
 
-                value_surf = ui_font.render(f"{value_str}", True, VisConfig.WHITE)
+                value_surf = ui_font.render(f"{value_str}", True, WHITE)
                 value_rect = value_surf.get_rect(
                     topleft=(key_rect.right + x_pos_val_offset, line_y)
                 )
@@ -8625,16 +9296,30 @@ File: utils\init_checks.py
 import sys
 import traceback
 import numpy as np
-from config import EnvConfig
+
+# --- MOVED IMPORT INSIDE FUNCTION ---
+# from config import EnvConfig
+# --- END MOVED IMPORT ---
 from environment.game_state import GameState
 
 
 def run_pre_checks() -> bool:
     """Performs basic checks on GameState and configuration compatibility."""
+    # --- IMPORT MOVED HERE ---
+    try:
+        from config import EnvConfig
+    except ImportError as e:
+        print(f"FATAL ERROR: Could not import EnvConfig during pre-check: {e}")
+        print(
+            "This might indicate an issue with the config package structure or an ongoing import cycle."
+        )
+        sys.exit(1)
+    # --- END IMPORT MOVED HERE ---
+
     print("--- Pre-Run Checks ---")
     try:
         print("Checking GameState and Configuration Compatibility...")
-        env_config_instance = EnvConfig()
+        env_config_instance = EnvConfig()  # Now EnvConfig is available here
 
         gs_test = GameState()
         gs_test.reset()
@@ -8661,14 +9346,11 @@ def run_pre_checks() -> bool:
             )
         print(f"GameState 'grid' state shape check PASSED (Shape: {grid_state.shape}).")
 
-        # Check 'shapes' component (features)
+        # Check 'shapes' component (features - flattened)
         if "shapes" not in s_test_dict:
             raise KeyError("State dictionary missing 'shapes' key.")
         shape_state = s_test_dict["shapes"]
-        expected_shape_shape = (
-            env_config_instance.NUM_SHAPE_SLOTS,
-            env_config_instance.SHAPE_FEATURES_PER_SHAPE,
-        )
+        expected_shape_shape = (env_config_instance.SHAPE_STATE_DIM,)  # Flattened
         if not isinstance(shape_state, np.ndarray):
             raise TypeError(
                 f"State 'shapes' component should be numpy array, but got {type(shape_state)}"
@@ -8698,13 +9380,11 @@ def run_pre_checks() -> bool:
             f"GameState 'shape_availability' state shape check PASSED (Shape: {availability_state.shape})."
         )
 
-        # --- UPDATED: Check 'explicit_features' component (with new dimension) ---
+        # Check 'explicit_features' component
         if "explicit_features" not in s_test_dict:
             raise KeyError("State dictionary missing 'explicit_features' key.")
         explicit_features_state = s_test_dict["explicit_features"]
-        expected_explicit_features_shape = (
-            env_config_instance.EXPLICIT_FEATURES_DIM,
-        )  # Use config dim
+        expected_explicit_features_shape = (env_config_instance.EXPLICIT_FEATURES_DIM,)
         if not isinstance(explicit_features_state, np.ndarray):
             raise TypeError(
                 f"State 'explicit_features' component should be numpy array, but got {type(explicit_features_state)}"
@@ -8716,7 +9396,19 @@ def run_pre_checks() -> bool:
         print(
             f"GameState 'explicit_features' state shape check PASSED (Shape: {explicit_features_state.shape})."
         )
-        # --- END UPDATED ---
+
+        # Check PBRS calculation (if enabled)
+        if env_config_instance.CALCULATE_POTENTIAL_OUTCOMES_IN_STATE:
+            print("Potential outcome calculation is ENABLED in EnvConfig.")
+        else:
+            print("Potential outcome calculation is DISABLED in EnvConfig.")
+        if hasattr(gs_test, "_calculate_potential"):
+            _ = gs_test._calculate_potential()
+            print("GameState PBRS potential calculation check PASSED.")
+        else:
+            raise AttributeError(
+                "GameState missing '_calculate_potential' method for PBRS."
+            )
 
         _ = gs_test.valid_actions()
         print("GameState valid_actions check PASSED.")
@@ -8733,13 +9425,122 @@ def run_pre_checks() -> bool:
         print("--- Pre-Run Checks Complete ---")
         return True
     except (NameError, ImportError) as e:
-        print(f"FATAL ERROR: Import/Name error: {e}")
+        print(f"FATAL ERROR: Import/Name error during pre-check: {e}")
     except (ValueError, AttributeError, TypeError, KeyError) as e:
         print(f"FATAL ERROR during pre-run checks: {e}")
     except Exception as e:
         print(f"FATAL ERROR during GameState pre-check: {e}")
         traceback.print_exc()
     sys.exit(1)  # Exit if checks fail
+
+
+File: utils\running_mean_std.py
+# File: utils/running_mean_std.py
+import numpy as np
+import torch
+from typing import Tuple, Union, Dict, Any
+
+# Adapted from Stable Baselines3 VecNormalize
+# https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/running_mean_std.py
+
+
+class RunningMeanStd:
+    """Tracks the mean, variance, and count of values using Welford's algorithm."""
+
+    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
+    def __init__(self, epsilon: float = 1e-4, shape: Tuple[int, ...] = ()):
+        """
+        Calulates the running mean and std of a data stream.
+        :param epsilon: helps with arithmetic issues.
+        :param shape: the shape of the data stream's output.
+        """
+        self.mean = np.zeros(shape, np.float64)
+        self.var = np.ones(shape, np.float64)
+        self.count = epsilon
+
+    def copy(self) -> "RunningMeanStd":
+        """Creates a copy of the RunningMeanStd object."""
+        new_object = RunningMeanStd(shape=self.mean.shape)
+        new_object.mean = self.mean.copy()
+        new_object.var = self.var.copy()
+        new_object.count = self.count
+        return new_object
+
+    def reset(self, epsilon: float = 1e-4) -> None:
+        """Reset the statistics"""
+        self.mean = np.zeros_like(self.mean)
+        self.var = np.ones_like(self.var)
+        self.count = epsilon
+
+    def combine(self, other: "RunningMeanStd") -> None:
+        """
+        Combine stats from another ``RunningMeanStd`` object.
+        :param other: The other object to combine with.
+        """
+        self.update_from_moments(other.mean, other.var, other.count)
+
+    def update(self, arr: np.ndarray) -> None:
+        """
+        Update the running mean and variance from a batch of samples.
+        :param arr: Numpy array of shape (batch_size,) + shape
+        """
+        if arr.shape[1:] != self.mean.shape:
+            raise ValueError(
+                f"Expected input shape {self.mean.shape} (excluding batch dimension), got {arr.shape[1:]}"
+            )
+
+        batch_mean = np.mean(arr, axis=0)
+        batch_var = np.var(arr, axis=0)
+        batch_count = arr.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(
+        self,
+        batch_mean: np.ndarray,
+        batch_var: np.ndarray,
+        batch_count: Union[int, float],
+    ) -> None:
+        """
+        Update the running mean and variance from batch moments.
+        :param batch_mean: the mean of the batch
+        :param batch_var: the variance of the batch
+        :param batch_count: the number of samples in the batch
+        """
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        # Combine variances using Welford's method component analysis
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        # M2 = Combined sum of squares of differences from the mean
+        m_2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
+        new_var = m_2 / tot_count
+        new_count = tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = new_count
+
+    def normalize(self, arr: np.ndarray, epsilon: float = 1e-8) -> np.ndarray:
+        """Normalize an array using the running mean and variance."""
+        # Ensure input is float64 for stability if needed, though usually input is float32
+        # arr_float64 = arr.astype(np.float64)
+        return (arr - self.mean) / np.sqrt(self.var + epsilon)
+
+    def state_dict(self) -> Dict[str, Any]:
+        """Return the state of the running mean std for saving."""
+        return {
+            "mean": self.mean.copy(),
+            "var": self.var.copy(),
+            "count": self.count,
+        }
+
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """Load the state of the running mean std from a saved dictionary."""
+        self.mean = state_dict["mean"].copy()
+        self.var = state_dict["var"].copy()
+        self.count = state_dict["count"]
 
 
 File: utils\types.py
@@ -8754,6 +9555,33 @@ AgentStateDict = Dict[str, Any]
 
 
 File: utils\__init__.py
+# File: utils/__init__.py
+# --- MODIFIED: Export RunningMeanStd ---
+from .helpers import (
+    get_device,
+    set_random_seeds,
+    ensure_numpy,
+    save_object,
+    load_object,
+)
+from .init_checks import run_pre_checks
+from .types import StateType, ActionType, AgentStateDict
+from .running_mean_std import RunningMeanStd  # Import new class
+
+# --- END MODIFIED ---
+
+__all__ = [
+    "get_device",
+    "set_random_seeds",
+    "ensure_numpy",
+    "save_object",
+    "load_object",
+    "run_pre_checks",
+    "StateType",
+    "ActionType",
+    "AgentStateDict",
+    "RunningMeanStd", 
+]
 
 
 File: visualization\__init__.py
