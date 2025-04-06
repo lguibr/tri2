@@ -23,7 +23,7 @@ class VisConfig:
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
-    LEFT_PANEL_WIDTH = int(SCREEN_WIDTH * 0.8)
+    LEFT_PANEL_WIDTH = int(SCREEN_WIDTH * 0.8)  # Keep large for plot + legend
     ENV_SPACING = 0
     ENV_GRID_PADDING = 0
 
@@ -87,11 +87,9 @@ class RewardConfig:
 class PPOConfig:
     LEARNING_RATE = 2.5e-4
     ADAM_EPS = 1e-5
-    NUM_STEPS_PER_ROLLOUT = 4096  # Much larger rollout -> less frequent updates
-    PPO_EPOCHS = 6  # Keep epochs reasonable
-    NUM_MINIBATCHES = (
-        512  # Increased to keep minibatch size manageable (512*4096/512 = 4096)
-    )
+    NUM_STEPS_PER_ROLLOUT = 2048  # Reduced for faster updates
+    PPO_EPOCHS = 6
+    NUM_MINIBATCHES = 512  # Adjusted to give minibatch size 512 (128*2048/512=512)
     CLIP_PARAM = 0.2
     GAMMA = 0.995
     GAE_LAMBDA = 0.95
@@ -131,7 +129,7 @@ class PPOConfig:
 
 class RNNConfig:
     USE_RNN = True
-    LSTM_HIDDEN_SIZE = 1024  # Increased LSTM size
+    LSTM_HIDDEN_SIZE = 1024
     LSTM_NUM_LAYERS = 1
 
 
@@ -147,16 +145,16 @@ class ObsNormConfig:
 
 class TransformerConfig:
     USE_TRANSFORMER = True
-    TRANSFORMER_D_MODEL = 1024  # Increased transformer size
-    TRANSFORMER_NHEAD = 16  # Ensure divisibility
-    TRANSFORMER_DIM_FEEDFORWARD = 1024  # Increased feedforward size
-    TRANSFORMER_NUM_LAYERS = 2  # Increased layers
+    TRANSFORMER_D_MODEL = 1024
+    TRANSFORMER_NHEAD = 16
+    TRANSFORMER_DIM_FEEDFORWARD = 1024
+    TRANSFORMER_NUM_LAYERS = 2
     TRANSFORMER_DROPOUT = 0.1
     TRANSFORMER_ACTIVATION = "relu"
 
 
 class TrainConfig:
-    CHECKPOINT_SAVE_FREQ = 100  # Save every 100 rollouts (less frequent in steps)
+    CHECKPOINT_SAVE_FREQ = 10  # Save every 10 rollouts (more frequent)
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
@@ -167,7 +165,7 @@ class ModelConfig:
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [128, 256, 512]  # Increased final CNN layer
+        CONV_CHANNELS = [128, 256, 512]
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
@@ -179,14 +177,14 @@ class ModelConfig:
 
         _transformer_cfg = TransformerConfig()
         _last_fc_dim = (
-            _transformer_cfg.TRANSFORMER_D_MODEL  # Should be 1024
+            _transformer_cfg.TRANSFORMER_D_MODEL
             if _transformer_cfg.USE_TRANSFORMER
-            else 1024  # Fallback if transformer disabled later
+            else 1024
         )
         COMBINED_FC_DIMS = [
             2048,
             _last_fc_dim,
-        ]  # Increased first FC layer, match last to transformer
+        ]
         del _transformer_cfg
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
@@ -198,20 +196,18 @@ class StatsConfig:
         50,
         100,
         500,
-        1_000,
-        5_000,
-        10_000,
-        50_000,
+        1000,
+        2000,  # Adjusted for shorter training
     ]
-    CONSOLE_LOG_FREQ = 25  # Log every 25 rollouts (less frequent in steps)
+    CONSOLE_LOG_FREQ = 5  # Log every 5 rollouts (more frequent)
     PLOT_DATA_WINDOW = 100_000
 
 
 class TensorBoardConfig:
     LOG_HISTOGRAMS = False
-    HISTOGRAM_LOG_FREQ = 1000
+    HISTOGRAM_LOG_FREQ = 50  # Log every 50 rollouts
     LOG_IMAGES = False
-    IMAGE_LOG_FREQ = 1000
+    IMAGE_LOG_FREQ = 50  # Log every 50 rollouts
     LOG_DIR: Optional[str] = None
     LOG_SHAPE_PLACEMENT_Q_VALUES = False
 

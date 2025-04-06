@@ -10,7 +10,8 @@ RUN_ID = f"run_{time.strftime('%Y%m%d_%H%M%S')}"
 BASE_CHECKPOINT_DIR = "checkpoints"
 BASE_LOG_DIR = "logs"
 
-TOTAL_TRAINING_STEPS = 500_000_000
+# Reduced total training steps
+TOTAL_TRAINING_STEPS = 20_000_000
 
 RUN_CHECKPOINT_DIR = os.path.join(BASE_CHECKPOINT_DIR, RUN_ID)
 RUN_LOG_DIR = os.path.join(BASE_LOG_DIR, "tensorboard", RUN_ID)
