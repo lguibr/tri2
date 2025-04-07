@@ -24,7 +24,8 @@ class Plotter:
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        self.plot_update_interval: float = 1.0
+        # Increased plot update interval
+        self.plot_update_interval: float = 2.0  # Changed from 1.0
         self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
 

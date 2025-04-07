@@ -1,5 +1,3 @@
-# File: training/trainer.py
-# File: training/trainer.py
 import time
 import torch
 import numpy as np
@@ -88,7 +86,7 @@ class Trainer:
             reward_config=self.reward_config,
             tb_config=self.tb_config,
             obs_norm_config=self.obs_norm_config,
-            device=self.device,
+            device=self.device,  # Pass target device to collector
         )
         self.rollout_storage = self.rollout_collector.rollout_storage
 
@@ -142,7 +140,9 @@ class Trainer:
         self.num_minibatches_per_epoch = 0
         self.total_update_steps = 0
         self.num_updates_this_epoch = 0
-        self.current_update_data: Optional[Dict[str, torch.Tensor]] = None
+        self.current_update_data_cpu: Optional[Dict[str, torch.Tensor]] = (
+            None  # Data on CPU (pinned)
+        )
         self.update_start_time: float = 0.0
 
         self.last_image_log_step = -1
@@ -269,27 +269,28 @@ class Trainer:
         self.current_phase = "Updating"
         self.update_start_time = time.time()
         self.rollout_collector.compute_advantages_for_storage()
-        self.rollout_storage.to(self.agent.device)
-        self.current_update_data = self.rollout_storage.get_data_for_update()
+        # Data is retrieved on CPU (potentially pinned)
+        self.current_update_data_cpu = self.rollout_storage.get_data_for_update()
 
-        if not self.current_update_data:
+        if not self.current_update_data_cpu:
             print("[Trainer Warning] No data retrieved from storage for update.")
             self.current_phase = "Collecting"
             self.steps_collected_this_rollout = 0
             return False
 
-        advantages = self.current_update_data["advantages"]
-        self.current_update_data["advantages"] = (advantages - advantages.mean()) / (
-            advantages.std() + 1e-8
-        )
+        # Normalize advantages on CPU
+        advantages = self.current_update_data_cpu["advantages"]
+        self.current_update_data_cpu["advantages"] = (
+            advantages - advantages.mean()
+        ) / (advantages.std() + 1e-8)
 
-        num_samples = self.current_update_data["actions"].shape[0]
+        num_samples = self.current_update_data_cpu["actions"].shape[0]
         batch_size = self.ppo_config.MINIBATCH_SIZE
         self.num_minibatches_per_epoch = 0
         for i in range(0, num_samples, batch_size):
             if i + batch_size <= num_samples:
                 self.num_minibatches_per_epoch += 1
-            elif num_samples - i >= 2:
+            elif num_samples - i >= 2:  # Ensure minibatch has at least 2 samples
                 self.num_minibatches_per_epoch += 1
 
         self.total_update_steps = (
@@ -304,7 +305,7 @@ class Trainer:
 
     def _iterate_regular_update(self):
         """Performs one MINIBATCH update step of the regular training phase."""
-        if self.current_update_data is None or self.update_indices is None:
+        if self.current_update_data_cpu is None or self.update_indices is None:
             print("Error: Regular update called without data.")
             self.current_phase = "Collecting"
             return
@@ -318,7 +319,7 @@ class Trainer:
         end_idx = start_idx + self.ppo_config.MINIBATCH_SIZE
         minibatch_indices = self.update_indices[start_idx:end_idx]
 
-        if len(minibatch_indices) < 2:
+        if len(minibatch_indices) < 2:  # Skip if minibatch is too small
             self.current_minibatch_index += 1
             if self.current_minibatch_index >= self.num_minibatches_per_epoch:
                 self.current_update_epoch += 1
@@ -327,8 +328,9 @@ class Trainer:
                     self._finalize_update_phase()
             return
 
-        minibatch_tensors = {
-            key: self.current_update_data[key][minibatch_indices]
+        # Select minibatch data (still on CPU)
+        minibatch_cpu = {
+            key: self.current_update_data_cpu[key][minibatch_indices]
             for key in [
                 "obs_grid",
                 "obs_shapes",
@@ -341,8 +343,15 @@ class Trainer:
             ]
         }
 
+        # Move minibatch data to agent's device just before the update
+        minibatch_device = {
+            k: v.to(self.agent.device, non_blocking=self.rollout_storage.pin_memory)
+            for k, v in minibatch_cpu.items()
+        }
+
         try:
-            minibatch_metrics = self.agent.update_minibatch(minibatch_tensors)
+            # Perform update on the agent's device
+            minibatch_metrics = self.agent.update_minibatch(minibatch_device)
             for k, v in minibatch_metrics.items():
                 self.update_metrics_accumulator[k] += v
             self.num_updates_this_epoch += 1
@@ -353,6 +362,11 @@ class Trainer:
             traceback.print_exc()
             self._handle_update_error()
             return
+        finally:
+            # Clean up device tensors immediately after use
+            del minibatch_device
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
 
         self.current_minibatch_index += 1
 
@@ -386,15 +400,20 @@ class Trainer:
         self._update_learning_rate()
         self.maybe_save_checkpoint()
         self._maybe_log_image()
-        self.current_update_data = None
+        self.current_update_data_cpu = None  # Clear CPU data
         gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
     def _handle_update_error(self):
         """Handles errors during the update phase."""
         self.current_phase = "Collecting"
         self.steps_collected_this_rollout = 0
-        self.current_update_data = None
+        self.current_update_data_cpu = None  # Clear CPU data
         self.rollout_storage.after_update()  # Reset storage even on error
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
 
     # --- Main Loop Logic ---
 
@@ -422,6 +441,7 @@ class Trainer:
                 >= self.ppo_config.NUM_STEPS_PER_ROLLOUT
             ):
                 if not self._prepare_regular_update():
+                    # If prepare fails (e.g., no data), reset collection count
                     self.steps_collected_this_rollout = 0
 
             step_duration = time.time() - step_start_time

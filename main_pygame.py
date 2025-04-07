@@ -1,5 +1,3 @@
-# File: main_pygame.py
-# File: main_pygame.py
 import sys
 import pygame
 import os
@@ -196,6 +194,10 @@ class MainApp:
         self.trainer: Optional[Trainer] = None
         self.demo_env: Optional[GameState] = None
         self.agent_param_count: int = 0
+
+        # Resource monitoring timing
+        self.last_resource_check_time = 0.0
+        self.resource_check_interval = 1.0  # Check every 1 second
 
         self._initialize_core_components(is_reinit=False)
 
@@ -823,33 +825,42 @@ class MainApp:
         print("Application exited.")
 
     def _record_resource_usage(self):
-        """Fetches and records system resource usage."""
+        """Fetches and records system resource usage less frequently."""
         if not self.stats_recorder:
             return
-        resource_data = {}
-        try:
-            resource_data["cpu_usage"] = psutil.cpu_percent(interval=None)
-            mem_info = psutil.virtual_memory()
-            resource_data["memory_usage"] = mem_info.percent
 
-            # GPU Memory Usage Percentage
-            gpu_mem_percent = 0.0
-            if (
-                self.device.type == "cuda"
-                and self.total_gpu_memory_bytes is not None
-                and self.total_gpu_memory_bytes > 0
-            ):
-                allocated_mem_bytes = torch.cuda.memory_allocated(self.device)
-                gpu_mem_percent = (
-                    allocated_mem_bytes / self.total_gpu_memory_bytes
-                ) * 100.0
-            resource_data["gpu_memory_usage_percent"] = (
-                gpu_mem_percent  # Record percentage
-            )
+        current_time_res = time.time()
+        if (
+            current_time_res - self.last_resource_check_time
+            > self.resource_check_interval
+        ):
+            resource_data = {}
+            try:
+                resource_data["cpu_usage"] = psutil.cpu_percent(interval=None)
+                mem_info = psutil.virtual_memory()
+                resource_data["memory_usage"] = mem_info.percent
 
-            self.stats_recorder.record_step(resource_data)
-        except Exception as e:
-            pass  # Silently ignore resource fetching errors
+                # GPU Memory Usage Percentage
+                gpu_mem_percent = 0.0
+                if (
+                    self.device.type == "cuda"
+                    and self.total_gpu_memory_bytes is not None
+                    and self.total_gpu_memory_bytes > 0
+                ):
+                    allocated_mem_bytes = torch.cuda.memory_allocated(self.device)
+                    gpu_mem_percent = (
+                        allocated_mem_bytes / self.total_gpu_memory_bytes
+                    ) * 100.0
+                resource_data["gpu_memory_usage_percent"] = (
+                    gpu_mem_percent  # Record percentage
+                )
+
+                self.stats_recorder.record_step(resource_data)
+                self.last_resource_check_time = (
+                    current_time_res  # Update last check time
+                )
+            except Exception as e:
+                pass  # Silently ignore resource fetching errors
 
     def run(self):
         """Main application loop."""
@@ -900,7 +911,7 @@ class MainApp:
                     self.app_state = "Error"
                     self.is_process_running = False
 
-                # 3. Record Resource Usage
+                # 3. Record Resource Usage (now timed)
                 self._record_resource_usage()
 
                 # 4. Render Frame

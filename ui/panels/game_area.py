@@ -1,3 +1,4 @@
+# File: ui/panels/game_area.py
 import pygame
 import math
 import traceback
@@ -20,15 +21,15 @@ class GameAreaRenderer:
             fonts["env_score"] = pygame.font.SysFont(None, 18)
             fonts["env_overlay"] = pygame.font.SysFont(None, 36)
             fonts["ui"] = pygame.font.SysFont(None, 24)
-            fonts["index"] = pygame.font.SysFont(
-                None, 12
-            )  # Added small font for indices
+            # Removed index font
+            # fonts["index"] = pygame.font.SysFont(None, 12)
         except Exception as e:
             print(f"Warning: SysFont error: {e}. Using default.")
             fonts["env_score"] = pygame.font.Font(None, 18)
             fonts["env_overlay"] = pygame.font.Font(None, 36)
             fonts["ui"] = pygame.font.Font(None, 24)
-            fonts["index"] = pygame.font.Font(None, 12)  # Added small font for indices
+            # Removed index font
+            # fonts["index"] = pygame.font.Font(None, 12)
         return fonts
 
     def render(
@@ -271,7 +272,8 @@ class GameAreaRenderer:
             )
             highlight_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
 
-            index_font = self.fonts.get("index")  # Get the index font
+            # Removed index font reference
+            # index_font = self.fonts.get("index")
 
             if hasattr(env, "grid") and hasattr(env.grid, "triangles"):
                 for r in range(env.grid.rows):
@@ -302,21 +304,21 @@ class GameAreaRenderer:
                                 pygame.draw.polygon(surf, color, pts)
                                 pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
 
-                                if (
-                                    index_font and tri_cell_w > 10 and tri_cell_h > 10
-                                ):  # Only render if font exists and cell is large enough
-                                    index_text = f"{r},{c}"
-                                    text_color = BLACK  # Use black for contrast
-                                    text_surf = index_font.render(
-                                        index_text, True, text_color
-                                    )
-                                    # Calculate centroid for text position
-                                    center_x = sum(p[0] for p in pts) / 3
-                                    center_y = sum(p[1] for p in pts) / 3
-                                    text_rect = text_surf.get_rect(
-                                        center=(center_x, center_y)
-                                    )
-                                    surf.blit(text_surf, text_rect)
+                                # Removed index text rendering block
+                                # if (
+                                #     index_font and tri_cell_w > 10 and tri_cell_h > 10
+                                # ):
+                                #     index_text = f"{r},{c}"
+                                #     text_color = BLACK
+                                #     text_surf = index_font.render(
+                                #         index_text, True, text_color
+                                #     )
+                                #     center_x = sum(p[0] for p in pts) / 3
+                                #     center_y = sum(p[1] for p in pts) / 3
+                                #     text_rect = text_surf.get_rect(
+                                #         center=(center_x, center_y)
+                                #     )
+                                #     surf.blit(text_surf, text_rect)
 
                             except Exception as e_render:
                                 pass  # Ignore errors for single triangles
