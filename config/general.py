@@ -49,6 +49,7 @@ def set_run_id(run_id: str):
 
 def get_run_checkpoint_dir() -> str:
     """Gets the checkpoint directory for the current run."""
+    # Checkpoints will now likely store NN weights, maybe MCTS stats
     return os.path.join(BASE_CHECKPOINT_DIR, get_run_id())
 
 
@@ -66,11 +67,6 @@ def get_console_log_dir() -> str:
 
 
 def get_model_save_path() -> str:
-    """Gets the base model save path for the current run."""
-    return os.path.join(get_run_checkpoint_dir(), "ppo_agent_state.pth")
-
-
-# --- Training Goal ---
-# --- Increased training steps ---
-TOTAL_TRAINING_STEPS = 10_000_000  # Increased from 200_000
-# --- End Increased training steps ---
+    """Gets the base model save path for the current run (adapt name later)."""
+    # Rename from ppo_agent_state to something more generic like 'alphatri_nn.pth'
+    return os.path.join(get_run_checkpoint_dir(), "alphatri_nn.pth")

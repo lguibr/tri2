@@ -4,16 +4,16 @@ from typing import Dict, Any
 from .core import (
     VisConfig,
     EnvConfig,
-    RewardConfig,
-    PPOConfig,
+    # Removed RewardConfig
+    # Removed PPOConfig
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
     DemoConfig,
-    ObsNormConfig,  # Added
-    TransformerConfig,  # Added
+    # Removed ObsNormConfig
+    TransformerConfig,
 )
 
 # Import DEVICE and RANDOM_SEED directly, use get_run_id() for the run ID
@@ -57,16 +57,16 @@ def get_config_dict() -> Dict[str, Any]:
     # Flatten core config classes
     all_configs.update(flatten_class(VisConfig, "Vis."))
     all_configs.update(flatten_class(EnvConfig, "Env."))
-    all_configs.update(flatten_class(RewardConfig, "Reward."))
-    all_configs.update(flatten_class(PPOConfig, "PPO."))
+    # Removed RewardConfig flattening
+    # Removed PPOConfig flattening
     all_configs.update(flatten_class(RNNConfig, "RNN."))
     all_configs.update(flatten_class(TrainConfig, "Train."))
     all_configs.update(flatten_class(ModelConfig.Network, "Model.Net."))
     all_configs.update(flatten_class(StatsConfig, "Stats."))
     all_configs.update(flatten_class(TensorBoardConfig, "TB."))
     all_configs.update(flatten_class(DemoConfig, "Demo."))
-    all_configs.update(flatten_class(ObsNormConfig, "ObsNorm."))  # Added
-    all_configs.update(flatten_class(TransformerConfig, "Transformer."))  # Added
+    # Removed ObsNormConfig flattening
+    all_configs.update(flatten_class(TransformerConfig, "Transformer."))
 
     # Add general config values
     all_configs["General.DEVICE"] = str(DEVICE) if DEVICE else "None"

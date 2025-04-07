@@ -5,15 +5,15 @@
 from .core import (
     VisConfig,
     EnvConfig,
-    RewardConfig,
-    PPOConfig,
+    # Removed RewardConfig
+    # Removed PPOConfig
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
     DemoConfig,
-    ObsNormConfig,
+    # Removed ObsNormConfig
     TransformerConfig,
 )
 
@@ -21,7 +21,7 @@ from .core import (
 from .general import (
     DEVICE,
     RANDOM_SEED,
-    TOTAL_TRAINING_STEPS,
+    # Removed TOTAL_TRAINING_STEPS
     BASE_CHECKPOINT_DIR,
     BASE_LOG_DIR,
     set_device,
@@ -61,20 +61,20 @@ __all__ = [
     # Core Configs
     "VisConfig",
     "EnvConfig",
-    "RewardConfig",
-    "PPOConfig",
+    # Removed RewardConfig
+    # Removed PPOConfig
     "RNNConfig",
     "TrainConfig",
     "ModelConfig",
     "StatsConfig",
     "TensorBoardConfig",
     "DemoConfig",
-    "ObsNormConfig",
+    # Removed ObsNormConfig
     "TransformerConfig",
     # General Configs
     "DEVICE",
     "RANDOM_SEED",
-    "TOTAL_TRAINING_STEPS",
+    # Removed TOTAL_TRAINING_STEPS
     "BASE_CHECKPOINT_DIR",
     "BASE_LOG_DIR",
     "set_device",

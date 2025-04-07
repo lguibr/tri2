@@ -1,4 +1,3 @@
-# File: config/core.py
 import torch
 from typing import List, Tuple, Optional
 
@@ -19,15 +18,14 @@ from .constants import (
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 16  # Updated
-    FPS = 0
-    SCREEN_WIDTH = 1600  # Initial width, but resizable
-    SCREEN_HEIGHT = 900  # Initial height, but resizable
+    NUM_ENVS_TO_RENDER = 16 
+    FPS = 60 
+    SCREEN_WIDTH = 1600
+    SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
-    # Changed LEFT_PANEL_WIDTH to LEFT_PANEL_RATIO
     LEFT_PANEL_RATIO = 0.7
-    ENV_SPACING = 0
-    ENV_GRID_PADDING = 0
+    ENV_SPACING = 2 
+    ENV_GRID_PADDING = 2 
 
     WHITE = WHITE
     BLACK = BLACK
@@ -44,14 +42,14 @@ class VisConfig:
 
 
 class EnvConfig:
-    NUM_ENVS = 128
+    NUM_ENVS = 1  # Set to 1, as we removed multi-env collection logic
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2
     SHAPE_FEATURES_PER_SHAPE = 5
     NUM_SHAPE_SLOTS = 3
     EXPLICIT_FEATURES_DIM = 10
-    CALCULATE_POTENTIAL_OUTCOMES_IN_STATE = False
+    CALCULATE_POTENTIAL_OUTCOMES_IN_STATE = False  # Keep False for now
 
     @property
     def GRID_STATE_SHAPE(self) -> Tuple[int, int, int]:
@@ -67,158 +65,74 @@ class EnvConfig:
 
     @property
     def ACTION_DIM(self) -> int:
+        # Action space might change for MCTS (e.g., just placement coords)
+        # Keep original for now, but likely needs refactoring later.
         return self.NUM_SHAPE_SLOTS * (self.ROWS * self.COLS)
 
 
-class RewardConfig:
-    REWARD_PLACE_PER_TRI = 0.0
-    REWARD_PER_CLEARED_TRIANGLE = 0.2
-    REWARD_ALIVE_STEP = 0.01
-    PENALTY_INVALID_MOVE = -0.1
-    PENALTY_GAME_OVER = -2
 
-    PENALTY_MAX_HEIGHT_FACTOR = -0.005
-    PENALTY_BUMPINESS_FACTOR = -0.01
-    PENALTY_HOLE_PER_HOLE = -0.07
-    PENALTY_NEW_HOLE = -0.15
-    ENABLE_PBRS = True
-
-    PBRS_HEIGHT_COEF = -0.05
-    PBRS_HOLE_COEF = -0.20
-    PBRS_BUMPINESS_COEF = -0.02
+class RNNConfig:  # Keep for potential future NN architectures
+    USE_RNN = False  # Default to False
+    LSTM_HIDDEN_SIZE = 256
+    LSTM_NUM_LAYERS = 2
 
 
-class PPOConfig:
-    LEARNING_RATE = 2.5e-4
-    ADAM_EPS = 1e-5
-    # --- Increased Params ---
-    NUM_STEPS_PER_ROLLOUT = 256  # Increased from 128
-    PPO_EPOCHS = 4  # Increased from 2
-    NUM_MINIBATCHES = 16  # Increased from 8
-    # --- End Increased Params ---
-    CLIP_PARAM = 0.2
-    GAMMA = 0.995
-    GAE_LAMBDA = 0.95
-    VALUE_LOSS_COEF = 0.5
-    ENTROPY_COEF = 0.01
-    MAX_GRAD_NORM = 0.5
-
-    USE_LR_SCHEDULER = True
-    LR_SCHEDULE_TYPE = "cosine"
-    LR_LINEAR_END_FRACTION = 0.0
-    LR_COSINE_MIN_FACTOR = 0.01
-
-    @property
-    def MINIBATCH_SIZE(self) -> int:
-        env_config_instance = EnvConfig()
-        total_data_per_update = (
-            env_config_instance.NUM_ENVS * self.NUM_STEPS_PER_ROLLOUT
-        )
-        del env_config_instance
-        if self.NUM_MINIBATCHES <= 0:
-            num_minibatches = 1
-        else:
-            num_minibatches = self.NUM_MINIBATCHES
-        batch_size = total_data_per_update // num_minibatches
-        min_recommended_size = 4  # Keep low for testing flexibility
-        if batch_size < min_recommended_size and batch_size > 0:
-            pass
-        elif batch_size <= 0:
-            local_env_config = EnvConfig()
-            print(
-                f"ERROR: Calculated minibatch size is <= 0 ({batch_size}). Check NUM_ENVS({local_env_config.NUM_ENVS}), NUM_STEPS_PER_ROLLOUT({self.NUM_STEPS_PER_ROLLOUT}), NUM_MINIBATCHES({self.NUM_MINIBATCHES}). Defaulting to 1."
-            )
-            del local_env_config
-            return 1
-        return max(1, batch_size)
-
-
-class RNNConfig:
-    USE_RNN = True
-    LSTM_HIDDEN_SIZE = 256  # Updated
-    LSTM_NUM_LAYERS = 2  # Updated
-
-
-class ObsNormConfig:
-    ENABLE_OBS_NORMALIZATION = True
-    NORMALIZE_GRID = True
-    NORMALIZE_SHAPES = True
-    NORMALIZE_AVAILABILITY = False
-    NORMALIZE_EXPLICIT_FEATURES = True
-    OBS_CLIP = 10.0
-    EPSILON = 1e-8
-
-
-class TransformerConfig:
-    USE_TRANSFORMER = True
-    TRANSFORMER_D_MODEL = 256  # Updated
-    TRANSFORMER_NHEAD = 8  # Updated
-    TRANSFORMER_DIM_FEEDFORWARD = 512  # Updated
-    TRANSFORMER_NUM_LAYERS = 3  # Updated
+class TransformerConfig:  # Keep for potential future NN architectures
+    USE_TRANSFORMER = False  # Default to False
+    TRANSFORMER_D_MODEL = 256
+    TRANSFORMER_NHEAD = 8
+    TRANSFORMER_DIM_FEEDFORWARD = 512
+    TRANSFORMER_NUM_LAYERS = 3
     TRANSFORMER_DROPOUT = 0.1
     TRANSFORMER_ACTIVATION = "relu"
 
 
-class TrainConfig:
-    CHECKPOINT_SAVE_FREQ = 50  # Increased from 10 (interpreted as rollouts)
+class TrainConfig:  # Simplified for general training/checkpointing
+    # Checkpointing might be handled differently (e.g., saving NN weights + MCTS stats)
+    CHECKPOINT_SAVE_FREQ = (
+        50  # Frequency might mean something else now (e.g., training steps, games)
+    )
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
-class ModelConfig:
+class ModelConfig:  # Keep structure for the AlphaZero NN
     class Network:
         _env_cfg_instance = EnvConfig()
         HEIGHT = _env_cfg_instance.ROWS
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [64, 128, 256]  # Updated
+        CONV_CHANNELS = [64, 128, 256]
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
 
-        SHAPE_FEATURE_MLP_DIMS = [128, 128]  # Updated
+        SHAPE_FEATURE_MLP_DIMS = [128, 128]
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
 
-        _transformer_cfg = TransformerConfig()
-        _rnn_cfg = RNNConfig()
-        _last_fc_dim = 256  # Updated
-        if _transformer_cfg.USE_TRANSFORMER:
-            _last_fc_dim = _transformer_cfg.TRANSFORMER_D_MODEL  # Should be 256
-        elif _rnn_cfg.USE_RNN:
-            _last_fc_dim = _rnn_cfg.LSTM_HIDDEN_SIZE  # Should be 256
-
-        COMBINED_FC_DIMS = [
-            1024,  # Updated
-            _last_fc_dim,  # Should be 256 based on Transformer/LSTM
-        ]
-        del _transformer_cfg, _rnn_cfg  # Clean up temp instances
+        COMBINED_FC_DIMS = [1024, 256]
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
         DROPOUT_FC = 0.0
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [
-        25,
-        50,
-        100,
-    ]
-    CONSOLE_LOG_FREQ = 5
-    PLOT_DATA_WINDOW = 100_000  # Increased from 20_000
+    STATS_AVG_WINDOW: List[int] = [25, 50, 100]
+    CONSOLE_LOG_FREQ = 1
+    PLOT_DATA_WINDOW = 100_000
 
 
 class TensorBoardConfig:
     LOG_HISTOGRAMS = False
-    HISTOGRAM_LOG_FREQ = 20
-    LOG_IMAGES = False
-    IMAGE_LOG_FREQ = 20
+    HISTOGRAM_LOG_FREQ = 20  # Frequency might mean training steps/games
+    LOG_IMAGES = False  # Keep ability to log images (e.g., board states)
+    IMAGE_LOG_FREQ = 20  # Frequency might mean training steps/games
     LOG_DIR: Optional[str] = None
-    LOG_SHAPE_PLACEMENT_Q_VALUES = False
 
 
-class DemoConfig:
+class DemoConfig:  # Keep as is
     BACKGROUND_COLOR = (10, 10, 20)
     SELECTED_SHAPE_HIGHLIGHT_COLOR = BLUE
     HUD_FONT_SIZE = 24
