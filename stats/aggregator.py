@@ -69,6 +69,7 @@ class StatsAggregator:
             return update_info
 
     def record_step(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Records step data, now likely related to NN training steps."""
         with self._lock:
             update_info = self.logic.update_step_stats(step_data)
             return update_info

@@ -1,3 +1,4 @@
+# File: ui/plotter.py
 import pygame
 from typing import Dict, Optional, Deque
 from collections import deque
@@ -23,29 +24,27 @@ class Plotter:
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        # --- Reduced plot update interval ---
-        self.plot_update_interval: float = 0.2  # Changed from 2.0 to 0.2
-        # --- End Reduced plot update interval ---
+        self.plot_update_interval: float = 0.2
         self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
 
         self.colors = {
             "rl_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
             "game_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[1]),
-            "policy_loss": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[3]),
-            "value_loss": normalize_color_for_matplotlib(VisConfig.BLUE),
-            "entropy": normalize_color_for_matplotlib((150, 150, 150)),
+            "policy_loss": normalize_color_for_matplotlib(
+                VisConfig.GOOGLE_COLORS[3]
+            ),  # Keep for NN policy loss
+            "value_loss": normalize_color_for_matplotlib(
+                VisConfig.BLUE
+            ),  # Keep for NN value loss
+            # Removed entropy
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
-            "minibatch_sps": normalize_color_for_matplotlib(
-                VisConfig.LIGHTG
-            ),  # Changed key
+            # Removed minibatch_sps
             "tris_cleared": normalize_color_for_matplotlib(VisConfig.YELLOW),
-            "lr": normalize_color_for_matplotlib((255, 0, 255)),
-            "cpu": normalize_color_for_matplotlib((255, 165, 0)),  # Orange
-            "memory": normalize_color_for_matplotlib((0, 191, 255)),  # Deep Sky Blue
-            "gpu_mem": normalize_color_for_matplotlib(
-                (123, 104, 238)
-            ),  # Medium Slate Blue
+            # Removed lr (can add back if needed for NN)
+            "cpu": normalize_color_for_matplotlib((255, 165, 0)),
+            "memory": normalize_color_for_matplotlib((0, 191, 255)),
+            "gpu_mem": normalize_color_for_matplotlib((123, 104, 238)),
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
 
@@ -56,19 +55,22 @@ class Plotter:
         if target_width <= 10 or target_height <= 10 or not plot_data:
             return None
 
+        # Updated data keys
         data_keys = [
             "game_scores",
             "episode_triangles_cleared",
-            "episode_scores",
+            "episode_scores",  # Keep RL score? Or remove? Keep for now.
             "episode_lengths",
-            "minibatch_update_sps_values",  # Changed key
-            "lr_values",
-            "value_losses",
-            "policy_losses",
-            "entropies",
+            "policy_losses",  # Added NN policy loss
+            "value_losses",  # Kept NN value loss
+            # Removed: minibatch_update_sps_values, lr_values, entropies
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
+            # Add placeholders for other potential plots
+            "placeholder1",
+            "placeholder2",
+            "placeholder3",
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
@@ -84,6 +86,7 @@ class Plotter:
                 fig_width_in = max(1, target_width / dpi)
                 fig_height_in = max(1, target_height / dpi)
 
+                # Keep 4x3 layout for now, fill unused plots with placeholders
                 fig, axes = plt.subplots(
                     4, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
@@ -123,7 +126,7 @@ class Plotter:
                     placeholder_text="RL Score",
                 )
 
-                # Row 2: Training Dynamics
+                # Row 2: Training Dynamics / NN Losses
                 render_single_plot(
                     axes_flat[3],
                     data_lists["episode_lengths"],
@@ -132,54 +135,26 @@ class Plotter:
                     self.rolling_window_sizes,
                     placeholder_text="Episode Length",
                 )
-                # Changed plot data key, title, and color key
                 render_single_plot(
                     axes_flat[4],
-                    data_lists["minibatch_update_sps_values"],  # Changed key
-                    "Minibatch Steps/Sec",  # Changed title
-                    self.colors["minibatch_sps"],  # Changed key
-                    self.rolling_window_sizes,
-                    placeholder_text="Minibatch SPS",
-                )
-                render_single_plot(
-                    axes_flat[5],
-                    data_lists["lr_values"],
-                    "Learning Rate",
-                    self.colors["lr"],
-                    [],
-                    y_log_scale=True,
-                    placeholder_text="Learning Rate",
-                )
-
-                # Row 3: Losses & Entropy
-                render_single_plot(
-                    axes_flat[6],
-                    data_lists["value_losses"],
-                    "Value Loss",
-                    self.colors["value_loss"],
-                    self.rolling_window_sizes,
-                    placeholder_text="Value Loss",
-                )
-                render_single_plot(
-                    axes_flat[7],
                     data_lists["policy_losses"],
                     "Policy Loss",
                     self.colors["policy_loss"],
                     self.rolling_window_sizes,
                     placeholder_text="Policy Loss",
-                )
+                )  # NN Policy Loss
                 render_single_plot(
-                    axes_flat[8],
-                    data_lists["entropies"],
-                    "Entropy",
-                    self.colors["entropy"],
+                    axes_flat[5],
+                    data_lists["value_losses"],
+                    "Value Loss",
+                    self.colors["value_loss"],
                     self.rolling_window_sizes,
-                    placeholder_text="Entropy",
-                )
+                    placeholder_text="Value Loss",
+                )  # NN Value Loss
 
-                # Row 4: Resource Usage
+                # Row 3: Resource Usage
                 render_single_plot(
-                    axes_flat[9],
+                    axes_flat[6],
                     data_lists["cpu_usage"],
                     "CPU Usage (%)",
                     self.colors["cpu"],
@@ -187,16 +162,15 @@ class Plotter:
                     placeholder_text="CPU %",
                 )
                 render_single_plot(
-                    axes_flat[10],
+                    axes_flat[7],
                     data_lists["memory_usage"],
                     "Memory Usage (%)",
                     self.colors["memory"],
                     self.rolling_window_sizes,
                     placeholder_text="Mem %",
                 )
-                # Changed plot data key and title
                 render_single_plot(
-                    axes_flat[11],
+                    axes_flat[8],
                     data_lists["gpu_memory_usage_percent"],
                     "GPU Memory (%)",
                     self.colors["gpu_mem"],
@@ -204,9 +178,35 @@ class Plotter:
                     placeholder_text="GPU Mem %",
                 )
 
+                # Row 4: Placeholders / Future Plots
+                render_single_plot(
+                    axes_flat[9],
+                    data_lists["placeholder1"],
+                    "Future Plot 1",
+                    self.colors["placeholder"],
+                    [],
+                    placeholder_text="Future Plot 1",
+                )
+                render_single_plot(
+                    axes_flat[10],
+                    data_lists["placeholder2"],
+                    "Future Plot 2",
+                    self.colors["placeholder"],
+                    [],
+                    placeholder_text="Future Plot 2",
+                )
+                render_single_plot(
+                    axes_flat[11],
+                    data_lists["placeholder3"],
+                    "Future Plot 3",
+                    self.colors["placeholder"],
+                    [],
+                    placeholder_text="Future Plot 3",
+                )
+
                 # Remove x-axis labels/ticks for inner plots
                 for i, ax in enumerate(axes_flat):
-                    if i < 9:
+                    if i < 9:  # Adjust based on layout (4x3 -> 9 inner plots)
                         ax.set_xticklabels([])
                         ax.set_xlabel("")
                     ax.tick_params(axis="x", rotation=0)

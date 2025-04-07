@@ -5,11 +5,9 @@ from typing import Dict, Any, Tuple
 
 from config import RNNConfig, TransformerConfig, ModelConfig, WHITE, LIGHTG, GRAY
 
-# Removed DEVICE import from here
-
 
 class InfoTextRenderer:
-    """Renders essential non-plotted information text, including network config and live resources."""
+    """Renders essential non-plotted information text."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
@@ -22,41 +20,20 @@ class InfoTextRenderer:
 
     def _get_network_description(self) -> str:
         """Builds a description string based on network components."""
-        parts = ["CNN+MLP Fusion"]
-        if self.transformer_config.USE_TRANSFORMER:
-            parts.append("Transformer")
-        if self.rnn_config.USE_RNN:
-            parts.append("LSTM")
-        return (
-            f"Actor-Critic ({' -> '.join(parts)})"
-            if len(parts) > 1
-            else "Actor-Critic (CNN+MLP Fusion)"
-        )
+        # Adapt based on AlphaZero NN architecture later
+        return "AlphaZero Neural Network"  # Placeholder
 
     def _get_network_details(self) -> str:
         """Builds a detailed string of network configuration."""
+        # Adapt based on AlphaZero NN architecture later
         details = []
-        cnn_str = str(self.model_config_net.CONV_CHANNELS).replace(" ", "")
-        details.append(
-            f"CNN: {cnn_str} (K={self.model_config_net.CONV_KERNEL_SIZE}, S={self.model_config_net.CONV_STRIDE}, P={self.model_config_net.CONV_PADDING})"
-        )
-        shape_mlp_str = str(self.model_config_net.SHAPE_FEATURE_MLP_DIMS).replace(
-            " ", ""
-        )
-        details.append(f"Shape MLP: {shape_mlp_str}")
-        fusion_mlp_str = str(self.model_config_net.COMBINED_FC_DIMS).replace(" ", "")
-        details.append(f"Fusion MLP: {fusion_mlp_str}")
-        if self.transformer_config.USE_TRANSFORMER:
-            details.append(
-                f"Transformer: L={self.transformer_config.TRANSFORMER_NUM_LAYERS}, H={self.transformer_config.TRANSFORMER_NHEAD}, D={self.transformer_config.TRANSFORMER_D_MODEL}"
-            )
-        if self.rnn_config.USE_RNN:
-            details.append(f"LSTM: H={self.rnn_config.LSTM_HIDDEN_SIZE}")
-        return " | ".join(details)
+        # Example: Add details about ResNet blocks, policy/value heads if known
+        # cnn_str = str(self.model_config_net.CONV_CHANNELS).replace(" ", "")
+        # details.append(f"CNN Base: {cnn_str}")
+        return "Details TBD"  # Placeholder
 
     def _get_live_resource_usage(self) -> Dict[str, str]:
         """Fetches live CPU, Memory, and GPU Memory usage from cached summary."""
-        # Import DEVICE here to ensure the updated value is used
         from config.general import DEVICE
 
         usage = {"CPU": "N/A", "Mem": "N/A", "GPU Mem": "N/A"}
@@ -67,12 +44,9 @@ class InfoTextRenderer:
         if cpu_val is not None:
             usage["CPU"] = f"{cpu_val:.1f}%"
         if mem_val is not None:
-            # Added missing closing quote
-            usage["Mem"] = f"{mem_val:.1f}%"
+            usage["Mem"] = f"{mem_val:.1f}%"  # Fixed quote
 
-        # Check if DEVICE is None before accessing its type
-        device_type = DEVICE.type if DEVICE else "cpu"  # Default to 'cpu' if None
-
+        device_type = DEVICE.type if DEVICE else "cpu"
         if gpu_val is not None:
             usage["GPU Mem"] = (
                 f"{gpu_val:.1f}%" if device_type == "cuda" else "N/A (CPU)"
@@ -86,11 +60,10 @@ class InfoTextRenderer:
         y_start: int,
         stats_summary: Dict[str, Any],
         panel_width: int,
-        agent_param_count: int,
-        worker_counts: Dict[str, int],  # Added worker_counts
+        agent_param_count: int,  # Keep for NN param count
+        worker_counts: Dict[str, int],  # Keep structure, but content will change
     ) -> int:
         """Renders the info text block. Returns next_y."""
-        # Import DEVICE here as well for the device_type_str
         from config.general import DEVICE
 
         self.stats_summary_cache = stats_summary
@@ -107,10 +80,7 @@ class InfoTextRenderer:
             detail_font.get_linesize(),
             resource_font.get_linesize(),
         )
-        # Check if DEVICE is None before accessing its type
-        device_type_str = (
-            DEVICE.type.upper() if DEVICE and hasattr(DEVICE, "type") else "CPU"
-        )
+        device_type_str = DEVICE.type.upper() if DEVICE else "CPU"
         network_desc, network_details = (
             self._get_network_description(),
             self._get_network_details(),
@@ -124,22 +94,14 @@ class InfoTextRenderer:
             if start_time_unix > 0
             else "N/A"
         )
-        # --- Get Worker Counts ---
-        env_runners = worker_counts.get("env_runners", 0)
-        trainers = worker_counts.get("trainers", 0)
-        worker_str = f"Env: {env_runners} | Train: {trainers}"
-        # --- End Worker Counts ---
-        # --- Get Learning Rate ---
-        lr_val = stats_summary.get("current_lr", 0.0)
-        lr_str = f"{lr_val:.1e}" if lr_val > 0 else "N/A"
-        # --- End Learning Rate ---
+        # Removed worker_str and lr_str (can be added back if needed)
 
         info_lines = [
             ("Device", device_type_str),
             ("Network", network_desc),
             ("Params", param_str),
-            ("LR", lr_str),  # Added LR
-            ("Workers", worker_str),  # Added Workers
+            # ("LR", lr_str), # Removed LR for now
+            # ("Workers", worker_str), # Removed Workers for now
             ("Run Started", start_time_str),
         ]
         last_y, x_pos_key, x_pos_val_offset, current_y = y_start, 10, 5, y_start + 5
@@ -168,9 +130,7 @@ class InfoTextRenderer:
 
         current_y = last_y + 2
         try:
-            # --- Change color here ---
             detail_surf = detail_font.render(network_details, True, WHITE)
-            # --- End change color ---
             detail_rect = detail_surf.get_rect(topleft=(x_pos_key, current_y))
             clip_width_detail = max(0, panel_width - detail_rect.left - 10)
             blit_area_detail = (
@@ -188,9 +148,7 @@ class InfoTextRenderer:
         resource_usage = self._get_live_resource_usage()
         resource_str = f"Live Usage | CPU: {resource_usage['CPU']} | Mem: {resource_usage['Mem']} | GPU Mem: {resource_usage['GPU Mem']}"
         try:
-            # --- Change color here ---
             resource_surf = resource_font.render(resource_str, True, WHITE)
-            # --- End change color ---
             resource_rect = resource_surf.get_rect(topleft=(x_pos_key, current_y))
             clip_width_resource = max(0, panel_width - resource_rect.left - 10)
             blit_area_resource = (

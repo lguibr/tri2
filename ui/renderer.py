@@ -7,12 +7,10 @@ from config import VisConfig, EnvConfig, DemoConfig
 from environment.game_state import GameState
 from .panels import LeftPanelRenderer, GameAreaRenderer
 from .overlays import OverlayRenderer
-
-# Removed TooltipRenderer import
 from .plotter import Plotter
 from .demo_renderer import DemoRenderer
 from .input_handler import InputHandler
-from app_state import AppState  # Import Enum
+from app_state import AppState
 
 
 class UIRenderer:
@@ -25,7 +23,6 @@ class UIRenderer:
         self.left_panel = LeftPanelRenderer(screen, vis_config, self.plotter)
         self.game_area = GameAreaRenderer(screen, vis_config)
         self.overlays = OverlayRenderer(screen, vis_config)
-        # Removed TooltipRenderer instance
         self.demo_config = DemoConfig()
         self.demo_renderer = DemoRenderer(
             screen, vis_config, self.demo_config, self.game_area
@@ -35,13 +32,11 @@ class UIRenderer:
     def set_input_handler(self, input_handler: InputHandler):
         """Sets the InputHandler reference after it's initialized."""
         self.left_panel.input_handler = input_handler
-        # Also set the reference in the button renderer
         if hasattr(self.left_panel, "button_status_renderer"):
             self.left_panel.button_status_renderer.input_handler_ref = input_handler
 
     def check_hover(self, mouse_pos: Tuple[int, int], app_state_str: str):
-        """Passes hover check to the tooltip renderer."""
-        # Removed tooltip hover check logic
+        """Placeholder for hover checks if needed later."""
         pass
 
     def force_redraw(self):
@@ -50,12 +45,12 @@ class UIRenderer:
 
     def render_all(
         self,
-        app_state: str,  # Keep as string for now, internal logic uses Enum
-        is_process_running: bool,
+        app_state: str,
+        is_process_running: bool,  # Keep for potential MCTS/NN status
         status: str,
         stats_summary: Dict[str, Any],
-        envs: List[GameState],
-        num_envs: int,
+        envs: List[GameState],  # Keep for visualization
+        num_envs: int,  # Keep for visualization layout
         env_config: EnvConfig,
         cleanup_confirmation_active: bool,
         cleanup_message: str,
@@ -63,16 +58,14 @@ class UIRenderer:
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         demo_env: Optional[GameState] = None,
-        update_progress_details: Dict[str, Any] = {},
-        agent_param_count: int = 0,
-        worker_counts: Dict[str, int] = {
-            "env_runners": 0,
-            "trainers": 0,
-        },  # Added worker_counts
+        update_progress_details: Dict[str, Any] = {},  # Keep for potential NN progress
+        agent_param_count: int = 0,  # Keep for NN param count
+        worker_counts: Dict[
+            str, int
+        ] = {},  # Keep structure for potential future workers
     ):
         """Renders UI based on the application state."""
         try:
-            # Convert string state back to Enum for comparison if needed, or keep using string
             current_app_state = (
                 AppState(app_state)
                 if app_state in AppState._value2member_map_
@@ -81,7 +74,7 @@ class UIRenderer:
 
             if current_app_state == AppState.MAIN_MENU:
                 self._render_main_menu(
-                    is_process_running=is_process_running,
+                    is_process_running=is_process_running,  # Pass to left panel
                     status=status,
                     stats_summary=stats_summary,
                     envs=envs,
@@ -91,10 +84,10 @@ class UIRenderer:
                     last_cleanup_message_time=last_cleanup_message_time,
                     tensorboard_log_dir=tensorboard_log_dir,
                     plot_data=plot_data,
-                    update_progress_details=update_progress_details,
+                    update_progress_details=update_progress_details,  # Pass to left panel
                     app_state=app_state,
                     agent_param_count=agent_param_count,
-                    worker_counts=worker_counts,  # Pass worker counts
+                    worker_counts=worker_counts,  # Pass to left panel
                 )
             elif current_app_state == AppState.PLAYING:
                 if demo_env:
@@ -117,13 +110,6 @@ class UIRenderer:
                 self.overlays.render_status_message(
                     cleanup_message, last_cleanup_message_time
                 )
-
-            # Removed tooltip rendering call
-            # if (
-            #     current_app_state == AppState.MAIN_MENU
-            #     and not cleanup_confirmation_active
-            # ):
-            #     self.tooltips.render_tooltip()
 
             pygame.display.flip()
 
@@ -153,9 +139,9 @@ class UIRenderer:
         update_progress_details: Dict[str, Any],
         app_state: str,
         agent_param_count: int,
-        worker_counts: Dict[str, int],  # Added worker_counts
+        worker_counts: Dict[str, int],
     ):
-        """Renders the main training dashboard view."""
+        """Renders the main dashboard view."""
         self.screen.fill(VisConfig.BLACK)
         current_width, current_height = self.screen.get_size()
         left_panel_ratio = max(0.1, min(0.9, self.vis_config.LEFT_PANEL_RATIO))
@@ -171,27 +157,27 @@ class UIRenderer:
 
         self.left_panel.render(
             panel_width=lp_width,
-            is_process_running=is_process_running,
+            is_process_running=is_process_running,  # Pass for potential future use
             status=status,
             stats_summary=stats_summary,
             tensorboard_log_dir=tensorboard_log_dir,
             plot_data=plot_data,
             app_state=app_state,
-            update_progress_details=update_progress_details,
+            update_progress_details=update_progress_details,  # Pass for potential NN progress
             agent_param_count=agent_param_count,
-            worker_counts=worker_counts,  # Pass worker counts
+            worker_counts=worker_counts,  # Pass for potential future use
         )
-        self.game_area.render(
-            envs=envs,
-            num_envs=num_envs,
-            env_config=env_config,
-            panel_width=ga_width,
-            panel_x_offset=lp_width,
-        )
+        # Render game area only if width is sufficient
+        if ga_width > 0:
+            self.game_area.render(
+                envs=envs,  # Pass envs for visualization
+                num_envs=num_envs,  # Pass num_envs for layout
+                env_config=env_config,
+                panel_width=ga_width,
+                panel_x_offset=lp_width,
+            )
 
-    def _render_initializing_screen(
-        self, status_message: str = "Initializing RL Components..."
-    ):
+    def _render_initializing_screen(self, status_message: str = "Initializing..."):
         self._render_simple_message(status_message, VisConfig.WHITE)
 
     def _render_error_screen(self, status_message: str):

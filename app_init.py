@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING, List, Optional, Dict, Any
 from config import (
     VisConfig,
     EnvConfig,
-    PPOConfig,
+    # Removed PPOConfig
     RNNConfig,
     ModelConfig,
     StatsConfig,
-    RewardConfig,
+    # Removed RewardConfig
     TensorBoardConfig,
     DemoConfig,
-    ObsNormConfig,
+    # Removed ObsNormConfig
     TransformerConfig,
     RANDOM_SEED,
     BASE_CHECKPOINT_DIR,
@@ -24,21 +24,22 @@ from config import (
     DEVICE,
 )
 from environment.game_state import GameState
-from agent.ppo_agent import PPOAgent
+
+# Removed PPOAgent import
+# from agent.ppo_agent import PPOAgent
 from stats.stats_recorder import StatsRecorderBase
 from ui.renderer import UIRenderer
 from ui.input_handler import InputHandler
-from init.rl_components_ppo import (
-    initialize_envs,
-    initialize_agent,
-    initialize_stats_recorder,
-)
+
+# Removed init.rl_components_ppo import
 from training.checkpoint_manager import CheckpointManager
-from training.rollout_collector import RolloutCollector
+
+# Removed RolloutCollector import
 from app_state import AppState
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
+    from agent.base_agent import BaseAgent  # Hypothetical base class for NN agent
 
 
 class AppInitializer:
@@ -46,35 +47,33 @@ class AppInitializer:
 
     def __init__(self, app: "MainApp"):
         self.app = app
-        # Config instances (can be accessed via app as well)
+        # Config instances
         self.vis_config = app.vis_config
         self.env_config = app.env_config
-        self.ppo_config = app.ppo_config
+        # Removed self.ppo_config
         self.rnn_config = RNNConfig()
-        # --- Access the stored instance from MainApp ---
         self.train_config = app.train_config_instance
-        # --- End Access ---
         self.model_config = ModelConfig()
         self.stats_config = StatsConfig()
         self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
-        self.reward_config = RewardConfig()
-        self.obs_norm_config = ObsNormConfig()
+        # Removed self.reward_config
+        # Removed self.obs_norm_config
         self.transformer_config = TransformerConfig()
 
         # Components to be initialized
-        self.envs: List[GameState] = []
-        self.agent: Optional[PPOAgent] = None
+        self.envs: List[GameState] = []  # Keep for potential multi-env display
+        self.agent: Optional["BaseAgent"] = None  # Agent is now the NN
         self.stats_recorder: Optional[StatsRecorderBase] = None
         self.demo_env: Optional[GameState] = None
         self.agent_param_count: int = 0
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.rollout_collector: Optional[RolloutCollector] = None
+        # Removed self.rollout_collector
 
     def initialize_all(self, is_reinit: bool = False):
         """Initializes all core components."""
         try:
-            # --- GPU Memory Info ---
+            # GPU Memory Info (Keep)
             if self.app.device.type == "cuda":
                 try:
                     self.app.total_gpu_memory_bytes = torch.cuda.get_device_properties(
@@ -86,12 +85,13 @@ class AppInitializer:
                 except Exception as e:
                     print(f"Warning: Could not get total GPU memory: {e}")
 
-            # --- Renderer and Initial Render ---
+            # Renderer and Initial Render (Keep)
             if not is_reinit:
                 self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
+                # Adapt render_all call later if needed
                 self.app.renderer.render_all(
                     app_state=self.app.app_state.value,
-                    is_process_running=self.app.is_process_running,
+                    is_process_running=self.app.is_process_running,  # is_process_running might mean MCTS/Training now
                     status=self.app.status,
                     stats_summary={},
                     envs=[],
@@ -103,28 +103,34 @@ class AppInitializer:
                     tensorboard_log_dir=None,
                     plot_data={},
                     demo_env=None,
-                    update_progress_details={},
+                    update_progress_details={},  # Keep for potential NN training progress
                     agent_param_count=0,
+                    # worker_counts={}, # Remove worker counts for now
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
 
-            # --- RL Components ---
+            # Initialize "RL" components (NN, Stats, Checkpoint Manager)
             self.initialize_rl_components(
                 is_reinit=is_reinit, checkpoint_to_load=self.app.checkpoint_to_load
             )
 
-            # --- Demo Env and Input Handler ---
+            # Demo Env and Input Handler (Keep)
             if not is_reinit:
                 self.initialize_demo_env()
                 self.initialize_input_handler()
 
-            if self.agent:
-                self.agent_param_count = sum(
-                    p.numel()
-                    for p in self.agent.network.parameters()
-                    if p.requires_grad
-                )
+            # Calculate NN parameter count if agent exists
+            if self.agent and hasattr(self.agent, "network"):
+                try:
+                    self.agent_param_count = sum(
+                        p.numel()
+                        for p in self.agent.network.parameters()
+                        if p.requires_grad
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not calculate agent parameters: {e}")
+                    self.agent_param_count = 0
 
         except Exception as init_err:
             print(f"FATAL ERROR during component initialization: {init_err}")
@@ -144,75 +150,95 @@ class AppInitializer:
     def initialize_rl_components(
         self, is_reinit: bool = False, checkpoint_to_load: Optional[str] = None
     ):
-        """Initializes RL components: Envs, Agent, Stats, Collector, CheckpointManager."""
-        print(f"Initializing RL components (PPO)... Re-init: {is_reinit}")
+        """Initializes NN Agent, Stats Recorder, Checkpoint Manager."""
+        print(f"Initializing AlphaZero components... Re-init: {is_reinit}")
         start_time = time.time()
         try:
-            self.envs = initialize_envs(self.env_config.NUM_ENVS, self.env_config)
-            self.agent = initialize_agent(
-                model_config=self.model_config,
-                ppo_config=self.ppo_config,
-                rnn_config=self.rnn_config,
-                env_config=self.env_config,
-                transformer_config=self.transformer_config,
-                device=self.app.device,
-            )
-            self.stats_recorder = initialize_stats_recorder(
-                stats_config=self.stats_config,
-                tb_config=self.tensorboard_config,
-                config_dict=self.app.config_dict,
-                agent=self.agent,
-                env_config=self.env_config,
-                rnn_config=self.rnn_config,
-                transformer_config=self.transformer_config,
-                is_reinit=is_reinit,
-            )
-            if self.stats_recorder is None:
-                raise RuntimeError("Stats Recorder init failed.")
+            # Initialize Envs (only needed for visualization now)
+            # self.envs = initialize_envs(self.env_config.NUM_ENVS, self.env_config) # Removed multi-env init
+            self.envs = []  # No parallel envs needed for core logic now
 
+            # --- Initialize Agent (Neural Network) ---
+            # Replace with AlphaZero NN initialization later
+            # For now, set agent to None or a placeholder
+            self.agent = None  # Placeholder - Initialize AlphaZero NN here later
+            print("Agent (NN) initialization SKIPPED (placeholder).")
+            # Example placeholder for future NN init:
+            # self.agent = initialize_alphazero_agent(
+            #     model_config=self.model_config,
+            #     rnn_config=self.rnn_config,
+            #     env_config=self.env_config,
+            #     transformer_config=self.transformer_config,
+            #     device=self.app.device,
+            # )
+            # --- End Agent Init ---
+
+            # --- Initialize Stats Recorder ---
+            # Adapt initialize_stats_recorder if needed (e.g., remove PPO hparams)
+            # Need to create a simplified version or adapt existing one
+            # For now, assume it's adapted or create a placeholder
+            try:
+                from init.stats_init import (
+                    initialize_stats_recorder,
+                )  # Hypothetical new init function
+
+                self.stats_recorder = initialize_stats_recorder(
+                    stats_config=self.stats_config,
+                    tb_config=self.tensorboard_config,
+                    config_dict=self.app.config_dict,
+                    # Pass agent=None if NN not ready, or pass the NN agent
+                    agent=self.agent,
+                    env_config=self.env_config,
+                    rnn_config=self.rnn_config,  # Keep for potential NN config logging
+                    transformer_config=self.transformer_config,  # Keep for potential NN config logging
+                    is_reinit=is_reinit,
+                )
+            except ImportError:
+                print(
+                    "Warning: init.stats_init.initialize_stats_recorder not found. Skipping stats recorder init."
+                )
+                self.stats_recorder = None  # Fallback
+
+            if self.stats_recorder is None:
+                print("Warning: Stats Recorder initialization failed or skipped.")
+                # Decide if this is critical - maybe allow running without stats?
+                # raise RuntimeError("Stats Recorder init failed.")
+            # --- End Stats Recorder Init ---
+
+            # --- Initialize Checkpoint Manager ---
+            # Checkpoint manager now handles NN agent state and stats aggregator state
             self.checkpoint_manager = CheckpointManager(
+                # Pass the NN agent (or None if not ready)
                 agent=self.agent,
-                stats_aggregator=self.stats_recorder.aggregator,
+                # Pass stats aggregator if it exists
+                stats_aggregator=getattr(self.stats_recorder, "aggregator", None),
                 base_checkpoint_dir=BASE_CHECKPOINT_DIR,
                 run_checkpoint_dir=get_run_checkpoint_dir(),
                 load_checkpoint_path_config=checkpoint_to_load,
                 device=self.app.device,
-                obs_rms_dict=None,  # Will be set after collector init
+                # obs_rms_dict=None, # Removed Obs RMS
             )
+            # --- End Checkpoint Manager Init ---
 
-            self.rollout_collector = RolloutCollector(
-                envs=self.envs,
-                agent=self.agent,
-                stats_recorder=self.stats_recorder,
-                env_config=self.env_config,
-                ppo_config=self.ppo_config,
-                rnn_config=self.rnn_config,
-                reward_config=self.reward_config,
-                tb_config=self.tensorboard_config,
-                obs_norm_config=self.obs_norm_config,
-                device=self.app.device,
-            )
-
-            # Pass the initialized RMS dict from collector to checkpoint manager
-            self.checkpoint_manager.obs_rms_dict = (
-                self.rollout_collector.get_obs_rms_dict()
-            )
-
+            # --- Load Checkpoint ---
             if self.checkpoint_manager.get_checkpoint_path_to_load():
-                self.checkpoint_manager.load_checkpoint()
+                self.checkpoint_manager.load_checkpoint()  # Loads NN state and stats state
+                # Get initial step/episode count from loaded stats
                 loaded_global_step, initial_episode_count = (
                     self.checkpoint_manager.get_initial_state()
                 )
-                # Sync collector's episode count (global step is managed by aggregator)
-                self.rollout_collector.state.episode_count = initial_episode_count
-                # Aggregator state is loaded within checkpoint_manager.load_checkpoint()
+                # Sync episode count if needed (e.g., if MCTS tracks episodes)
+                # self.mcts_manager.state.episode_count = initial_episode_count # Example
+            # --- End Load Checkpoint ---
 
-            print(f"RL components initialized in {time.time() - start_time:.2f}s")
+            print(
+                f"AlphaZero components initialized in {time.time() - start_time:.2f}s"
+            )
 
         except Exception as e:
-            print(f"Error during RL component initialization: {e}")
+            print(f"Error during AlphaZero component initialization: {e}")
             traceback.print_exc()
-            raise e
+            raise e  # Re-raise to be caught by initialize_all
 
     def initialize_demo_env(self):
         """Initializes the separate environment for demo/debug mode."""
@@ -235,7 +261,7 @@ class AppInitializer:
         self.app.input_handler = InputHandler(
             screen=self.app.screen,
             renderer=self.app.renderer,
-            toggle_training_run_cb=self.app.logic.toggle_training_run,
+            # Removed toggle_training_run_cb
             request_cleanup_cb=self.app.logic.request_cleanup,
             cancel_cleanup_cb=self.app.logic.cancel_cleanup,
             confirm_cleanup_cb=self.app.logic.confirm_cleanup,
@@ -250,7 +276,6 @@ class AppInitializer:
         )
         if self.app.renderer and self.app.renderer.left_panel:
             self.app.renderer.left_panel.input_handler = self.app.input_handler
-            # Also set the reference in the button renderer if needed
             if hasattr(self.app.renderer.left_panel, "button_status_renderer"):
                 self.app.renderer.left_panel.button_status_renderer.input_handler_ref = (
                     self.app.input_handler
@@ -265,7 +290,6 @@ class AppInitializer:
             print("[AppInitializer] Stats recorder exists, attempting close...")
             try:
                 if hasattr(self.stats_recorder, "close"):
-                    # Pass the is_cleanup flag down
                     self.stats_recorder.close(is_cleanup=is_cleanup)
                     print("[AppInitializer] stats_recorder.close() executed.")
                 else:

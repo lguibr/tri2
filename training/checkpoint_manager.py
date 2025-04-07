@@ -1,14 +1,11 @@
-# File: training/checkpoint_manager.py
-# File: training/checkpoint_manager.py
 import os
 import torch
 import traceback
 import re
 import time
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Tuple
 import pickle
 
-from agent.ppo_agent import PPOAgent
 from utils.running_mean_std import RunningMeanStd
 from stats.aggregator import StatsAggregator  # Updated import path
 from config.general import TOTAL_TRAINING_STEPS
@@ -124,7 +121,7 @@ class CheckpointManager:
 
     def __init__(
         self,
-        agent: PPOAgent,
+        # agent: PPOAgent,
         stats_aggregator: StatsAggregator,  # Use updated import
         base_checkpoint_dir: str,
         run_checkpoint_dir: str,
@@ -132,7 +129,7 @@ class CheckpointManager:
         device: torch.device,
         obs_rms_dict: Optional[Dict[str, RunningMeanStd]] = None,
     ):
-        self.agent = agent
+        # self.agent = agent
         self.stats_aggregator = stats_aggregator
         self.base_checkpoint_dir = base_checkpoint_dir
         self.run_checkpoint_dir = run_checkpoint_dir

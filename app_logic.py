@@ -1,5 +1,4 @@
 # File: app_logic.py
-# File: app_logic.py
 import pygame
 import time
 import traceback
@@ -20,64 +19,33 @@ class AppLogic:
         self.app = app
 
     def check_initial_completion_status(self):
-        """Checks if training was already complete upon loading."""
-        if (
-            self.app.initializer.checkpoint_manager
-            and self.app.initializer.checkpoint_manager.training_target_step > 0
-            and self.app.initializer.checkpoint_manager.global_step
-            >= self.app.initializer.checkpoint_manager.training_target_step
-        ):
-            self.app.status = "Training Complete"
-            print(
-                f"Training already completed ({self.app.initializer.checkpoint_manager.global_step:,}/{self.app.initializer.checkpoint_manager.training_target_step:,} steps). Ready."
-            )
-            # Don't automatically pause here, let the user decide
+        """Checks if training target (e.g., games played) was met upon loading."""
+        # This needs adaptation based on how AlphaZero training progress is tracked.
+        # For now, assume completion isn't automatically checked this way.
+        # if (
+        #     self.app.initializer.checkpoint_manager
+        #     and self.app.initializer.checkpoint_manager.training_target_step > 0 # Target might be games now
+        #     and self.app.initializer.checkpoint_manager.global_step # Step might be games now
+        #     >= self.app.initializer.checkpoint_manager.training_target_step
+        # ):
+        #     self.app.status = "Training Complete" # Or "Target Reached"
+        #     print(
+        #         f"Training target already reached ({self.app.initializer.checkpoint_manager.global_step:,}/{self.app.initializer.checkpoint_manager.training_target_step:,}). Ready."
+        #     )
+        pass  # Keep simple for now
 
     def update_status_and_check_completion(self):
-        """Updates the status text based on worker state and checks for training completion."""
-        if (
-            not self.app.initializer.stats_recorder
-            or not hasattr(self.app.initializer.stats_recorder, "aggregator")
-            or not self.app.initializer.checkpoint_manager
-        ):
-            return
+        """Updates the status text based on application state."""
+        # Removed PPO-specific status logic (Collecting, Updating)
+        # Removed completion check based on PPO steps
 
-        current_step = getattr(
-            self.app.initializer.stats_recorder.aggregator.storage,
-            "current_global_step",
-            0,  # Access via storage
-        )
-        target_step = self.app.initializer.checkpoint_manager.training_target_step
-
-        if target_step > 0 and current_step >= target_step:
-            if not self.app.status.startswith("Training Complete"):
-                print(
-                    f"\n--- Training Complete ({current_step:,}/{target_step:,} steps) ---"
-                )
-                self.app.status = "Training Complete"
-            elif self.app.is_process_running and self.app.status == "Training Complete":
-                self.app.status = "Training Complete (Running)"
-            return
-
-        # If not complete, update status based on running state
-        if self.app.is_process_running:
-            # Check if update progress details indicate an active update
-            is_updating = (
-                hasattr(self.app, "update_progress_details")
-                and self.app.update_progress_details.get("current_epoch", 0) > 0
-            )
-            if is_updating:
-                self.app.status = "Updating Agent"
-            elif self.app.experience_queue.qsize() > 0:  # Check queue as fallback
-                self.app.status = "Updating Agent"
-            else:
-                self.app.status = "Collecting Experience"
-        elif self.app.app_state == AppState.MAIN_MENU:
+        # Update status based on AppState
+        if self.app.app_state == AppState.MAIN_MENU:
             if self.app.cleanup_confirmation_active:
                 self.app.status = "Confirm Cleanup"
-            elif not self.app.status.startswith(
-                "Training Complete"
-            ):  # Avoid overwriting completion
+            else:
+                # Check if training is "complete" based on new criteria if needed
+                # For now, just set to Ready if not confirming cleanup
                 self.app.status = "Ready"
         elif self.app.app_state == AppState.PLAYING:
             self.app.status = "Playing Demo"
@@ -85,70 +53,23 @@ class AppLogic:
             self.app.status = "Debugging Grid"
         elif self.app.app_state == AppState.INITIALIZING:
             self.app.status = "Initializing..."
+        elif self.app.app_state == AppState.ERROR:
+            # Status should already be set by the error handler
+            pass
 
-    def toggle_training_run(self):
-        """Starts or stops the worker threads."""
-        print(
-            f"[AppLogic] toggle_training_run called. Current state: {self.app.app_state.value}, is_process_running: {self.app.is_process_running}"
-        )
-        if self.app.app_state != AppState.MAIN_MENU:
-            print(
-                f"[AppLogic] Cannot toggle run outside MainMenu (State: {self.app.app_state.value})."
-            )
-            return
-        if (
-            not self.app.worker_manager.env_runner_thread
-            or not self.app.worker_manager.training_worker_thread
-        ):
-            print("[AppLogic] Cannot toggle run: Workers not initialized.")
-            return
-
-        if not self.app.is_process_running:
-            print("[AppLogic] Attempting to START workers...")
-            print("[AppLogic] Setting is_process_running = True")
-            self.app.is_process_running = True
-            print(
-                f"[AppLogic] Clearing pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )
-            self.app.pause_event.clear()
-            print(
-                f"[AppLogic] Pause event cleared (New is_set: {self.app.pause_event.is_set()})."
-            )
-            # Update status based on completion
-            self.update_status_and_check_completion()  # This will set status correctly
-            print("[AppLogic] Workers should start running.")
-        else:
-            print("[AppLogic] Attempting to PAUSE workers...")
-            print("[AppLogic] Setting is_process_running = False")
-            self.app.is_process_running = False
-            print(
-                f"[AppLogic] Setting pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )
-            self.app.pause_event.set()
-            print(
-                f"[AppLogic] Pause event set (New is_set: {self.app.pause_event.is_set()})."
-            )
-            self.try_save_checkpoint()
-            self.check_initial_completion_status()  # Re-check completion status on pause
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
-            self.app.app_state = AppState.MAIN_MENU
-            print("[AppLogic] Workers should pause.")
+    # Removed toggle_training_run method
 
     def request_cleanup(self):
-        if self.app.is_process_running:
-            print("Cannot request cleanup while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.app_state != AppState.MAIN_MENU:
             print("Cannot request cleanup outside MainMenu.")
             return
         self.app.cleanup_confirmation_active = True
+        self.app.status = "Confirm Cleanup"  # Update status
         print("Cleanup requested. Confirm action.")
 
     def start_demo_mode(self):
-        if self.app.is_process_running:
-            print("Cannot start demo mode while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.initializer.demo_env is None:
             print("Cannot start demo mode: Demo environment failed to initialize.")
             return
@@ -156,15 +77,13 @@ class AppLogic:
             print("Cannot start demo mode outside MainMenu.")
             return
         print("Entering Demo Mode...")
-        self.try_save_checkpoint()
+        self.try_save_checkpoint()  # Save NN weights before switching mode?
         self.app.app_state = AppState.PLAYING
         self.app.status = "Playing Demo"
         self.app.initializer.demo_env.reset()
 
     def start_debug_mode(self):
-        if self.app.is_process_running:
-            print("Cannot start debug mode while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.initializer.demo_env is None:
             print("Cannot start debug mode: Demo environment failed to initialize.")
             return
@@ -172,7 +91,7 @@ class AppLogic:
             print("Cannot start debug mode outside MainMenu.")
             return
         print("Entering Debug Mode...")
-        self.try_save_checkpoint()
+        self.try_save_checkpoint()  # Save NN weights before switching mode?
         self.app.app_state = AppState.DEBUG
         self.app.status = "Debugging Grid"
         self.app.initializer.demo_env.reset()
@@ -181,18 +100,15 @@ class AppLogic:
         if self.app.app_state == AppState.DEBUG:
             print("Exiting Debug Mode...")
             self.app.app_state = AppState.MAIN_MENU
-            # --- Ensure process is marked as stopped/paused ---
-            self.app.is_process_running = False
-            self.app.pause_event.set()
-            # --- End Ensure ---
-            self.check_initial_completion_status()  # Check completion status on exit
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
+            # Removed setting is_process_running and pause_event
+            self.check_initial_completion_status()  # Re-check status
+            self.app.status = "Ready"  # Set status back to Ready
 
     def cancel_cleanup(self):
         self.app.cleanup_confirmation_active = False
         self.app.cleanup_message = "Cleanup cancelled."
         self.app.last_cleanup_message_time = time.time()
+        self.app.status = "Ready"  # Set status back
         print("Cleanup cancelled by user.")
 
     def confirm_cleanup(self):
@@ -206,13 +122,14 @@ class AppLogic:
             self.app.app_state = AppState.ERROR
         finally:
             self.app.cleanup_confirmation_active = False
+            # Status is set within _cleanup_data or error handling
             print(
                 f"Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
             )
 
     def exit_app(self) -> bool:
         print("Exit requested.")
-        self.app.stop_event.set()
+        self.app.stop_event.set()  # Keep stop event for main loop exit
         return False
 
     def exit_demo_mode(self):
@@ -221,13 +138,9 @@ class AppLogic:
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.deselect_dragged_shape()
             self.app.app_state = AppState.MAIN_MENU
-            # --- Ensure process is marked as stopped/paused ---
-            self.app.is_process_running = False
-            self.app.pause_event.set()
-            # --- End Ensure ---
-            self.check_initial_completion_status()  # Check completion status on exit
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
+            # Removed setting is_process_running and pause_event
+            self.check_initial_completion_status()  # Re-check status
+            self.app.status = "Ready"  # Set status back to Ready
 
     def handle_demo_mouse_motion(self, mouse_pos: Tuple[int, int]):
         if (
@@ -295,21 +208,21 @@ class AppLogic:
                 demo_env.toggle_triangle_debug(row, col)
 
     def _cleanup_data(self):
-        """Deletes current run's checkpoint and re-initializes."""
+        """Deletes current run's checkpoint and re-initializes components."""
         from config.general import get_run_checkpoint_dir  # Local import
 
         print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
-        self.app.pause_event.set()  # Ensure workers are paused if running
-        self.app.is_process_running = False
+        # Removed pause_event setting and is_process_running
         self.app.app_state = AppState.INITIALIZING
         self.app.status = "Cleaning"
         messages = []
 
+        # Render cleaning status
         if self.app.renderer:
             try:
                 self.app.renderer.render_all(
                     app_state=self.app.app_state.value,
-                    is_process_running=False,
+                    is_process_running=False,  # No process running now
                     status=self.app.status,
                     stats_summary={},
                     envs=[],
@@ -325,29 +238,27 @@ class AppLogic:
                     agent_param_count=getattr(
                         self.app.initializer, "agent_param_count", 0
                     ),
-                    worker_counts={
-                        "env_runners": 0,
-                        "trainers": 0,
-                    },  # Pass default counts
+                    # worker_counts={}, # Removed worker counts
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
             except Exception as render_err:
                 print(f"Warning: Error rendering during cleanup start: {render_err}")
 
-        # --- Stop existing worker threads FIRST ---
-        print("[Cleanup] Stopping existing worker threads...")
-        self.app.worker_manager.stop_worker_threads()  # This calls join()
+        # --- Stop existing worker threads (if any) ---
+        # Keep this structure in case new workers (MCTS/NN) are added later
+        print("[Cleanup] Stopping existing worker threads (if any)...")
+        self.app.worker_manager.stop_worker_threads()
         print("[Cleanup] Existing worker threads stopped.")
         # --- End Stop Workers ---
 
-        # --- Close Stats Recorder AFTER stopping workers ---
+        # --- Close Stats Recorder ---
         print("[Cleanup] Closing stats recorder...")
-        # Pass is_cleanup=True to prevent final hparam logging during cleanup
         self.app.initializer.close_stats_recorder(is_cleanup=True)
         print("[Cleanup] Stats recorder closed.")
         # --- End Close Stats ---
 
+        # --- Delete Checkpoint Directory ---
         print("[Cleanup] Deleting agent checkpoint file/dir...")
         try:
             save_dir = get_run_checkpoint_dir()
@@ -363,48 +274,43 @@ class AppLogic:
             print(f"  - {msg}")
             messages.append(msg)
         print("[Cleanup] Checkpoint deletion attempt finished.")
+        # --- End Delete Checkpoint ---
 
         time.sleep(0.1)
-        print("[Cleanup] Re-initializing RL components...")
+        print("[Cleanup] Re-initializing components...")
         try:
-            # Re-initialize RL components (creates new agent, stats recorder etc.)
+            # Re-initialize components (NN, Stats, Checkpoint Manager)
             self.app.initializer.initialize_rl_components(
                 is_reinit=True, checkpoint_to_load=None
             )
-            print("[Cleanup] RL components re-initialized.")
+            print("[Cleanup] Components re-initialized.")
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
                 print("[Cleanup] Demo env reset.")
 
-            # --- Set pause event BEFORE starting new workers ---
-            print("[Cleanup] Setting pause event before starting new workers...")
-            self.app.pause_event.set()
-            # --- End Set Pause ---
-
-            # Start NEW worker threads with the re-initialized components
-            print("[Cleanup] Starting new worker threads...")
+            # --- Start new worker threads (if any) ---
+            # Keep this structure for future workers
+            print("[Cleanup] Starting new worker threads (if any)...")
             self.app.worker_manager.start_worker_threads()
             print("[Cleanup] New worker threads started.")
+            # --- End Start Workers ---
 
-            print(
-                "[Cleanup] RL components re-initialization and worker start successful."
-            )
-            messages.append("RL components re-initialized.")
+            print("[Cleanup] Component re-initialization and worker start successful.")
+            messages.append("Components re-initialized.")
 
-            # --- Ensure state is PAUSED after cleanup ---
-            self.app.is_process_running = False
-            # self.app.pause_event.set() # Moved before starting workers
+            # --- Set state after cleanup ---
+            # Removed is_process_running and pause_event
             self.app.status = "Ready"
             self.app.app_state = AppState.MAIN_MENU
-            print("[Cleanup] Application state set to MAIN_MENU (Paused).")
-            # --- End Ensure Paused State ---
+            print("[Cleanup] Application state set to MAIN_MENU.")
+            # --- End Set State ---
 
         except Exception as e:
-            print(f"FATAL ERROR during RL re-initialization after cleanup: {e}")
+            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
             traceback.print_exc()
             self.app.status = "Error: Re-init Failed"
             self.app.app_state = AppState.ERROR
-            messages.append("ERROR RE-INITIALIZING RL COMPONENTS!")
+            messages.append("ERROR RE-INITIALIZING COMPONENTS!")
             if self.app.renderer:
                 try:
                     self.app.renderer._render_error_screen(self.app.status)
@@ -418,30 +324,29 @@ class AppLogic:
         )
 
     def try_save_checkpoint(self):
-        """Saves checkpoint if paused and checkpoint manager exists."""
+        """Saves checkpoint (e.g., NN weights) if in main menu."""
+        # Removed check for is_process_running
         if (
             self.app.app_state == AppState.MAIN_MENU
-            and not self.app.is_process_running
             and self.app.initializer.checkpoint_manager
-            and self.app.initializer.stats_recorder  # Ensure stats recorder exists
-            and hasattr(
-                self.app.initializer.stats_recorder, "aggregator"
-            )  # Ensure aggregator exists
+            and self.app.initializer.stats_recorder  # Check if stats exist
+            and hasattr(self.app.initializer.stats_recorder, "aggregator")
         ):
-            print("Saving checkpoint on pause...")
+            print("Saving checkpoint...")
             try:
+                # Get step/episode count from aggregator
                 current_step = getattr(
-                    self.app.initializer.stats_recorder.aggregator.storage,  # Access via storage
+                    self.app.initializer.stats_recorder.aggregator.storage,
                     "current_global_step",
                     0,
-                )
-                target_step = (
-                    self.app.initializer.checkpoint_manager.training_target_step
                 )
                 episode_count = getattr(
                     self.app.initializer.stats_recorder.aggregator.storage,
                     "total_episodes",
-                    0,  # Access via storage
+                    0,
+                )
+                target_step = getattr(
+                    self.app.initializer.checkpoint_manager, "training_target_step", 0
                 )
 
                 self.app.initializer.checkpoint_manager.save_checkpoint(
@@ -451,35 +356,36 @@ class AppLogic:
                     is_final=False,
                 )
             except Exception as e:
-                print(f"Error saving checkpoint on pause: {e}")
-                traceback.print_exc()  # Print traceback for debugging
+                print(f"Error saving checkpoint: {e}")
+                traceback.print_exc()
 
     def save_final_checkpoint(self):
-        """Saves the final checkpoint if conditions are met."""
+        """Saves the final checkpoint (e.g., NN weights)."""
         if (
             self.app.initializer.checkpoint_manager
             and self.app.initializer.stats_recorder
             and hasattr(self.app.initializer.stats_recorder, "aggregator")
         ):
-            current_step = getattr(
-                self.app.initializer.stats_recorder.aggregator.storage,
-                "current_global_step",
-                0,  # Access via storage
-            )
-            target_step = getattr(
-                self.app.initializer.checkpoint_manager, "training_target_step", 0
-            )
-            is_complete = target_step > 0 and current_step >= target_step
             save_on_exit = (
                 self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
-            )  # Always save unless cleaning or error
+            )
 
             if save_on_exit:
                 print("Performing final checkpoint save...")
                 try:
+                    current_step = getattr(
+                        self.app.initializer.stats_recorder.aggregator.storage,
+                        "current_global_step",
+                        0,
+                    )
                     episode_count = getattr(
-                        self.app.initializer.stats_recorder.aggregator.storage,  # Access via storage
+                        self.app.initializer.stats_recorder.aggregator.storage,
                         "total_episodes",
+                        0,
+                    )
+                    target_step = getattr(
+                        self.app.initializer.checkpoint_manager,
+                        "training_target_step",
                         0,
                     )
                     self.app.initializer.checkpoint_manager.save_checkpoint(
@@ -490,6 +396,6 @@ class AppLogic:
                     )
                 except Exception as final_save_err:
                     print(f"Error during final checkpoint save: {final_save_err}")
-                    traceback.print_exc()  # Print traceback for debugging
+                    traceback.print_exc()
             else:
                 print("Skipping final checkpoint save.")

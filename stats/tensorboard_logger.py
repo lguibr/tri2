@@ -11,8 +11,13 @@ import threading
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
 from .simple_stats_recorder import SimpleStatsRecorder
-from config import TensorBoardConfig, EnvConfig, RNNConfig
-from agent.networks.agent_network import ActorCriticNetwork
+from config import (
+    TensorBoardConfig,
+    EnvConfig,
+    RNNConfig,
+)  # Keep RNNConfig for potential future use
+
+# Removed ActorCriticNetwork import
 
 # Import helper modules
 from .tb_log_utils import format_image_for_tb
@@ -35,18 +40,18 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         console_recorder: SimpleStatsRecorder,
         log_dir: str,
         hparam_dict: Optional[Dict[str, Any]] = None,
-        model_for_graph: Optional[ActorCriticNetwork] = None,
-        dummy_input_for_graph: Optional[Tuple] = None,
+        model_for_graph: Optional[torch.nn.Module] = None,  # Changed type hint
+        dummy_input_for_graph: Optional[Any] = None,  # Changed type hint
         histogram_log_interval: int = TensorBoardConfig.HISTOGRAM_LOG_FREQ,
         image_log_interval: int = TensorBoardConfig.IMAGE_LOG_FREQ,
-        env_config: Optional[EnvConfig] = None,  # Keep for context if needed by helpers
-        rnn_config: Optional[RNNConfig] = None,  # Keep for context if needed by helpers
+        env_config: Optional[EnvConfig] = None,
+        rnn_config: Optional[RNNConfig] = None,
     ):
         self.aggregator = aggregator
         self.console_recorder = console_recorder
         self.log_dir = log_dir
         self.writer: Optional[SummaryWriter] = None
-        self._lock = threading.Lock()  # Lock for writer and counters
+        self._lock = threading.Lock()
 
         try:
             self.writer = SummaryWriter(log_dir=self.log_dir)
@@ -73,7 +78,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print(f"FATAL: Error initializing TensorBoard SummaryWriter: {e}")
             traceback.print_exc()
             self.writer = None
-            # Nullify helpers if writer failed
             self.scalar_logger = None
             self.histogram_logger = None
             self.image_logger = None
@@ -100,9 +104,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         g_step = (
             global_step
             if global_step is not None
-            else getattr(
-                self.aggregator.storage, "current_global_step", 0
-            )  # Corrected access
+            else getattr(self.aggregator.storage, "current_global_step", 0)
         )
 
         if self.scalar_logger:
@@ -127,13 +129,11 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         )
 
     def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats to TensorBoard and delegates to console recorder."""
+        """Records step stats (e.g., NN training step) to TensorBoard and console."""
         update_info = self.aggregator.record_step(step_data)
         g_step = step_data.get(
             "global_step",
-            getattr(
-                self.aggregator.storage, "current_global_step", 0
-            ),  # Corrected access
+            getattr(self.aggregator.storage, "current_global_step", 0),
         )
 
         if self.scalar_logger:
@@ -141,17 +141,17 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 g_step, step_data, update_info, self.aggregator
             )
 
-        # Check if histogram/image logging should be triggered (based on rollouts/updates)
-        log_histograms = False
-        log_images = False
-        if "policy_loss" in step_data:  # Assume update happened
+        # Increment histogram/image counters if an update occurred
+        # Check for a key indicating an NN update, e.g., 'policy_loss' or 'value_loss'
+        if "policy_loss" in step_data or "value_loss" in step_data:
             if self.histogram_logger:
-                log_histograms = self.histogram_logger.should_log(g_step)
+                self.histogram_logger.increment_rollout_counter()
+                if self.histogram_logger.should_log(g_step):
+                    self.histogram_logger.reset_rollout_counter()  # Reset only if logged
             if self.image_logger:
-                log_images = self.image_logger.should_log(g_step)
-
-        # Note: Actual histogram/image data needs to be passed separately via record_histogram/record_image
-        # This method only logs scalars derived from step_data.
+                self.image_logger.increment_rollout_counter()
+                if self.image_logger.should_log(g_step):
+                    self.image_logger.reset_rollout_counter()  # Reset only if logged
 
         self.console_recorder.record_step(step_data)
 
@@ -188,28 +188,29 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             return
         with self._lock:
             try:
-                original_device = next(model.parameters()).device
+                # Ensure model is on CPU for graph tracing if needed
+                original_device = next(iter(model.parameters())).device
                 model.cpu()
-                # Simplified CPU conversion assuming tuple/tensor input
-                if isinstance(input_to_model, tuple):
+                # Convert input to CPU if it's a tensor or tuple of tensors
+                if isinstance(input_to_model, torch.Tensor):
+                    dummy_input_cpu = input_to_model.cpu()
+                elif isinstance(input_to_model, tuple):
                     dummy_input_cpu = tuple(
                         i.cpu() if isinstance(i, torch.Tensor) else i
                         for i in input_to_model
                     )
-                elif isinstance(input_to_model, torch.Tensor):
-                    dummy_input_cpu = input_to_model.cpu()
                 else:
-                    dummy_input_cpu = input_to_model  # Assume already CPU compatible
+                    dummy_input_cpu = input_to_model  # Assume compatible
 
                 self.writer.add_graph(model, dummy_input_cpu, verbose=False)
                 print("[TensorBoardStatsRecorder] Model graph logged.")
-                model.to(original_device)
+                model.to(original_device)  # Move model back
             except Exception as e:
                 print(f"Error logging model graph: {e}.")
                 traceback.print_exc()
                 try:
-                    model.to(original_device)
-                except:
+                    model.to(original_device)  # Attempt to move back even on error
+                except Exception:
                     pass
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
@@ -228,18 +229,17 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print(
                 "[TensorBoardStatsRecorder] Writer was not initialized or already closed."
             )
-            self.console_recorder.close(is_cleanup=is_cleanup)  # Pass flag
+            self.console_recorder.close(is_cleanup=is_cleanup)
             return
 
         with self._lock:
             print("[TensorBoardStatsRecorder] Acquired lock for closing.")
             try:
-                # Skip logging final hparams if this close is part of a cleanup
                 if not is_cleanup and self.hparam_logger:
                     print("[TensorBoardStatsRecorder] Logging final hparams...")
                     final_step = getattr(
                         self.aggregator.storage, "current_global_step", 0
-                    )  # Corrected access
+                    )
                     final_summary = self.get_summary(final_step)
                     self.hparam_logger.log_final_hparams_from_summary(final_summary)
                     print("[TensorBoardStatsRecorder] Final hparams logged.")
@@ -262,6 +262,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 print(
                     "[TensorBoardStatsRecorder] Releasing lock after closing attempt."
                 )
-        # Close console recorder outside the lock
-        self.console_recorder.close(is_cleanup=is_cleanup)  # Pass flag
+
+        self.console_recorder.close(is_cleanup=is_cleanup)
         print("[TensorBoardStatsRecorder] Close method finished.")

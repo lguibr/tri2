@@ -382,22 +382,20 @@ class AppLogic:
                     f"\n--- Training Complete ({current_step:,}/{target_step:,} steps) ---"
                 )
                 self.app.status = "Training Complete"
-                # Don't pause automatically. If it was running, let it continue running
-                # until the user explicitly stops it.
-                # if self.app.is_process_running:
-                #     print("[AppLogic] Training complete, setting pause event.") # DEBUG
-                #     self.app.pause_event.set() # NO - let user stop
-                #     self.app.is_process_running = False # NO - let user stop
-                #     self.try_save_checkpoint()
-                #     self.app.app_state = AppState.MAIN_MENU
-            # If already complete, keep the status, potentially adding "(Running)" if needed
             elif self.app.is_process_running and self.app.status == "Training Complete":
                 self.app.status = "Training Complete (Running)"
             return
 
         # If not complete, update status based on running state
         if self.app.is_process_running:
-            if self.app.experience_queue.qsize() > 0:
+            # Check if update progress details indicate an active update
+            is_updating = (
+                hasattr(self.app, "update_progress_details")
+                and self.app.update_progress_details.get("current_epoch", 0) > 0
+            )
+            if is_updating:
+                self.app.status = "Updating Agent"
+            elif self.app.experience_queue.qsize() > 0:  # Check queue as fallback
                 self.app.status = "Updating Agent"
             else:
                 self.app.status = "Collecting Experience"
@@ -419,7 +417,7 @@ class AppLogic:
         """Starts or stops the worker threads."""
         print(
             f"[AppLogic] toggle_training_run called. Current state: {self.app.app_state.value}, is_process_running: {self.app.is_process_running}"
-        )  # DEBUG
+        )
         if self.app.app_state != AppState.MAIN_MENU:
             print(
                 f"[AppLogic] Cannot toggle run outside MainMenu (State: {self.app.app_state.value})."
@@ -433,48 +431,36 @@ class AppLogic:
             return
 
         if not self.app.is_process_running:
-            print("[AppLogic] Attempting to START workers...")  # DEBUG
-            # Check completion status but allow starting even if complete
-            # current_step = getattr(
-            #     self.app.initializer.stats_recorder.aggregator.storage,  # Access via storage
-            #     "current_global_step",
-            #     0,
-            # )
-            # target_step = self.app.initializer.checkpoint_manager.training_target_step
-            # if target_step > 0 and current_step >= target_step:
-            #     print("[AppLogic] Training already complete. Cannot start.") # Allow starting
-            #     self.app.status = "Training Complete"
-            #     return
-
-            print("[AppLogic] Setting is_process_running = True")  # DEBUG
+            print("[AppLogic] Attempting to START workers...")
+            print("[AppLogic] Setting is_process_running = True")
             self.app.is_process_running = True
             print(
                 f"[AppLogic] Clearing pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )  # DEBUG
+            )
             self.app.pause_event.clear()
             print(
                 f"[AppLogic] Pause event cleared (New is_set: {self.app.pause_event.is_set()})."
-            )  # DEBUG
+            )
             # Update status based on completion
             self.update_status_and_check_completion()  # This will set status correctly
-            print("[AppLogic] Workers should start running.")  # DEBUG
+            print("[AppLogic] Workers should start running.")
         else:
-            print("[AppLogic] Attempting to PAUSE workers...")  # DEBUG
-            print("[AppLogic] Setting is_process_running = False")  # DEBUG
+            print("[AppLogic] Attempting to PAUSE workers...")
+            print("[AppLogic] Setting is_process_running = False")
             self.app.is_process_running = False
             print(
                 f"[AppLogic] Setting pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )  # DEBUG
+            )
             self.app.pause_event.set()
             print(
                 f"[AppLogic] Pause event set (New is_set: {self.app.pause_event.is_set()})."
-            )  # DEBUG
+            )
             self.try_save_checkpoint()
             self.check_initial_completion_status()  # Re-check completion status on pause
             if not self.app.status.startswith("Training Complete"):
                 self.app.status = "Ready"
             self.app.app_state = AppState.MAIN_MENU
-            print("[AppLogic] Workers should pause.")  # DEBUG
+            print("[AppLogic] Workers should pause.")
 
     def request_cleanup(self):
         if self.app.is_process_running:
@@ -1350,6 +1336,7 @@ class MainApp:
         self.is_process_running: bool = False  # Training/collection active
         self.status: str = "Initializing..."
         self.running: bool = True  # Main loop flag
+        self.update_progress_details: Dict[str, Any] = {}  # Added attribute
 
         # --- Threading & Communication ---
         self.stop_event = threading.Event()
@@ -1492,7 +1479,24 @@ class MainApp:
                 if not self.running:
                     break
 
-            # Update Logic & State
+            # --- Fetch Update Progress Details ---
+            # Fetch details *before* updating status logic
+            if (
+                self.worker_manager.training_worker_thread
+                and self.worker_manager.training_worker_thread.is_alive()
+            ):
+                try:
+                    self.update_progress_details = (
+                        self.worker_manager.training_worker_thread.get_update_progress_details()
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not get update progress details: {e}")
+                    self.update_progress_details = {}  # Reset on error
+            else:
+                self.update_progress_details = {}  # Clear if worker not running
+            # --- End Fetch Update Progress Details ---
+
+            # Update Logic & State (uses self.update_progress_details)
             self.logic.update_status_and_check_completion()
 
             # --- Update Resource Stats ---
@@ -1516,7 +1520,7 @@ class MainApp:
                 plot_data = {}
                 stats_summary = {}
                 tb_log_dir = None
-                update_details = {}
+                # update_details = {} # Use self.update_progress_details now
                 agent_params = 0
                 worker_counts = {"env_runners": 0, "trainers": 0}
 
@@ -1538,23 +1542,6 @@ class MainApp:
                         self.initializer.stats_recorder, TensorBoardStatsRecorder
                     ):
                         tb_log_dir = self.initializer.stats_recorder.log_dir
-
-                # --- Get update progress details from worker ---
-                if (
-                    self.status == "Updating Agent"
-                    and self.worker_manager.training_worker_thread
-                    and self.worker_manager.training_worker_thread.is_alive()
-                ):
-                    try:
-                        update_details = (
-                            self.worker_manager.training_worker_thread.get_update_progress_details()
-                        )
-                    except Exception as e:
-                        logger.warning(f"Could not get update progress details: {e}")
-                        update_details = {}  # Reset on error
-                else:
-                    update_details = {}  # Clear if not updating
-                # --- End update progress details ---
 
                 # --- Get Worker Counts ---
                 if (
@@ -1586,7 +1573,7 @@ class MainApp:
                     tensorboard_log_dir=tb_log_dir,
                     plot_data=plot_data,
                     demo_env=self.initializer.demo_env,
-                    update_progress_details=update_details,  # Pass fetched details
+                    update_progress_details=self.update_progress_details,  # Pass stored details
                     agent_param_count=agent_params,
                     worker_counts=worker_counts,  # Pass worker counts
                 )
@@ -2136,22 +2123,20 @@ class AppLogic:
                     f"\n--- Training Complete ({current_step:,}/{target_step:,} steps) ---"
                 )
                 self.app.status = "Training Complete"
-                # Don't pause automatically. If it was running, let it continue running
-                # until the user explicitly stops it.
-                # if self.app.is_process_running:
-                #     print("[AppLogic] Training complete, setting pause event.") # DEBUG
-                #     self.app.pause_event.set() # NO - let user stop
-                #     self.app.is_process_running = False # NO - let user stop
-                #     self.try_save_checkpoint()
-                #     self.app.app_state = AppState.MAIN_MENU
-            # If already complete, keep the status, potentially adding "(Running)" if needed
             elif self.app.is_process_running and self.app.status == "Training Complete":
                 self.app.status = "Training Complete (Running)"
             return
 
         # If not complete, update status based on running state
         if self.app.is_process_running:
-            if self.app.experience_queue.qsize() > 0:
+            # Check if update progress details indicate an active update
+            is_updating = (
+                hasattr(self.app, "update_progress_details")
+                and self.app.update_progress_details.get("current_epoch", 0) > 0
+            )
+            if is_updating:
+                self.app.status = "Updating Agent"
+            elif self.app.experience_queue.qsize() > 0:  # Check queue as fallback
                 self.app.status = "Updating Agent"
             else:
                 self.app.status = "Collecting Experience"
@@ -2173,7 +2158,7 @@ class AppLogic:
         """Starts or stops the worker threads."""
         print(
             f"[AppLogic] toggle_training_run called. Current state: {self.app.app_state.value}, is_process_running: {self.app.is_process_running}"
-        )  # DEBUG
+        )
         if self.app.app_state != AppState.MAIN_MENU:
             print(
                 f"[AppLogic] Cannot toggle run outside MainMenu (State: {self.app.app_state.value})."
@@ -2187,48 +2172,36 @@ class AppLogic:
             return
 
         if not self.app.is_process_running:
-            print("[AppLogic] Attempting to START workers...")  # DEBUG
-            # Check completion status but allow starting even if complete
-            # current_step = getattr(
-            #     self.app.initializer.stats_recorder.aggregator.storage,  # Access via storage
-            #     "current_global_step",
-            #     0,
-            # )
-            # target_step = self.app.initializer.checkpoint_manager.training_target_step
-            # if target_step > 0 and current_step >= target_step:
-            #     print("[AppLogic] Training already complete. Cannot start.") # Allow starting
-            #     self.app.status = "Training Complete"
-            #     return
-
-            print("[AppLogic] Setting is_process_running = True")  # DEBUG
+            print("[AppLogic] Attempting to START workers...")
+            print("[AppLogic] Setting is_process_running = True")
             self.app.is_process_running = True
             print(
                 f"[AppLogic] Clearing pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )  # DEBUG
+            )
             self.app.pause_event.clear()
             print(
                 f"[AppLogic] Pause event cleared (New is_set: {self.app.pause_event.is_set()})."
-            )  # DEBUG
+            )
             # Update status based on completion
             self.update_status_and_check_completion()  # This will set status correctly
-            print("[AppLogic] Workers should start running.")  # DEBUG
+            print("[AppLogic] Workers should start running.")
         else:
-            print("[AppLogic] Attempting to PAUSE workers...")  # DEBUG
-            print("[AppLogic] Setting is_process_running = False")  # DEBUG
+            print("[AppLogic] Attempting to PAUSE workers...")
+            print("[AppLogic] Setting is_process_running = False")
             self.app.is_process_running = False
             print(
                 f"[AppLogic] Setting pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )  # DEBUG
+            )
             self.app.pause_event.set()
             print(
                 f"[AppLogic] Pause event set (New is_set: {self.app.pause_event.is_set()})."
-            )  # DEBUG
+            )
             self.try_save_checkpoint()
             self.check_initial_completion_status()  # Re-check completion status on pause
             if not self.app.status.startswith("Training Complete"):
                 self.app.status = "Ready"
             self.app.app_state = AppState.MAIN_MENU
-            print("[AppLogic] Workers should pause.")  # DEBUG
+            print("[AppLogic] Workers should pause.")
 
     def request_cleanup(self):
         if self.app.is_process_running:
@@ -3104,6 +3077,7 @@ class MainApp:
         self.is_process_running: bool = False  # Training/collection active
         self.status: str = "Initializing..."
         self.running: bool = True  # Main loop flag
+        self.update_progress_details: Dict[str, Any] = {}  # Added attribute
 
         # --- Threading & Communication ---
         self.stop_event = threading.Event()
@@ -3246,7 +3220,24 @@ class MainApp:
                 if not self.running:
                     break
 
-            # Update Logic & State
+            # --- Fetch Update Progress Details ---
+            # Fetch details *before* updating status logic
+            if (
+                self.worker_manager.training_worker_thread
+                and self.worker_manager.training_worker_thread.is_alive()
+            ):
+                try:
+                    self.update_progress_details = (
+                        self.worker_manager.training_worker_thread.get_update_progress_details()
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not get update progress details: {e}")
+                    self.update_progress_details = {}  # Reset on error
+            else:
+                self.update_progress_details = {}  # Clear if worker not running
+            # --- End Fetch Update Progress Details ---
+
+            # Update Logic & State (uses self.update_progress_details)
             self.logic.update_status_and_check_completion()
 
             # --- Update Resource Stats ---
@@ -3270,7 +3261,7 @@ class MainApp:
                 plot_data = {}
                 stats_summary = {}
                 tb_log_dir = None
-                update_details = {}
+                # update_details = {} # Use self.update_progress_details now
                 agent_params = 0
                 worker_counts = {"env_runners": 0, "trainers": 0}
 
@@ -3292,23 +3283,6 @@ class MainApp:
                         self.initializer.stats_recorder, TensorBoardStatsRecorder
                     ):
                         tb_log_dir = self.initializer.stats_recorder.log_dir
-
-                # --- Get update progress details from worker ---
-                if (
-                    self.status == "Updating Agent"
-                    and self.worker_manager.training_worker_thread
-                    and self.worker_manager.training_worker_thread.is_alive()
-                ):
-                    try:
-                        update_details = (
-                            self.worker_manager.training_worker_thread.get_update_progress_details()
-                        )
-                    except Exception as e:
-                        logger.warning(f"Could not get update progress details: {e}")
-                        update_details = {}  # Reset on error
-                else:
-                    update_details = {}  # Clear if not updating
-                # --- End update progress details ---
 
                 # --- Get Worker Counts ---
                 if (
@@ -3340,7 +3314,7 @@ class MainApp:
                     tensorboard_log_dir=tb_log_dir,
                     plot_data=plot_data,
                     demo_env=self.initializer.demo_env,
-                    update_progress_details=update_details,  # Pass fetched details
+                    update_progress_details=self.update_progress_details,  # Pass stored details
                     agent_param_count=agent_params,
                     worker_counts=worker_counts,  # Pass worker counts
                 )
@@ -3589,9 +3563,8 @@ class EnvironmentRunner(threading.Thread):
                 while self.pause_event.is_set():
                     if self.stop_event.is_set():
                         break
-                    if pause_check_iter % 50 == 0:  # Log pause less frequently
-                        # print(f"[{self.name} Loop {loop_iter}] Paused (is_set={self.pause_event.is_set()})...") # DEBUG REMOVED
-                        pass
+                    # if pause_check_iter % 50 == 0:  # Log pause less frequently
+                    #     print(f"[{self.name} Loop {loop_iter}] Paused (is_set={self.pause_event.is_set()})...")
                     time.sleep(0.1)  # Wait a bit before re-checking pause_event
                     pause_check_iter += 1
                 if self.stop_event.is_set():  # Check stop event after pause loop
@@ -3648,13 +3621,18 @@ class EnvironmentRunner(threading.Thread):
                         )
 
                         if rollout_data_cpu:
+                            # --- Check stop event before blocking put ---
+                            if self.stop_event.is_set():
+                                break
+                            # --- End check ---
                             try:
+                                # Reduced timeout
                                 self.experience_queue.put(
-                                    rollout_data_cpu, block=True, timeout=5.0
+                                    rollout_data_cpu, block=True, timeout=1.0
                                 )
                             except queue.Full:
                                 print(
-                                    f"[{self.name}] WARNING: Experience queue full after 5s timeout. Discarding rollout."
+                                    f"[{self.name}] WARNING: Experience queue full after 1s timeout. Discarding rollout."
                                 )
                             except Exception as q_err:
                                 print(
@@ -3669,12 +3647,10 @@ class EnvironmentRunner(threading.Thread):
                         self.collector.rollout_storage.after_update()
                         rollout_count += 1
                     else:
-                        # This case should ideally not happen if the loop condition is correct
                         print(
                             f"[{self.name}] Warning: Storage full but no steps collected in rollout?"
                         )
                 # else: # DEBUG REMOVED
-                # This means the loop exited due to pause/stop, not because it was full
                 # print(f"[{self.name}] Rollout loop finished prematurely (step={self.collector.rollout_storage.step}/{self.collector.rollout_storage.num_steps}). Likely paused/stopped.")
 
                 time.sleep(0.001)  # Small sleep between rollouts
@@ -3771,9 +3747,8 @@ class TrainingWorker(threading.Thread):
                 while self.pause_event.is_set():
                     if self.stop_event.is_set():
                         break
-                    if pause_check_iter % 50 == 0:  # Log pause less frequently
-                        # print(f"[{self.name} Loop {loop_iter}] Paused (is_set={self.pause_event.is_set()})...") # DEBUG REMOVED
-                        pass
+                    # if pause_check_iter % 50 == 0:  # Log pause less frequently
+                    #     print(f"[{self.name} Loop {loop_iter}] Paused (is_set={self.pause_event.is_set()})...")
                     time.sleep(0.1)  # Wait a bit before re-checking pause_event
                     pause_check_iter += 1
                 if self.stop_event.is_set():  # Check stop event after pause loop
@@ -3793,6 +3768,11 @@ class TrainingWorker(threading.Thread):
                     time.sleep(0.1)
                     continue
 
+                # --- Check stop event after getting data ---
+                if self.stop_event.is_set():
+                    break
+                # --- End check ---
+
                 # --- Reset Progress Tracking for New Update ---
                 with self._progress_lock:
                     self.update_start_time = time.time()
@@ -3802,9 +3782,7 @@ class TrainingWorker(threading.Thread):
                 # --- End Reset Progress ---
 
                 update_count += 1
-                print(
-                    f"\n[{self.name}] Starting Update #{update_count}..."
-                )  # ADDED LOG
+                print(f"\n[{self.name}] Starting Update #{update_count}...")
 
                 # Check if 'actions' key exists and has data
                 if (
@@ -3876,7 +3854,7 @@ class TrainingWorker(threading.Thread):
                         # --- Epoch Start Log ---
                         print(
                             f"  [{self.name}] Starting Epoch {epoch+1}/{self.ppo_config.PPO_EPOCHS}..."
-                        )  # ADDED LOG
+                        )
                         # --- End Epoch Start Log ---
 
                         # Check pause/stop before starting epoch
@@ -3966,7 +3944,7 @@ class TrainingWorker(threading.Thread):
                                 ):
                                     print(
                                         f"    [{self.name}] Epoch {epoch+1}: Minibatch {num_minibatches_this_epoch}/{self.total_minibatches_in_epoch} done."
-                                    )  # ADDED LOG
+                                    )
                                 # --- End Minibatch Progress Log ---
 
                             except KeyError as ke:
@@ -3991,7 +3969,7 @@ class TrainingWorker(threading.Thread):
                         # --- Epoch End Log ---
                         print(
                             f"  [{self.name}] Epoch {epoch+1} finished ({num_minibatches_this_epoch} minibatches)."
-                        )  # ADDED LOG
+                        )
                         # --- End Epoch End Log ---
                     # End epoch loop
 
@@ -4064,7 +4042,7 @@ class TrainingWorker(threading.Thread):
                     self.rollouts_processed += 1
                     print(
                         f"[{self.name}] Update #{update_count} finished in {update_duration:.2f}s (Overall SPS: {overall_update_sps:.0f})."
-                    )  # ADDED LOG
+                    )
 
                 elif update_error_occurred:
                     print(
@@ -4591,6 +4569,7 @@ __all__ = [
 
 
 File: agent\networks\agent_network.py
+# File: agent/networks/agent_network.py
 import torch
 import torch.nn as nn
 import numpy as np
@@ -4606,10 +4585,11 @@ from config import (
 
 class ActorCriticNetwork(nn.Module):
     """
-    Actor-Critic Network: CNN+MLP -> Fusion -> Optional Transformer -> Optional LSTM -> Actor/Critic Heads.
+    Actor-Critic Network: CNN -> Spatial Transformer -> Fusion MLP -> Optional LSTM -> Actor/Critic Heads.
     Handles both single step (eval) and sequence (RNN/Transformer training) inputs.
     Includes shape availability and explicit features.
     Uses SiLU activation by default based on ModelConfig.
+    Applies Transformer attention directly to spatial CNN features.
     """
 
     def __init__(
@@ -4619,7 +4599,7 @@ class ActorCriticNetwork(nn.Module):
         model_config: ModelConfig.Network,
         rnn_config: RNNConfig,
         transformer_config: TransformerConfig,
-        device: torch.device, 
+        device: torch.device,
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -4627,7 +4607,7 @@ class ActorCriticNetwork(nn.Module):
         self.config = model_config
         self.rnn_config = rnn_config
         self.transformer_config = transformer_config
-        self.device = device 
+        self.device = device
 
         print(f"[ActorCriticNetwork] Target device set to: {self.device}")
         print(f"[ActorCriticNetwork] Using RNN: {self.rnn_config.USE_RNN}")
@@ -4644,40 +4624,26 @@ class ActorCriticNetwork(nn.Module):
         self.explicit_features_dim = self.env_config.EXPLICIT_FEATURES_DIM
 
         # --- Feature Extractors ---
-        self.conv_base, conv_out_h, conv_out_w, conv_out_c = self._build_cnn_branch()
-        self.conv_out_size = self._get_conv_out_size(
-            (self.grid_c, self.grid_h, self.grid_w)
+        self.conv_base, self.conv_out_h, self.conv_out_w, self.conv_out_c = (
+            self._build_cnn_branch()
         )
+        # self.conv_out_size = self._get_conv_out_size( # No longer needed as we don't flatten immediately
+        #     (self.grid_c, self.grid_h, self.grid_w)
+        # )
         print(
-            f"  CNN Output Dim (HxWxC): ({conv_out_h}x{conv_out_w}x{conv_out_c}) -> Flat: {self.conv_out_size}"
+            f"  CNN Output Dim (HxWxC): ({self.conv_out_h}x{self.conv_out_w}x{self.conv_out_c})"
         )
 
         self.shape_mlp, self.shape_mlp_out_dim = self._build_shape_mlp_branch()
         print(f"  Shape Feature MLP Output Dim: {self.shape_mlp_out_dim}")
 
-        combined_features_dim = (
-            self.conv_out_size
-            + self.shape_mlp_out_dim
-            + self.shape_availability_dim
-            + self.explicit_features_dim
-        )
-        print(
-            f"  Combined Features Dim (CNN + Shape MLP + Avail + Explicit): {combined_features_dim}"
-        )
-
-        self.fusion_mlp, self.fusion_output_dim = self._build_fusion_mlp_branch(
-            combined_features_dim
-        )
-        print(f"  Fusion MLP Output Dim: {self.fusion_output_dim}")
-
-        # --- Optional Transformer Layer ---
+        # --- Optional Transformer Layer (Applied to Spatial CNN Features) ---
         self.transformer_encoder = None
-        transformer_output_dim = self.fusion_output_dim
+        self.pos_embedding = None
+        self.patch_projection = None
+        transformer_output_dim = 0  # Will be set if transformer is used
+
         if self.transformer_config.USE_TRANSFORMER:
-            if self.fusion_output_dim != self.transformer_config.TRANSFORMER_D_MODEL:
-                raise ValueError(
-                    f"Fusion MLP output dim ({self.fusion_output_dim}) must match TRANSFORMER_D_MODEL ({self.transformer_config.TRANSFORMER_D_MODEL})"
-                )
             if (
                 self.transformer_config.TRANSFORMER_D_MODEL
                 % self.transformer_config.TRANSFORMER_NHEAD
@@ -4687,28 +4653,69 @@ class ActorCriticNetwork(nn.Module):
                     f"TRANSFORMER_D_MODEL ({self.transformer_config.TRANSFORMER_D_MODEL}) must be divisible by TRANSFORMER_NHEAD ({self.transformer_config.TRANSFORMER_NHEAD})"
                 )
 
+            # Linear projection from CNN output channels to Transformer dimension
+            self.patch_projection = nn.Linear(
+                self.conv_out_c, self.transformer_config.TRANSFORMER_D_MODEL
+            ).to(self.device)
+
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=self.transformer_config.TRANSFORMER_D_MODEL,
                 nhead=self.transformer_config.TRANSFORMER_NHEAD,
                 dim_feedforward=self.transformer_config.TRANSFORMER_DIM_FEEDFORWARD,
                 dropout=self.transformer_config.TRANSFORMER_DROPOUT,
-                activation=self.transformer_config.TRANSFORMER_ACTIVATION,  # Uses config activation (e.g., 'silu')
-                batch_first=True,
+                activation=self.transformer_config.TRANSFORMER_ACTIVATION,
+                batch_first=True,  # Input shape (Batch, Seq, Feature)
                 device=self.device,
             )
             self.transformer_encoder = nn.TransformerEncoder(
                 encoder_layer, num_layers=self.transformer_config.TRANSFORMER_NUM_LAYERS
             ).to(self.device)
-            transformer_output_dim = self.transformer_config.TRANSFORMER_D_MODEL
+
+            # Positional embedding for the flattened spatial features
+            self.num_patches = self.conv_out_h * self.conv_out_w
+            self.pos_embedding = nn.Parameter(
+                torch.randn(
+                    1, self.num_patches, self.transformer_config.TRANSFORMER_D_MODEL
+                )
+            ).to(self.device)
+
+            transformer_output_dim = (
+                self.transformer_config.TRANSFORMER_D_MODEL
+            )  # Output dim after pooling/CLS
             print(
-                f"  Transformer Encoder Added (d_model={transformer_output_dim}, nhead={self.transformer_config.TRANSFORMER_NHEAD}, layers={self.transformer_config.TRANSFORMER_NUM_LAYERS})"
+                f"  Spatial Transformer Added (Input Patches: {self.num_patches}, Proj: {self.conv_out_c}->{transformer_output_dim}, d_model={transformer_output_dim}, nhead={self.transformer_config.TRANSFORMER_NHEAD}, layers={self.transformer_config.TRANSFORMER_NUM_LAYERS})"
             )
+        else:
+            # If no transformer, the input to fusion is the flattened CNN output
+            transformer_output_dim = self.conv_out_h * self.conv_out_w * self.conv_out_c
+            print(
+                f"  Spatial Transformer DISABLED. Using flattened CNN output ({transformer_output_dim})."
+            )
+
+        # --- Fusion MLP ---
+        # Input dim depends on whether Transformer was used
+        combined_features_dim = (
+            transformer_output_dim  # Output of Transformer (pooled) or flattened CNN
+            + self.shape_mlp_out_dim
+            + self.shape_availability_dim
+            + self.explicit_features_dim
+        )
+        print(
+            f"  Combined Features Dim (Spatial Features + Shape MLP + Avail + Explicit): {combined_features_dim}"
+        )
+
+        self.fusion_mlp, self.fusion_output_dim = self._build_fusion_mlp_branch(
+            combined_features_dim
+        )
+        print(f"  Fusion MLP Output Dim: {self.fusion_output_dim}")
 
         # --- Optional LSTM Layer ---
         self.lstm_layer = None
         self.lstm_hidden_size = 0
-        lstm_input_dim = transformer_output_dim  # Input to LSTM is output of Transformer (or Fusion MLP if no Transformer)
-        head_input_dim = lstm_input_dim  # Input to heads is output of LSTM (or Transformer/Fusion MLP)
+        # Input to LSTM is output of Fusion MLP
+        lstm_input_dim = self.fusion_output_dim
+        # Input to heads is output of LSTM (or Fusion MLP if no LSTM)
+        head_input_dim = lstm_input_dim
 
         if self.rnn_config.USE_RNN:
             self.lstm_hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
@@ -4719,7 +4726,7 @@ class ActorCriticNetwork(nn.Module):
                 batch_first=True,
             ).to(self.device)
             print(
-                f"  LSTM Layer Added (Input: {lstm_input_dim}, Hidden: {self.lstm_hidden_size})"
+                f"  LSTM Layer Added (Input: {lstm_input_dim}, Hidden: {self.lstm_hidden_size}, Layers: {self.rnn_config.LSTM_NUM_LAYERS})"
             )
             head_input_dim = self.lstm_hidden_size  # Heads take LSTM output
 
@@ -4771,6 +4778,7 @@ class ActorCriticNetwork(nn.Module):
 
     def _get_conv_out_size(self, shape: Tuple[int, int, int]) -> int:
         """Calculates the flattened output size of the CNN."""
+        # This might still be useful for validation or if Transformer is disabled
         with torch.no_grad():
             dummy_input = torch.zeros(1, *shape, device=self.device)
             output = self.conv_base(dummy_input)
@@ -4806,6 +4814,7 @@ class ActorCriticNetwork(nn.Module):
             ).to(self.device)
             fusion_layers.append(linear_layer)
             if cfg.USE_BATCHNORM_FC:
+                # Use BatchNorm1d for MLP layers
                 fusion_layers.append(nn.BatchNorm1d(hidden_dim).to(self.device))
             fusion_layers.append(
                 cfg.COMBINED_ACTIVATION()
@@ -4822,10 +4831,13 @@ class ActorCriticNetwork(nn.Module):
         shape_availability_tensor: torch.Tensor,
         explicit_features_tensor: torch.Tensor,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        padding_mask: Optional[torch.Tensor] = None,  # Shape: (batch_size, seq_len)
+        padding_mask: Optional[
+            torch.Tensor
+        ] = None,  # Shape: (batch_size, seq_len) - Not used with spatial transformer
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         """
         Forward pass through the network. Handles single step and sequence inputs.
+        Applies Transformer to spatial CNN features if enabled.
         """
         # --- Ensure inputs are on the correct device ---
         model_device = self.device
@@ -4838,11 +4850,9 @@ class ActorCriticNetwork(nn.Module):
                 hidden_state[0].to(model_device),
                 hidden_state[1].to(model_device),
             )
-        if padding_mask is not None:
-            padding_mask = padding_mask.to(model_device)
+        # padding_mask is not used in this spatial transformer setup
 
         # --- Determine input shape and flatten if necessary ---
-        # Input can be (B, C, H, W) or (B, T, C, H, W)
         is_sequence_input = grid_tensor.ndim == 5
         initial_batch_size = grid_tensor.shape[0]
         seq_len = grid_tensor.shape[1] if is_sequence_input else 1
@@ -4863,53 +4873,86 @@ class ActorCriticNetwork(nn.Module):
         )
 
         # --- Feature Extraction ---
-        conv_features_flat = self.conv_base(grid_input_flat).view(num_samples, -1)
-        shape_features_flat = self.shape_mlp(shape_feature_input_flat)
+        # CNN processing
+        conv_features_spatial = self.conv_base(grid_input_flat)  # Shape: (N, C, H', W')
+
+        # Shape MLP processing
+        shape_features_flat = self.shape_mlp(
+            shape_feature_input_flat
+        )  # Shape: (N, ShapeMLPDim)
+
+        # --- Optional Spatial Transformer ---
+        spatial_features_processed = None
+        if (
+            self.transformer_config.USE_TRANSFORMER
+            and self.transformer_encoder is not None
+            and self.patch_projection is not None
+            and self.pos_embedding is not None
+        ):
+            # Reshape spatial features for Transformer: (N, C, H', W') -> (N, H'*W', C)
+            n_samples, c_out, h_out, w_out = conv_features_spatial.shape
+            spatial_flat_patches = conv_features_spatial.flatten(2).permute(
+                0, 2, 1
+            )  # Shape: (N, H'*W', C)
+
+            # Project patches to Transformer dimension
+            projected_patches = self.patch_projection(
+                spatial_flat_patches
+            )  # Shape: (N, NumPatches, D_model)
+
+            # Add positional embedding
+            transformer_input = (
+                projected_patches + self.pos_embedding
+            )  # Broadcasting (1, NumPatches, D_model)
+
+            # Apply Transformer encoder
+            # Note: padding_mask is not typically used with spatial features like this
+            transformer_output = self.transformer_encoder(
+                transformer_input
+            )  # Shape: (N, NumPatches, D_model)
+
+            # Pool the transformer output (e.g., mean pooling)
+            spatial_features_processed = transformer_output.mean(
+                dim=1
+            )  # Shape: (N, D_model)
+
+        else:
+            # If no transformer, flatten the CNN output
+            spatial_features_processed = conv_features_spatial.view(
+                num_samples, -1
+            )  # Shape: (N, C*H'*W')
 
         # --- Feature Fusion ---
         combined_features_flat = torch.cat(
             (
-                conv_features_flat,
+                spatial_features_processed,  # Output from Transformer or flattened CNN
                 shape_features_flat,
                 shape_availability_input_flat,
                 explicit_features_input_flat,
             ),
             dim=1,
         )
-        fused_features_flat = self.fusion_mlp(combined_features_flat)
-
-        # --- Optional Transformer ---
-        current_features = fused_features_flat  # Start with fused features
-        if (
-            self.transformer_config.USE_TRANSFORMER
-            and self.transformer_encoder is not None
-        ):
-            # Reshape to (B, T, Dim) for Transformer
-            transformer_input = current_features.view(
-                initial_batch_size, seq_len, self.fusion_output_dim
-            )
-            # Apply Transformer encoder with padding mask if provided
-            transformer_output = self.transformer_encoder(
-                transformer_input, src_key_padding_mask=padding_mask
-            )
-            # Flatten back to (N, Dim)
-            current_features = transformer_output.reshape(num_samples, -1)
+        fused_features_flat = self.fusion_mlp(
+            combined_features_flat
+        )  # Shape: (N, FusionDim)
 
         # --- Optional LSTM ---
         next_hidden_state = hidden_state  # Pass incoming state through
         head_input_features = (
-            current_features  # Input to heads starts as output of previous layer
+            fused_features_flat  # Input to heads starts as output of Fusion MLP
         )
 
         if self.rnn_config.USE_RNN and self.lstm_layer is not None:
             # Reshape to (B, T, Dim) for LSTM
-            lstm_input = current_features.view(initial_batch_size, seq_len, -1)
+            lstm_input = fused_features_flat.view(initial_batch_size, seq_len, -1)
             # Apply LSTM
             lstm_output_seq, next_hidden_state_tuple = self.lstm_layer(
                 lstm_input, hidden_state
             )
             # Flatten output for heads
-            head_input_features = lstm_output_seq.reshape(num_samples, -1)
+            head_input_features = lstm_output_seq.reshape(
+                num_samples, -1
+            )  # Shape: (N, LSTMDim)
             # Update the hidden state to be returned
             next_hidden_state = next_hidden_state_tuple
 
@@ -4996,7 +5039,7 @@ from .constants import (
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 128
+    NUM_ENVS_TO_RENDER = 16  # Updated
     FPS = 0
     SCREEN_WIDTH = 1600  # Initial width, but resizable
     SCREEN_HEIGHT = 900  # Initial height, but resizable
@@ -5069,7 +5112,7 @@ class PPOConfig:
     LEARNING_RATE = 2.5e-4
     ADAM_EPS = 1e-5
     # --- Increased Params ---
-    NUM_STEPS_PER_ROLLOUT = 128  # Increased from 64
+    NUM_STEPS_PER_ROLLOUT = 256  # Increased from 128
     PPO_EPOCHS = 4  # Increased from 2
     NUM_MINIBATCHES = 16  # Increased from 8
     # --- End Increased Params ---
@@ -5112,8 +5155,8 @@ class PPOConfig:
 
 class RNNConfig:
     USE_RNN = True
-    LSTM_HIDDEN_SIZE = 128  # Reduced LSTM size
-    LSTM_NUM_LAYERS = 1
+    LSTM_HIDDEN_SIZE = 256  # Updated
+    LSTM_NUM_LAYERS = 2  # Updated
 
 
 class ObsNormConfig:
@@ -5128,16 +5171,16 @@ class ObsNormConfig:
 
 class TransformerConfig:
     USE_TRANSFORMER = True
-    TRANSFORMER_D_MODEL = 128  # Reduced Transformer size (must match last FC dim)
-    TRANSFORMER_NHEAD = 4  # Reduced heads (must divide D_MODEL)
-    TRANSFORMER_DIM_FEEDFORWARD = 256  # Reduced feedforward dim
-    TRANSFORMER_NUM_LAYERS = 1  # Reduced layers
+    TRANSFORMER_D_MODEL = 256  # Updated
+    TRANSFORMER_NHEAD = 8  # Updated
+    TRANSFORMER_DIM_FEEDFORWARD = 512  # Updated
+    TRANSFORMER_NUM_LAYERS = 3  # Updated
     TRANSFORMER_DROPOUT = 0.1
     TRANSFORMER_ACTIVATION = "relu"
 
 
 class TrainConfig:
-    CHECKPOINT_SAVE_FREQ = 10
+    CHECKPOINT_SAVE_FREQ = 50  # Increased from 10 (interpreted as rollouts)
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
@@ -5148,27 +5191,27 @@ class ModelConfig:
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [16, 32, 64]  # Reduced CNN channels
+        CONV_CHANNELS = [64, 128, 256]  # Updated
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
 
-        SHAPE_FEATURE_MLP_DIMS = [32]  # Reduced Shape MLP dims
+        SHAPE_FEATURE_MLP_DIMS = [128, 128]  # Updated
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
 
         _transformer_cfg = TransformerConfig()
         _rnn_cfg = RNNConfig()
-        _last_fc_dim = 128  # Default/fallback size (reduced)
+        _last_fc_dim = 256  # Updated
         if _transformer_cfg.USE_TRANSFORMER:
-            _last_fc_dim = _transformer_cfg.TRANSFORMER_D_MODEL
+            _last_fc_dim = _transformer_cfg.TRANSFORMER_D_MODEL  # Should be 256
         elif _rnn_cfg.USE_RNN:
-            _last_fc_dim = _rnn_cfg.LSTM_HIDDEN_SIZE
+            _last_fc_dim = _rnn_cfg.LSTM_HIDDEN_SIZE  # Should be 256
 
         COMBINED_FC_DIMS = [
-            256,  # Reduced Fusion MLP dims
-            _last_fc_dim,  # Should be 128 based on Transformer/LSTM
+            1024,  # Updated
+            _last_fc_dim,  # Should be 256 based on Transformer/LSTM
         ]
         del _transformer_cfg, _rnn_cfg  # Clean up temp instances
         COMBINED_ACTIVATION = torch.nn.ReLU
@@ -5183,7 +5226,7 @@ class StatsConfig:
         100,
     ]
     CONSOLE_LOG_FREQ = 5
-    PLOT_DATA_WINDOW = 20_000
+    PLOT_DATA_WINDOW = 100_000  # Increased from 20_000
 
 
 class TensorBoardConfig:
@@ -5279,7 +5322,7 @@ def get_model_save_path() -> str:
 
 # --- Training Goal ---
 # --- Increased training steps ---
-TOTAL_TRAINING_STEPS = 200_000  # Increased from 50_000
+TOTAL_TRAINING_STEPS = 10_000_000  # Increased from 200_000
 # --- End Increased training steps ---
 
 
@@ -5887,7 +5930,6 @@ class GameLogic:
     def _handle_game_over_state_change(self) -> float:
         if self.gs.game_over:
             return 0.0
-        print("[GameLogic] Handling game over state change.")  # DEBUG
         self.gs.game_over = True
         if self.gs.freeze_time <= 0:  # Only set freeze if not already frozen
             self.gs.freeze_time = 1.0
@@ -5918,9 +5960,6 @@ class GameLogic:
         self.gs.triangles_cleared_this_episode += triangles_cleared
 
         if triangles_cleared > 0:
-            print(
-                f"[GameLogic] Line Clear! Lines: {lines_cleared}, Tris: {triangles_cleared}"
-            )  # DEBUG
             self.gs.game_score += triangles_cleared * 2
             self.gs.blink_time = 0.5
             self.gs.freeze_time = 0.5  # Set freeze time for animation
@@ -8117,219 +8156,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
         log_now = False
         with self._lock:
             # Increment rollout counter if an agent update occurred
-            if "policy_loss" in step_data or "value_loss" in step_data:
-                self.rollouts_since_last_log += 1
-                if (
-                    self.console_log_interval > 0
-                    and self.rollouts_since_last_log >= self.console_log_interval
-                ):
-                    log_now = True
-                    self.rollouts_since_last_log = 0  # Reset counter
-
-        if log_now:
-            self.log_summary(g_step)
-
-    def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        """Gets the summary dictionary from the aggregator (thread-safe)."""
-        return self.aggregator.get_summary(current_global_step)
-
-    def get_plot_data(self) -> Dict[str, Deque]:
-        """Gets the plot data deques from the aggregator (thread-safe)."""
-        return self.aggregator.get_plot_data()
-
-    def log_summary(self, global_step: int):
-        """Logs the current summary statistics to the console."""
-        # Get summary data (thread-safe)
-        summary = self.get_summary(global_step)
-        # Use aggregator's start time
-        elapsed_runtime = (
-            time.time() - self.aggregator.storage.start_time
-        )  # Corrected access
-        runtime_hrs = elapsed_runtime / 3600
-
-        best_score_val = (
-            f"{summary['best_score']:.2f}"
-            if summary["best_score"] > -float("inf")
-            else "N/A"
-        )
-        best_loss_val = (
-            f"{summary['best_loss']:.4f}"
-            if summary["best_loss"] < float("inf")
-            else "N/A"
-        )
-        avg_window_size = summary.get("summary_avg_window_size", "?")
-
-        log_str = (
-            f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
-            f"Ep: {summary['total_episodes']:<7} | SPS: {summary['steps_per_second']:<5.0f} | "
-            f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
-            f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "
-            f"LR: {summary['current_lr']:.1e}"
-        )
-        # ... (add optional fields as before) ...
-        avg_tris_cleared = summary.get("avg_triangles_cleared_window", 0.0)
-        log_str += f" | TrisClr(Avg{avg_window_size}): {avg_tris_cleared:.1f}"
-
-        print(log_str)  # Print is thread-safe
-
-        # Update last log time (no lock needed, only read by this method)
-        self.last_log_time = time.time()
-
-    def record_histogram(
-        self,
-        tag: str,
-        values: Union[np.ndarray, torch.Tensor, List[float]],
-        global_step: int,
-    ):
-        pass
-
-    def record_image(
-        self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
-    ):
-        pass
-
-    def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
-        pass
-
-    def record_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[Any] = None
-    ):
-        pass
-
-    def close(self, is_cleanup: bool = False):
-        """Closes the recorder (no action needed for simple console logger)."""
-        print(f"[SimpleStatsRecorder] Closed (is_cleanup={is_cleanup}).")
-
-
-File: stats\stats_recorder.py
-# File: stats/simple_stats_recorder.py
-import time
-from collections import deque
-from typing import Deque, Dict, Any, Optional, Union, List
-import numpy as np
-import torch
-import threading  # Added for Lock
-
-from .stats_recorder import StatsRecorderBase
-from .aggregator import StatsAggregator
-from config import StatsConfig
-
-
-class SimpleStatsRecorder(StatsRecorderBase):
-    """
-    Logs aggregated statistics to the console periodically. Thread-safe.
-    Delegates data storage and aggregation to a StatsAggregator instance.
-    Provides no-op implementations for histogram, image, hparam, graph logging.
-    """
-
-    def __init__(
-        self,
-        aggregator: StatsAggregator,
-        console_log_interval: int = StatsConfig.CONSOLE_LOG_FREQ,
-    ):
-        self.aggregator = aggregator
-        self.console_log_interval = (
-            max(1, console_log_interval) if console_log_interval > 0 else -1
-        )
-        self.last_log_time: float = time.time()
-        self.start_time: float = time.time()  # Use aggregator's start time?
-        self.summary_avg_window = self.aggregator.summary_avg_window
-        self.rollouts_since_last_log = 0
-
-        # Lock for protecting internal state like rollout counter
-        self._lock = threading.Lock()
-
-        print(
-            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} rollouts"
-        )
-        print(
-            f"[SimpleStatsRecorder] Console logs will use Avg Window: {self.summary_avg_window}"
-        )
-
-    def record_episode(
-        self,
-        episode_score: float,
-        episode_length: int,
-        episode_num: int,
-        global_step: Optional[int] = None,
-        game_score: Optional[int] = None,
-        triangles_cleared: Optional[int] = None,
-    ):
-        """Records episode stats and prints new bests to console. Thread-safe."""
-        # Aggregator call is thread-safe due to its internal lock
-        update_info = self.aggregator.record_episode(
-            episode_score,
-            episode_length,
-            episode_num,
-            global_step,
-            game_score,
-            triangles_cleared,
-        )
-        # Reading aggregator state is thread-safe due to its internal lock
-        current_step = (
-            global_step
-            if global_step is not None
-            else self.aggregator.storage.current_global_step  # Corrected access
-        )
-        step_info = f"at Step ~{current_step/1e6:.1f}M"
-
-        # Print new bests immediately (print is thread-safe in Python 3)
-        if update_info.get("new_best_rl"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_score:.2f}"  # Corrected access
-                if self.aggregator.storage.previous_best_score
-                > -float("inf")  # Corrected access
-                else "N/A"
-            )
-            print(
-                f"\n--- 🏆 New Best RL: {self.aggregator.storage.best_score:.2f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
-            )
-        if update_info.get("new_best_game"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_game_score:.0f}"  # Corrected access
-                if self.aggregator.storage.previous_best_game_score
-                > -float("inf")  # Corrected access
-                else "N/A"
-            )
-            print(
-                f"--- 🎮 New Best Game: {self.aggregator.storage.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
-            )
-        if update_info.get("new_best_loss"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_value_loss:.4f}"  # Corrected access
-                if self.aggregator.storage.previous_best_value_loss
-                < float("inf")  # Corrected access
-                else "N/A"
-            )
-            print(
-                f"---📉 New Best Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
-            )
-
-    def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats and triggers console logging if interval met. Thread-safe."""
-        # Aggregator call is thread-safe
-        update_info = self.aggregator.record_step(step_data)
-        g_step = step_data.get(
-            "global_step", self.aggregator.storage.current_global_step
-        )  # Corrected access
-
-        # Print new best loss immediately if it occurred during this step's update
-        if update_info.get("new_best_loss"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_value_loss:.4f}"  # Corrected access
-                if self.aggregator.storage.previous_best_value_loss
-                < float("inf")  # Corrected access
-                else "N/A"
-            )
-            step_info = f"at Step ~{g_step/1e6:.1f}M"
-            print(
-                f"---📉 New Best Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
-            )
-
-        # Increment rollout counter and check logging frequency (thread-safe)
-        log_now = False
-        with self._lock:
-            # Increment rollout counter if an agent update occurred
             # Check for a key that is reliably present after an update, like 'lr' or 'update_time'
             if "lr" in step_data or "update_time" in step_data:
                 self.rollouts_since_last_log += 1
@@ -8374,6 +8200,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         avg_window_size = summary.get("summary_avg_window_size", "?")
 
         # --- Use avg_minibatch_sps_window instead of steps_per_second ---
+        # Ensure the key exists before formatting
         sps_val = summary.get("avg_minibatch_sps_window", 0.0)
         sps_str = f"{sps_val/1000:.1f}k" if sps_val >= 1000 else f"{sps_val:.0f}"
         # --- End change ---
@@ -8417,6 +8244,89 @@ class SimpleStatsRecorder(StatsRecorderBase):
     def close(self, is_cleanup: bool = False):
         """Closes the recorder (no action needed for simple console logger)."""
         print(f"[SimpleStatsRecorder] Closed (is_cleanup={is_cleanup}).")
+
+
+File: stats\stats_recorder.py
+# File: stats/stats_recorder.py
+import time
+from abc import ABC, abstractmethod
+from collections import deque
+from typing import Deque, List, Dict, Any, Optional, Union
+import numpy as np
+import torch
+
+# Removed: from .stats_recorder import StatsRecorderBase
+
+
+class StatsRecorderBase(ABC):
+    """Base class for recording training statistics."""
+
+    @abstractmethod
+    def record_episode(
+        self,
+        episode_score: float,
+        episode_length: int,
+        episode_num: int,
+        global_step: Optional[int] = None,
+        game_score: Optional[int] = None,
+        triangles_cleared: Optional[int] = None,
+    ):
+        """Record stats for a completed episode."""
+        pass
+
+    @abstractmethod
+    def record_step(self, step_data: Dict[str, Any]):
+        """Record stats from a training or environment step."""
+        pass
+
+    @abstractmethod
+    def record_histogram(
+        self,
+        tag: str,
+        values: Union[np.ndarray, torch.Tensor, List[float]],
+        global_step: int,
+    ):
+        """Record a histogram of values."""
+        pass
+
+    @abstractmethod
+    def record_image(
+        self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
+    ):
+        """Record an image."""
+        pass
+
+    @abstractmethod
+    def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
+        """Record hyperparameters and final/key metrics."""
+        pass
+
+    @abstractmethod
+    def record_graph(
+        self, model: torch.nn.Module, input_to_model: Optional[Any] = None
+    ):
+        """Record the model graph."""
+        pass
+
+    @abstractmethod
+    def get_summary(self, current_global_step: int) -> Dict[str, Any]:
+        """Return a dictionary containing summary statistics."""
+        pass
+
+    @abstractmethod
+    def get_plot_data(self) -> Dict[str, Deque]:
+        """Return copies of data deques for plotting."""
+        pass
+
+    @abstractmethod
+    def log_summary(self, global_step: int):
+        """Trigger the logging action (e.g., print to console)."""
+        pass
+
+    @abstractmethod
+    def close(self, is_cleanup: bool = False):
+        """Perform any necessary cleanup."""
+        pass
 
 
 File: stats\tb_histogram_logger.py
@@ -9558,217 +9468,470 @@ class CheckpointManager:
 
 
 File: training\collector_logic.py
-# File: environment/game_logic.py
-from typing import TYPE_CHECKING, List, Tuple, Optional
+# File: training/collector_logic.py
 import time
+import torch
+import numpy as np
+import traceback
+from typing import (
+    List,
+    Dict,
+    Any,
+    Tuple,
+    Optional,
+    TYPE_CHECKING,
+)  # Added TYPE_CHECKING
 
+from config import EnvConfig, RewardConfig, PPOConfig, RNNConfig, ObsNormConfig
+from environment.game_state import GameState
+from agent.ppo_agent import PPOAgent
+from stats.stats_recorder import StatsRecorderBase
+
+# Removed: from .rollout_storage import RolloutStorage
+from .collector_state import CollectorState
+from .normalization import normalize_obs, update_obs_rms
+from .env_interaction import (
+    reset_env,
+    update_raw_obs_from_state_dict,
+    reset_rnn_state_for_env,
+)
+
+# Use TYPE_CHECKING for RolloutStorage hint to avoid runtime import error
 if TYPE_CHECKING:
-    from .game_state import GameState
-    from .shape import Shape
+    from .rollout_storage import RolloutStorage
 
 
-class GameLogic:
-    """Handles the core game mechanics like stepping, placement, and line clearing."""
+class CollectorLogic:
+    """Handles the core logic of collecting one step of experience."""
 
-    def __init__(self, game_state: "GameState"):
-        self.gs = game_state
-
-    def valid_actions(self) -> List[int]:
-        """Returns a list of valid action indices for the current state."""
-        # Note: GameState.valid_actions() now checks is_frozen() first.
-        # This method assumes the game is not frozen when called.
-        if self.gs.game_over:  # Still check game_over here
-            return []
-
-        valid_action_indices: List[int] = []
-        locations_per_shape = self.gs.grid.rows * self.gs.grid.cols
-        for shape_slot_index, current_shape in enumerate(self.gs.shapes):
-            if not current_shape:
-                continue
-            for target_row in range(self.gs.grid.rows):
-                for target_col in range(self.gs.grid.cols):
-                    if self.gs.grid.can_place(current_shape, target_row, target_col):
-                        action_index = shape_slot_index * locations_per_shape + (
-                            target_row * self.gs.grid.cols + target_col
-                        )
-                        valid_action_indices.append(action_index)
-        return valid_action_indices
-
-    def decode_action(self, action_index: int) -> Tuple[int, int, int]:
-        """Decodes an action index into (shape_slot, row, col)."""
-        locations_per_shape = self.gs.grid.rows * self.gs.grid.cols
-        shape_slot_index = action_index // locations_per_shape
-        position_index = action_index % locations_per_shape
-        target_row = position_index // self.gs.grid.cols
-        target_col = position_index % self.gs.grid.cols
-        return (shape_slot_index, target_row, target_col)
-
-    def _check_fundamental_game_over(self) -> bool:
-        """Checks if any available shape can be placed anywhere."""
-        for current_shape in self.gs.shapes:
-            if not current_shape:
-                continue
-            for target_row in range(self.gs.grid.rows):
-                for target_col in range(self.gs.grid.cols):
-                    if self.gs.grid.can_place(current_shape, target_row, target_col):
-                        return False
-        return True
-
-    def _calculate_placement_reward(self, placed_shape: "Shape") -> float:
-        return self.gs.rewards.REWARD_PLACE_PER_TRI * len(placed_shape.triangles)
-
-    def _calculate_line_clear_reward(self, triangles_cleared: int) -> float:
-        return triangles_cleared * self.gs.rewards.REWARD_PER_CLEARED_TRIANGLE
-
-    def _calculate_state_penalty(self) -> float:
-        penalty = 0.0
-        max_height = self.gs.grid.get_max_height()
-        bumpiness = self.gs.grid.get_bumpiness()
-        num_holes = self.gs.grid.count_holes()
-        penalty += max_height * self.gs.rewards.PENALTY_MAX_HEIGHT_FACTOR
-        penalty += bumpiness * self.gs.rewards.PENALTY_BUMPINESS_FACTOR
-        penalty += num_holes * self.gs.rewards.PENALTY_HOLE_PER_HOLE
-        return penalty
-
-    def _handle_invalid_placement(self) -> float:
-        self.gs._last_action_valid = False
-        return self.gs.rewards.PENALTY_INVALID_MOVE
-
-    def _handle_game_over_state_change(self) -> float:
-        if self.gs.game_over:
-            return 0.0
-        # print("[GameLogic] Handling game over state change.") # DEBUG REMOVED
-        self.gs.game_over = True
-        if self.gs.freeze_time <= 0:  # Only set freeze if not already frozen
-            self.gs.freeze_time = 1.0
-        self.gs.game_over_flash_time = 0.6
-        return self.gs.rewards.PENALTY_GAME_OVER
-
-    def _handle_valid_placement(
+    def __init__(
         self,
-        shape_to_place: "Shape",
-        shape_slot_index: int,
-        target_row: int,
-        target_col: int,
-    ) -> float:
-        self.gs._last_action_valid = True
-        step_reward = 0.0
+        envs: List[GameState],
+        agent: PPOAgent,
+        storage: "RolloutStorage",  # Use string hint or TYPE_CHECKING block
+        state: CollectorState,
+        stats_recorder: StatsRecorderBase,
+        env_config: EnvConfig,
+        reward_config: RewardConfig,
+        ppo_config: PPOConfig,
+        rnn_config: RNNConfig,
+        obs_norm_config: ObsNormConfig,
+    ):
+        # --- Import RolloutStorage here ---
+        from .rollout_storage import RolloutStorage
 
-        step_reward += self._calculate_placement_reward(shape_to_place)
-        holes_before = self.gs.grid.count_holes()
+        # --- End Import ---
 
-        self.gs.grid.place(shape_to_place, target_row, target_col)
-        self.gs.shapes[shape_slot_index] = None
-        self.gs.game_score += len(shape_to_place.triangles)
-        self.gs.pieces_placed_this_episode += 1
+        self.envs = envs
+        self.agent = agent
+        self.storage = (
+            storage  # storage is already passed in, no need to re-assign from import
+        )
+        self.state = state
+        self.stats_recorder = stats_recorder
+        self.env_config = env_config
+        self.reward_config = reward_config
+        self.ppo_config = ppo_config
+        self.rnn_config = rnn_config
+        self.obs_norm_config = obs_norm_config
+        self.num_envs = len(envs)
 
-        lines_cleared, triangles_cleared, cleared_coords = self.gs.grid.clear_lines()
-        line_clear_reward = self._calculate_line_clear_reward(triangles_cleared)
-        step_reward += line_clear_reward
-        self.gs.triangles_cleared_this_episode += triangles_cleared
+    def _record_episode_stats(
+        self, env_index: int, final_reward_adjustment: float, current_global_step: int
+    ):
+        """Records completed episode statistics using the thread-safe stats_recorder."""
+        self.state.episode_count += 1
+        final_episode_score = (
+            self.state.current_episode_scores[env_index] + final_reward_adjustment
+        )
+        final_episode_length = self.state.current_episode_lengths[env_index]
+        final_game_score = self.state.current_episode_game_scores[env_index]
+        final_triangles_cleared = self.state.current_episode_triangles_cleared[
+            env_index
+        ]
 
-        if triangles_cleared > 0:
-            # print(f"[GameLogic] Line Clear! Lines: {lines_cleared}, Tris: {triangles_cleared}") # DEBUG REMOVED
-            self.gs.game_score += triangles_cleared * 2
-            self.gs.blink_time = 0.5
-            self.gs.freeze_time = 0.5  # Set freeze time for animation
-            self.gs.line_clear_flash_time = 0.3
-            self.gs.line_clear_highlight_time = 0.5
-            self.gs.cleared_triangles_coords = cleared_coords
-            self.gs.last_line_clear_info = (
-                lines_cleared,
-                triangles_cleared,
-                line_clear_reward,
-            )
+        self.stats_recorder.record_episode(
+            episode_score=final_episode_score,
+            episode_length=final_episode_length,
+            episode_num=self.state.episode_count,
+            global_step=current_global_step,
+            game_score=final_game_score,
+            triangles_cleared=final_triangles_cleared,
+        )
 
-        holes_after = self.gs.grid.count_holes()
-        new_holes_created = max(0, holes_after - holes_before)
+    def collect_one_step(self, current_global_step: int) -> int:
+        """Collects one step of experience from all environments."""
+        step_start_time = time.time()
+        with self.storage._lock:
+            current_rollout_step = self.storage.step  # Get current storage step index
 
-        step_reward += self._calculate_state_penalty()
-        step_reward += new_holes_created * self.gs.rewards.PENALTY_NEW_HOLE
+        # 1. Identify active environments and get valid actions (CPU operations)
+        active_env_indices: List[int] = []
+        valid_actions_list: List[Optional[List[int]]] = [None] * self.num_envs
+        envs_done_pre_action: List[int] = []
 
-        if all(s is None for s in self.gs.shapes):
-            from .shape import Shape  # Local import to avoid cycle
+        for i in range(self.num_envs):
+            self.envs[i]._update_timers()  # Update internal env timers if any
+            if self.state.current_dones_cpu[i]:
+                continue  # Skip already done envs
+            if self.envs[i].is_frozen():
+                continue  # Skip frozen envs (e.g., during animation)
 
-            self.gs.shapes = [
-                Shape() for _ in range(self.gs.env_config.NUM_SHAPE_SLOTS)
+            valid_actions = self.envs[i].valid_actions()
+            if not valid_actions:
+                envs_done_pre_action.append(i)  # Mark as done if no valid moves
+            else:
+                valid_actions_list[i] = valid_actions
+                active_env_indices.append(i)
+
+        # 2. Select actions ONLY for active environments (Agent interaction)
+        actions_np = np.zeros(self.num_envs, dtype=np.int64)
+        log_probs_np = np.zeros(self.num_envs, dtype=np.float32)
+        values_np = np.zeros(self.num_envs, dtype=np.float32)
+        next_lstm_state_device = (
+            self.state.current_lstm_state_device
+        )  # Start with current state
+
+        if active_env_indices:
+            active_indices_tensor = torch.tensor(active_env_indices, dtype=torch.long)
+
+            # Prepare batch of RAW observations on CPU
+            batch_obs_grid_raw = self.state.current_raw_obs_grid_cpu[active_env_indices]
+            batch_obs_shapes_raw = self.state.current_raw_obs_shapes_cpu[
+                active_env_indices
             ]
-
-        if self._check_fundamental_game_over():
-            step_reward += self._handle_game_over_state_change()
-
-        self.gs.demo_logic.update_demo_selection_after_placement(shape_slot_index)
-        return step_reward
-
-    def step(self, action_index: int) -> Tuple[float, bool]:
-        """Performs one game step based on the action index."""
-        # Update timers at the very beginning of the step
-        self.gs._update_timers()
-
-        # Check game over state *after* timer update
-        if self.gs.game_over:
-            return (0.0, True)
-
-        # Check if frozen *after* timer update
-        if self.gs.is_frozen():
-            # If frozen, still calculate potential change but return 0 extrinsic reward
-            current_potential = self.gs.features.calculate_potential()
-            pbrs_reward = (
-                (self.gs.ppo_config.GAMMA * current_potential - self.gs._last_potential)
-                if self.gs.rewards.ENABLE_PBRS
-                else 0.0
-            )
-            self.gs._last_potential = current_potential
-            total_reward = self.gs.rewards.REWARD_ALIVE_STEP + pbrs_reward
-            self.gs.score += total_reward
-            return (
-                total_reward,
-                False,
+            batch_obs_availability_raw = self.state.current_raw_obs_availability_cpu[
+                active_env_indices
+            ]
+            batch_obs_explicit_features_raw = (
+                self.state.current_raw_obs_explicit_features_cpu[active_env_indices]
             )
 
-        # --- If not frozen and not game over, proceed with action ---
-        shape_slot_index, target_row, target_col = self.decode_action(action_index)
+            # Normalize observations on CPU using helper
+            batch_obs_grid_norm = normalize_obs(
+                batch_obs_grid_raw,
+                self.state.obs_rms.get("grid"),
+                self.obs_norm_config.OBS_CLIP,
+            )
+            batch_obs_shapes_norm = normalize_obs(
+                batch_obs_shapes_raw,
+                self.state.obs_rms.get("shapes"),
+                self.obs_norm_config.OBS_CLIP,
+            )
+            batch_obs_availability_norm = normalize_obs(
+                batch_obs_availability_raw,
+                self.state.obs_rms.get("shape_availability"),
+                self.obs_norm_config.OBS_CLIP,
+            )
+            batch_obs_explicit_features_norm = normalize_obs(
+                batch_obs_explicit_features_raw,
+                self.state.obs_rms.get("explicit_features"),
+                self.obs_norm_config.OBS_CLIP,
+            )
 
-        shape_to_place = (
-            self.gs.shapes[shape_slot_index]
-            if 0 <= shape_slot_index < len(self.gs.shapes)
-            else None
+            # Convert normalized observations to tensors on agent's device
+            batch_obs_grid_t = torch.from_numpy(batch_obs_grid_norm).to(
+                self.agent.device
+            )
+            batch_obs_shapes_t = torch.from_numpy(batch_obs_shapes_norm).to(
+                self.agent.device
+            )
+            batch_obs_availability_t = torch.from_numpy(batch_obs_availability_norm).to(
+                self.agent.device
+            )
+            batch_obs_explicit_features_t = torch.from_numpy(
+                batch_obs_explicit_features_norm
+            ).to(self.agent.device)
+            batch_valid_actions = [valid_actions_list[i] for i in active_env_indices]
+
+            # Select corresponding hidden state (already on agent device)
+            batch_hidden_state_device = None
+            if (
+                self.rnn_config.USE_RNN
+                and self.state.current_lstm_state_device is not None
+            ):
+                h_n, c_n = self.state.current_lstm_state_device
+                batch_hidden_state_device = (
+                    h_n[:, active_indices_tensor, :].contiguous(),
+                    c_n[:, active_indices_tensor, :].contiguous(),
+                )
+
+            # Call agent's select_action_batch (uses internal lock)
+            (
+                batch_actions_t,
+                batch_log_probs_t,
+                batch_values_t,
+                batch_next_lstm_state_device,
+            ) = self.agent.select_action_batch(
+                batch_obs_grid_t,
+                batch_obs_shapes_t,
+                batch_obs_availability_t,
+                batch_obs_explicit_features_t,
+                batch_hidden_state_device,
+                batch_valid_actions,
+            )
+
+            # Store results back into numpy arrays (CPU)
+            actions_np[active_env_indices] = batch_actions_t.cpu().numpy()
+            log_probs_np[active_env_indices] = batch_log_probs_t.cpu().numpy()
+            values_np[active_env_indices] = batch_values_t.cpu().numpy()
+
+            # Update the full hidden state (on agent device)
+            if self.rnn_config.USE_RNN and batch_next_lstm_state_device is not None:
+                next_h, next_c = (
+                    self.state.current_lstm_state_device[0].clone(),
+                    self.state.current_lstm_state_device[1].clone(),
+                )
+                next_h[:, active_indices_tensor, :] = batch_next_lstm_state_device[0]
+                next_c[:, active_indices_tensor, :] = batch_next_lstm_state_device[1]
+                next_lstm_state_device = (next_h, next_c)
+
+        # 3. Step environments, handle resets, update RAW observations (CPU operations)
+        # Prepare buffers for the *next* step's raw observations
+        next_raw_obs_grid_cpu = np.copy(self.state.current_raw_obs_grid_cpu)
+        next_raw_obs_shapes_cpu = np.copy(self.state.current_raw_obs_shapes_cpu)
+        next_raw_obs_availability_cpu = np.copy(
+            self.state.current_raw_obs_availability_cpu
         )
-        # Check if the specific action is valid (placement possible)
-        is_valid_placement = shape_to_place is not None and self.gs.grid.can_place(
-            shape_to_place, target_row, target_col
+        next_raw_obs_explicit_features_cpu = np.copy(
+            self.state.current_raw_obs_explicit_features_cpu
+        )
+        step_rewards_np = np.zeros(self.num_envs, dtype=np.float32)
+        step_dones_np = np.copy(
+            self.state.current_dones_cpu
+        )  # Dones resulting from *this* step
+
+        for i in range(self.num_envs):
+            final_reward_adj = 0.0
+            if self.state.current_dones_cpu[
+                i
+            ]:  # Env was done at the start of this step, reset it
+                new_state_dict = reset_env(
+                    self.envs[i],
+                    self.state.current_episode_scores,
+                    self.state.current_episode_lengths,
+                    self.state.current_episode_game_scores,
+                    self.state.current_episode_triangles_cleared,
+                    i,
+                    self.env_config,
+                )
+                update_raw_obs_from_state_dict(
+                    i,
+                    new_state_dict,
+                    next_raw_obs_grid_cpu,
+                    next_raw_obs_shapes_cpu,
+                    next_raw_obs_availability_cpu,
+                    next_raw_obs_explicit_features_cpu,
+                )
+                reset_rnn_state_for_env(
+                    i, self.rnn_config.USE_RNN, next_lstm_state_device, self.agent
+                )  # Reset next state
+                step_dones_np[i] = False  # It's not done *after* the reset
+            elif (
+                i in envs_done_pre_action
+            ):  # Env became done because no actions were valid
+                final_reward_adj = self.reward_config.PENALTY_GAME_OVER
+                log_probs_np[i], values_np[i] = (
+                    -1e9,
+                    0.0,
+                )  # Assign dummy values for storage
+                self.state.current_episode_lengths[
+                    i
+                ] += 1  # Increment length for the step that led to game over
+                self._record_episode_stats(i, final_reward_adj, current_global_step)
+                new_state_dict = reset_env(
+                    self.envs[i],
+                    self.state.current_episode_scores,
+                    self.state.current_episode_lengths,
+                    self.state.current_episode_game_scores,
+                    self.state.current_episode_triangles_cleared,
+                    i,
+                    self.env_config,
+                )
+                update_raw_obs_from_state_dict(
+                    i,
+                    new_state_dict,
+                    next_raw_obs_grid_cpu,
+                    next_raw_obs_shapes_cpu,
+                    next_raw_obs_availability_cpu,
+                    next_raw_obs_explicit_features_cpu,
+                )
+                reset_rnn_state_for_env(
+                    i, self.rnn_config.USE_RNN, next_lstm_state_device, self.agent
+                )  # Reset next state
+                step_dones_np[i] = True  # Mark as done for the *next* step
+            elif i in active_env_indices:  # Env was active, take a step
+                action_to_take = actions_np[i]
+                try:
+                    reward, done = self.envs[i].step(action_to_take)
+                    step_rewards_np[i], step_dones_np[i] = reward, done
+                    self.state.current_episode_scores[i] += reward
+                    self.state.current_episode_lengths[i] += 1
+                    self.state.current_episode_game_scores[i] = self.envs[i].game_score
+                    self.state.current_episode_triangles_cleared[i] = self.envs[
+                        i
+                    ].triangles_cleared_this_episode
+                    if done:
+                        self._record_episode_stats(
+                            i, 0.0, current_global_step
+                        )  # Record completed episode
+                        new_state_dict = reset_env(
+                            self.envs[i],
+                            self.state.current_episode_scores,
+                            self.state.current_episode_lengths,
+                            self.state.current_episode_game_scores,
+                            self.state.current_episode_triangles_cleared,
+                            i,
+                            self.env_config,
+                        )
+                        update_raw_obs_from_state_dict(
+                            i,
+                            new_state_dict,
+                            next_raw_obs_grid_cpu,
+                            next_raw_obs_shapes_cpu,
+                            next_raw_obs_availability_cpu,
+                            next_raw_obs_explicit_features_cpu,
+                        )
+                        reset_rnn_state_for_env(
+                            i,
+                            self.rnn_config.USE_RNN,
+                            next_lstm_state_device,
+                            self.agent,
+                        )  # Reset next state
+                    else:  # Game continues, get next state
+                        next_state_dict = self.envs[i].get_state()
+                        update_raw_obs_from_state_dict(
+                            i,
+                            next_state_dict,
+                            next_raw_obs_grid_cpu,
+                            next_raw_obs_shapes_cpu,
+                            next_raw_obs_availability_cpu,
+                            next_raw_obs_explicit_features_cpu,
+                        )
+                except Exception as e:
+                    print(f"ERROR: Env {i} step failed (Action: {action_to_take}): {e}")
+                    traceback.print_exc()
+                    step_rewards_np[i], step_dones_np[i] = (
+                        self.reward_config.PENALTY_GAME_OVER,
+                        True,
+                    )
+                    self.state.current_episode_lengths[i] += 1
+                    self._record_episode_stats(i, 0.0, current_global_step)
+                    new_state_dict = reset_env(
+                        self.envs[i],
+                        self.state.current_episode_scores,
+                        self.state.current_episode_lengths,
+                        self.state.current_episode_game_scores,
+                        self.state.current_episode_triangles_cleared,
+                        i,
+                        self.env_config,
+                    )
+                    update_raw_obs_from_state_dict(
+                        i,
+                        new_state_dict,
+                        next_raw_obs_grid_cpu,
+                        next_raw_obs_shapes_cpu,
+                        next_raw_obs_availability_cpu,
+                        next_raw_obs_explicit_features_cpu,
+                    )
+                    reset_rnn_state_for_env(
+                        i, self.rnn_config.USE_RNN, next_lstm_state_device, self.agent
+                    )  # Reset next state
+
+        # 4. Update RMS with the RAW observations collected *before* this step (CPU)
+        update_obs_rms(
+            self.state.current_raw_obs_grid_cpu, self.state.obs_rms.get("grid")
+        )
+        update_obs_rms(
+            self.state.current_raw_obs_shapes_cpu, self.state.obs_rms.get("shapes")
+        )
+        update_obs_rms(
+            self.state.current_raw_obs_availability_cpu,
+            self.state.obs_rms.get("shape_availability"),
+        )
+        update_obs_rms(
+            self.state.current_raw_obs_explicit_features_cpu,
+            self.state.obs_rms.get("explicit_features"),
         )
 
-        potential_before_action = self.gs.features.calculate_potential()
+        # 5. Store potentially NORMALIZED results in RolloutStorage (CPU tensors)
+        # Normalize the observations *before* the step was taken
+        obs_grid_norm = normalize_obs(
+            self.state.current_raw_obs_grid_cpu,
+            self.state.obs_rms.get("grid"),
+            self.obs_norm_config.OBS_CLIP,
+        )
+        obs_shapes_norm = normalize_obs(
+            self.state.current_raw_obs_shapes_cpu,
+            self.state.obs_rms.get("shapes"),
+            self.obs_norm_config.OBS_CLIP,
+        )
+        obs_availability_norm = normalize_obs(
+            self.state.current_raw_obs_availability_cpu,
+            self.state.obs_rms.get("shape_availability"),
+            self.obs_norm_config.OBS_CLIP,
+        )
+        obs_explicit_features_norm = normalize_obs(
+            self.state.current_raw_obs_explicit_features_cpu,
+            self.state.obs_rms.get("explicit_features"),
+            self.obs_norm_config.OBS_CLIP,
+        )
 
-        if is_valid_placement:
-            extrinsic_reward = self._handle_valid_placement(
-                shape_to_place, shape_slot_index, target_row, target_col
+        obs_grid_t = torch.from_numpy(obs_grid_norm)
+        obs_shapes_t = torch.from_numpy(obs_shapes_norm)
+        obs_availability_t = torch.from_numpy(obs_availability_norm)
+        obs_explicit_features_t = torch.from_numpy(obs_explicit_features_norm)
+        actions_t = torch.from_numpy(actions_np).long().unsqueeze(1)
+        log_probs_t = torch.from_numpy(log_probs_np).float().unsqueeze(1)
+        values_t = torch.from_numpy(values_np).float().unsqueeze(1)
+        rewards_t = torch.from_numpy(step_rewards_np).float().unsqueeze(1)
+        # Store the dones that resulted *from this step*
+        dones_t_for_storage = torch.from_numpy(step_dones_np).float().unsqueeze(1)
+
+        # Get LSTM state corresponding to the observation *before* the action (copy from device to CPU)
+        lstm_state_to_store_cpu = None
+        if self.rnn_config.USE_RNN and self.state.current_lstm_state_device is not None:
+            lstm_state_to_store_cpu = (
+                self.state.current_lstm_state_device[0].cpu(),
+                self.state.current_lstm_state_device[1].cpu(),
             )
-        else:
-            # An invalid action was chosen (e.g., by the agent or debug click)
-            extrinsic_reward = self._handle_invalid_placement()
-            # Check if *any* move is possible after this invalid attempt
-            if self._check_fundamental_game_over():
-                extrinsic_reward += self._handle_game_over_state_change()
 
-        # Add alive reward only if the game didn't end *during* this step
-        if not self.gs.game_over:
-            extrinsic_reward += self.gs.rewards.REWARD_ALIVE_STEP
+        # Insert into storage (uses internal lock)
+        self.storage.insert(
+            obs_grid_t,
+            obs_shapes_t,
+            obs_availability_t,
+            obs_explicit_features_t,
+            actions_t,
+            log_probs_t,
+            values_t,
+            rewards_t,
+            dones_t_for_storage,
+            lstm_state_to_store_cpu,
+        )
 
-        potential_after_action = self.gs.features.calculate_potential()
-        pbrs_reward = 0.0
-        if self.gs.rewards.ENABLE_PBRS:
-            pbrs_reward = (
-                self.gs.ppo_config.GAMMA * potential_after_action
-                - potential_before_action
-            )
+        # 6. Update collector's current RAW state (CPU) and LSTM state (Device) for the *next* iteration
+        self.state.current_raw_obs_grid_cpu = next_raw_obs_grid_cpu
+        self.state.current_raw_obs_shapes_cpu = next_raw_obs_shapes_cpu
+        self.state.current_raw_obs_availability_cpu = next_raw_obs_availability_cpu
+        self.state.current_raw_obs_explicit_features_cpu = (
+            next_raw_obs_explicit_features_cpu
+        )
+        self.state.current_dones_cpu = (
+            step_dones_np  # Update dones for the next step check
+        )
+        self.state.current_lstm_state_device = (
+            next_lstm_state_device  # Update LSTM state (on agent device)
+        )
 
-        total_reward = extrinsic_reward + pbrs_reward
-        self.gs._last_potential = potential_after_action
+        # 7. Record performance (thread-safe recorder)
+        collection_time = time.time() - step_start_time
+        sps = self.num_envs / max(1e-9, collection_time)
+        self.stats_recorder.record_step(
+            {"sps_collection": sps, "rollout_collection_time": collection_time}
+        )
 
-        self.gs.score += total_reward
-        return (total_reward, self.gs.game_over)
+        return self.num_envs  # Return number of steps collected (always num_envs here)
 
 
 File: training\collector_state.py
@@ -10025,9 +10188,10 @@ from stats.stats_recorder import StatsRecorderBase
 from utils.running_mean_std import RunningMeanStd
 from .rollout_storage import RolloutStorage
 
-# Import new helper classes
+# Import new helper classes (except CollectorLogic)
 from .collector_state import CollectorState
-from .collector_logic import CollectorLogic
+
+# Removed: from .collector_logic import CollectorLogic
 
 # Keep normalization import for compute_advantages and add update_obs_rms
 from .normalization import normalize_obs, update_obs_rms
@@ -10054,6 +10218,11 @@ class RolloutCollector:
         obs_norm_config: ObsNormConfig,
         device: torch.device,
     ):
+        # --- Import CollectorLogic here ---
+        from .collector_logic import CollectorLogic
+
+        # --- End Import ---
+
         self.envs = envs
         self.agent = agent
         self.stats_recorder = stats_recorder
@@ -10082,7 +10251,7 @@ class RolloutCollector:
             self.num_envs, self.env_config, self.rnn_config, self.agent
         )
 
-        # Initialize Logic Handler
+        # Initialize Logic Handler (using the imported class)
         self.logic = CollectorLogic(
             self.envs,
             self.agent,
@@ -11974,11 +12143,16 @@ def _interpolate_visual_property(
     Rank (total_ranks - 1) corresponds to min_val (least prominent).
     """
     if total_ranks <= 1:
-        return max_val
+        return float(max_val)  # Ensure float
     inverted_rank = (total_ranks - 1) - rank
     fraction = inverted_rank / max(1, total_ranks - 1)
-    value = min_val + (max_val - min_val) * fraction
-    return np.clip(value, min_val, max_val)
+    # --- Explicitly cast to float before subtraction/addition ---
+    f_min_val = float(min_val)
+    f_max_val = float(max_val)
+    value = f_min_val + (f_max_val - f_min_val) * fraction
+    # --- End explicit cast ---
+    # Clip using original min/max in case casting caused issues, ensure float return
+    return float(np.clip(value, min_val, max_val))
 
 
 def _format_value(value: float, is_loss: bool) -> str:
@@ -13738,7 +13912,7 @@ class ButtonStatusRenderer:
             status_color = RED
         elif "Collecting" in status:
             status_color = GOOGLE_COLORS[0]
-        elif "Updating" in status:
+        elif "Updating" in status:  # Should not be called here now, but keep for safety
             status_color = GOOGLE_COLORS[2]
         elif "Ready" in status:
             status_color = WHITE

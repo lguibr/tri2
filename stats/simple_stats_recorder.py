@@ -4,7 +4,7 @@ from collections import deque
 from typing import Deque, Dict, Any, Optional, Union, List
 import numpy as np
 import torch
-import threading  # Added for Lock
+import threading
 
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
@@ -24,19 +24,20 @@ class SimpleStatsRecorder(StatsRecorderBase):
         console_log_interval: int = StatsConfig.CONSOLE_LOG_FREQ,
     ):
         self.aggregator = aggregator
+        # Console log interval might now represent episodes or training steps
         self.console_log_interval = (
             max(1, console_log_interval) if console_log_interval > 0 else -1
         )
         self.last_log_time: float = time.time()
-        self.start_time: float = time.time()  # Use aggregator's start time?
+        self.start_time: float = time.time()
         self.summary_avg_window = self.aggregator.summary_avg_window
-        self.rollouts_since_last_log = 0
+        # Counter might track episodes or training steps now
+        self.updates_since_last_log = 0  # Renamed from rollouts_since_last_log
 
-        # Lock for protecting internal state like rollout counter
         self._lock = threading.Lock()
 
         print(
-            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} rollouts"
+            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} updates/episodes"
         )
         print(
             f"[SimpleStatsRecorder] Console logs will use Avg Window: {self.summary_avg_window}"
@@ -52,7 +53,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
         triangles_cleared: Optional[int] = None,
     ):
         """Records episode stats and prints new bests to console. Thread-safe."""
-        # Aggregator call is thread-safe due to its internal lock
         update_info = self.aggregator.record_episode(
             episode_score,
             episode_length,
@@ -61,80 +61,108 @@ class SimpleStatsRecorder(StatsRecorderBase):
             game_score,
             triangles_cleared,
         )
-        # Reading aggregator state is thread-safe due to its internal lock
         current_step = (
             global_step
             if global_step is not None
-            else self.aggregator.storage.current_global_step  # Corrected access
+            else self.aggregator.storage.current_global_step
         )
-        step_info = f"at Step ~{current_step/1e6:.1f}M"
+        step_info = f"at Step ~{current_step/1e6:.1f}M"  # Step might mean NN steps now
 
-        # Print new bests immediately (print is thread-safe in Python 3)
+        # Print new bests immediately
         if update_info.get("new_best_rl"):
             prev_str = (
-                f"{self.aggregator.storage.previous_best_score:.2f}"  # Corrected access
-                if self.aggregator.storage.previous_best_score
-                > -float("inf")  # Corrected access
+                f"{self.aggregator.storage.previous_best_score:.2f}"
+                if self.aggregator.storage.previous_best_score > -float("inf")
                 else "N/A"
             )
             print(
-                f"\n--- 🏆 New Best RL: {self.aggregator.storage.best_score:.2f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
+                f"\n--- 🏆 New Best RL: {self.aggregator.storage.best_score:.2f} {step_info} (Prev: {prev_str}) ---"
             )
         if update_info.get("new_best_game"):
             prev_str = (
-                f"{self.aggregator.storage.previous_best_game_score:.0f}"  # Corrected access
-                if self.aggregator.storage.previous_best_game_score
-                > -float("inf")  # Corrected access
+                f"{self.aggregator.storage.previous_best_game_score:.0f}"
+                if self.aggregator.storage.previous_best_game_score > -float("inf")
                 else "N/A"
             )
             print(
-                f"--- 🎮 New Best Game: {self.aggregator.storage.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
+                f"--- 🎮 New Best Game: {self.aggregator.storage.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
             )
-        if update_info.get("new_best_loss"):
+        # Check for new best NN losses
+        if update_info.get("new_best_loss"):  # Value loss
             prev_str = (
-                f"{self.aggregator.storage.previous_best_value_loss:.4f}"  # Corrected access
-                if self.aggregator.storage.previous_best_value_loss
-                < float("inf")  # Corrected access
+                f"{self.aggregator.storage.previous_best_value_loss:.4f}"
+                if self.aggregator.storage.previous_best_value_loss < float("inf")
                 else "N/A"
             )
             print(
-                f"---📉 New Best Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
+                f"---📉 New Best V.Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
+            )
+        if update_info.get("new_best_policy_loss"):  # Policy loss
+            prev_str = (
+                f"{self.aggregator.storage.previous_best_policy_loss:.4f}"
+                if self.aggregator.storage.previous_best_policy_loss < float("inf")
+                else "N/A"
+            )
+            print(
+                f"---📉 New Best P.Loss: {self.aggregator.storage.best_policy_loss:.4f} {step_info} (Prev: {prev_str}) ---"
             )
 
+        # Trigger console log based on episode count if interval is set
+        log_now = False
+        with self._lock:
+            self.updates_since_last_log += 1
+            if (
+                self.console_log_interval > 0
+                and self.updates_since_last_log >= self.console_log_interval
+            ):
+                log_now = True
+                self.updates_since_last_log = 0
+
+        if log_now:
+            self.log_summary(current_step)
+
     def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats and triggers console logging if interval met. Thread-safe."""
-        # Aggregator call is thread-safe
+        """Records step stats (e.g., NN update) and triggers console logging if interval met. Thread-safe."""
         update_info = self.aggregator.record_step(step_data)
         g_step = step_data.get(
             "global_step", self.aggregator.storage.current_global_step
-        )  # Corrected access
+        )
 
         # Print new best loss immediately if it occurred during this step's update
-        if update_info.get("new_best_loss"):
+        if update_info.get("new_best_loss"):  # Value loss
             prev_str = (
-                f"{self.aggregator.storage.previous_best_value_loss:.4f}"  # Corrected access
-                if self.aggregator.storage.previous_best_value_loss
-                < float("inf")  # Corrected access
+                f"{self.aggregator.storage.previous_best_value_loss:.4f}"
+                if self.aggregator.storage.previous_best_value_loss < float("inf")
                 else "N/A"
             )
             step_info = f"at Step ~{g_step/1e6:.1f}M"
             print(
-                f"---📉 New Best Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
+                f"---📉 New Best V.Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
+            )
+        if update_info.get("new_best_policy_loss"):  # Policy loss
+            prev_str = (
+                f"{self.aggregator.storage.previous_best_policy_loss:.4f}"
+                if self.aggregator.storage.previous_best_policy_loss < float("inf")
+                else "N/A"
+            )
+            step_info = f"at Step ~{g_step/1e6:.1f}M"
+            print(
+                f"---📉 New Best P.Loss: {self.aggregator.storage.best_policy_loss:.4f} {step_info} (Prev: {prev_str}) ---"
             )
 
-        # Increment rollout counter and check logging frequency (thread-safe)
+        # Increment counter and check logging frequency (thread-safe)
+        # Logging frequency might now be based on NN updates instead of rollouts
         log_now = False
         with self._lock:
-            # Increment rollout counter if an agent update occurred
-            # Check for a key that is reliably present after an update, like 'lr' or 'update_time'
-            if "lr" in step_data or "update_time" in step_data:
-                self.rollouts_since_last_log += 1
+            # Increment counter if an NN update occurred (check for loss keys)
+            if "policy_loss" in step_data or "value_loss" in step_data:
+                self.updates_since_last_log += 1
                 if (
                     self.console_log_interval > 0
-                    and self.rollouts_since_last_log >= self.console_log_interval
+                    and self.updates_since_last_log >= self.console_log_interval
                 ):
                     log_now = True
-                    self.rollouts_since_last_log = 0  # Reset counter
+                    self.updates_since_last_log = 0
 
         if log_now:
             self.log_summary(g_step)
@@ -149,12 +177,8 @@ class SimpleStatsRecorder(StatsRecorderBase):
 
     def log_summary(self, global_step: int):
         """Logs the current summary statistics to the console."""
-        # Get summary data (thread-safe)
         summary = self.get_summary(global_step)
-        # Use aggregator's start time
-        elapsed_runtime = (
-            time.time() - self.aggregator.storage.start_time
-        )  # Corrected access
+        elapsed_runtime = time.time() - self.aggregator.storage.start_time
         runtime_hrs = elapsed_runtime / 3600
 
         best_score_val = (
@@ -162,32 +186,38 @@ class SimpleStatsRecorder(StatsRecorderBase):
             if summary["best_score"] > -float("inf")
             else "N/A"
         )
-        best_loss_val = (
-            f"{summary['best_loss']:.4f}"
+        best_game_score_val = (
+            f"{summary['best_game_score']:.0f}"
+            if summary["best_game_score"] > -float("inf")
+            else "N/A"
+        )
+        best_v_loss_val = (
+            f"{summary['best_loss']:.4f}"  # Value loss
             if summary["best_loss"] < float("inf")
+            else "N/A"
+        )
+        best_p_loss_val = (
+            f"{summary['best_policy_loss']:.4f}"  # Policy loss
+            if summary["best_policy_loss"] < float("inf")
             else "N/A"
         )
         avg_window_size = summary.get("summary_avg_window_size", "?")
 
-        # --- Use avg_minibatch_sps_window instead of steps_per_second ---
-        # Ensure the key exists before formatting
-        sps_val = summary.get("avg_minibatch_sps_window", 0.0)
-        sps_str = f"{sps_val/1000:.1f}k" if sps_val >= 1000 else f"{sps_val:.0f}"
-        # --- End change ---
-
+        # Removed SPS
         log_str = (
-            f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
-            f"Ep: {summary['total_episodes']:<7} | SPS(MB): {sps_str:<5} | "  # Changed SPS label
-            f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
-            f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "
+            f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "  # Step might mean NN steps
+            f"Ep: {summary['total_episodes']:<7} | "
+            # f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | " # Keep RL score?
+            f"GameScore(Avg{avg_window_size}): {summary['avg_game_score_window']:<6.0f} (Best: {best_game_score_val}) | "
+            f"V.Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_v_loss_val}) | "
+            f"P.Loss(Avg{avg_window_size}): {summary['policy_loss']:.4f} (Best: {best_p_loss_val}) | "
             f"LR: {summary['current_lr']:.1e}"
         )
         avg_tris_cleared = summary.get("avg_triangles_cleared_window", 0.0)
         log_str += f" | TrisClr(Avg{avg_window_size}): {avg_tris_cleared:.1f}"
 
-        print(log_str)  # Print is thread-safe
+        print(log_str)
 
-        # Update last log time (no lock needed, only read by this method)
         self.last_log_time = time.time()
 
     def record_histogram(

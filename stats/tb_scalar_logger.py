@@ -1,3 +1,4 @@
+# File: stats/tb_scalar_logger.py
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import threading
@@ -69,20 +70,16 @@ class TBScalarLogger:
         with self._lock:
             try:
                 scalar_map = {
-                    "policy_loss": "Loss/Policy Loss",
-                    "value_loss": "Loss/Value Loss",
-                    "entropy": "Loss/Entropy",
-                    "grad_norm": "Debug/Grad Norm",
-                    "avg_max_q": "Debug/Avg Max Q",
-                    "beta": "Debug/Beta",
-                    "buffer_size": "Debug/Buffer Size",
-                    "lr": "Train/Learning Rate",
-                    "epsilon": "Train/Epsilon",
-                    "sps_collection": "Performance/SPS Collection",  # Collection SPS
-                    "update_steps_per_second": "Performance/SPS Update (Overall)",  # Overall SPS
-                    "minibatch_update_sps": "Performance/SPS Update (Minibatch)",  # NEW: Minibatch SPS
-                    "update_time": "Performance/Update Time",
-                    "step_time": "Performance/Total Step Time",  # Might be less useful now
+                    "policy_loss": "Loss/Policy Loss",  # Keep policy loss for NN
+                    "value_loss": "Loss/Value Loss",  # Keep value loss for NN
+                    # Removed entropy, grad_norm, sps_collection, update_steps_per_second, minibatch_update_sps
+                    "avg_max_q": "Debug/Avg Max Q",  # Keep if NN estimates Q
+                    "beta": "Debug/Beta",  # Keep if PER used
+                    "buffer_size": "Debug/Buffer Size",  # Keep for MCTS/NN buffer
+                    "lr": "Train/Learning Rate",  # Keep for NN
+                    "epsilon": "Train/Epsilon",  # Keep if used
+                    "update_time": "Performance/Update Time",  # Keep for NN update time
+                    "step_time": "Performance/Total Step Time",  # Keep if relevant
                     "cpu_usage": "Resource/CPU Usage (%)",
                     "memory_usage": "Resource/Memory Usage (%)",
                     "gpu_memory_usage_percent": "Resource/GPU Memory Usage (%)",
@@ -92,10 +89,16 @@ class TBScalarLogger:
                         self.writer.add_scalar(tag, step_data[key], g_step)
 
                 # --- Corrected Access ---
-                if update_info.get("new_best_loss"):
+                if update_info.get("new_best_loss"):  # Value loss
                     self.writer.add_scalar(
-                        "Best Performance/Loss",
+                        "Best Performance/Value Loss",
                         aggregator.storage.best_value_loss,
+                        g_step,
+                    )
+                if update_info.get("new_best_policy_loss"):  # Policy loss
+                    self.writer.add_scalar(
+                        "Best Performance/Policy Loss",
+                        aggregator.storage.best_policy_loss,
                         g_step,
                     )
                 # --- End Correction ---
