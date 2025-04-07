@@ -1,3 +1,4 @@
+# File: agent/networks/agent_network.py
 import torch
 import torch.nn as nn
 import numpy as np
@@ -13,10 +14,11 @@ from config import (
 
 class ActorCriticNetwork(nn.Module):
     """
-    Actor-Critic Network: CNN+MLP -> Fusion -> Optional Transformer -> Optional LSTM -> Actor/Critic Heads.
+    Actor-Critic Network: CNN -> Spatial Transformer -> Fusion MLP -> Optional LSTM -> Actor/Critic Heads.
     Handles both single step (eval) and sequence (RNN/Transformer training) inputs.
     Includes shape availability and explicit features.
     Uses SiLU activation by default based on ModelConfig.
+    Applies Transformer attention directly to spatial CNN features.
     """
 
     def __init__(
@@ -26,7 +28,7 @@ class ActorCriticNetwork(nn.Module):
         model_config: ModelConfig.Network,
         rnn_config: RNNConfig,
         transformer_config: TransformerConfig,
-        device: torch.device, 
+        device: torch.device,
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -34,7 +36,7 @@ class ActorCriticNetwork(nn.Module):
         self.config = model_config
         self.rnn_config = rnn_config
         self.transformer_config = transformer_config
-        self.device = device 
+        self.device = device
 
         print(f"[ActorCriticNetwork] Target device set to: {self.device}")
         print(f"[ActorCriticNetwork] Using RNN: {self.rnn_config.USE_RNN}")
@@ -51,40 +53,26 @@ class ActorCriticNetwork(nn.Module):
         self.explicit_features_dim = self.env_config.EXPLICIT_FEATURES_DIM
 
         # --- Feature Extractors ---
-        self.conv_base, conv_out_h, conv_out_w, conv_out_c = self._build_cnn_branch()
-        self.conv_out_size = self._get_conv_out_size(
-            (self.grid_c, self.grid_h, self.grid_w)
+        self.conv_base, self.conv_out_h, self.conv_out_w, self.conv_out_c = (
+            self._build_cnn_branch()
         )
+        # self.conv_out_size = self._get_conv_out_size( # No longer needed as we don't flatten immediately
+        #     (self.grid_c, self.grid_h, self.grid_w)
+        # )
         print(
-            f"  CNN Output Dim (HxWxC): ({conv_out_h}x{conv_out_w}x{conv_out_c}) -> Flat: {self.conv_out_size}"
+            f"  CNN Output Dim (HxWxC): ({self.conv_out_h}x{self.conv_out_w}x{self.conv_out_c})"
         )
 
         self.shape_mlp, self.shape_mlp_out_dim = self._build_shape_mlp_branch()
         print(f"  Shape Feature MLP Output Dim: {self.shape_mlp_out_dim}")
 
-        combined_features_dim = (
-            self.conv_out_size
-            + self.shape_mlp_out_dim
-            + self.shape_availability_dim
-            + self.explicit_features_dim
-        )
-        print(
-            f"  Combined Features Dim (CNN + Shape MLP + Avail + Explicit): {combined_features_dim}"
-        )
-
-        self.fusion_mlp, self.fusion_output_dim = self._build_fusion_mlp_branch(
-            combined_features_dim
-        )
-        print(f"  Fusion MLP Output Dim: {self.fusion_output_dim}")
-
-        # --- Optional Transformer Layer ---
+        # --- Optional Transformer Layer (Applied to Spatial CNN Features) ---
         self.transformer_encoder = None
-        transformer_output_dim = self.fusion_output_dim
+        self.pos_embedding = None
+        self.patch_projection = None
+        transformer_output_dim = 0  # Will be set if transformer is used
+
         if self.transformer_config.USE_TRANSFORMER:
-            if self.fusion_output_dim != self.transformer_config.TRANSFORMER_D_MODEL:
-                raise ValueError(
-                    f"Fusion MLP output dim ({self.fusion_output_dim}) must match TRANSFORMER_D_MODEL ({self.transformer_config.TRANSFORMER_D_MODEL})"
-                )
             if (
                 self.transformer_config.TRANSFORMER_D_MODEL
                 % self.transformer_config.TRANSFORMER_NHEAD
@@ -94,28 +82,69 @@ class ActorCriticNetwork(nn.Module):
                     f"TRANSFORMER_D_MODEL ({self.transformer_config.TRANSFORMER_D_MODEL}) must be divisible by TRANSFORMER_NHEAD ({self.transformer_config.TRANSFORMER_NHEAD})"
                 )
 
+            # Linear projection from CNN output channels to Transformer dimension
+            self.patch_projection = nn.Linear(
+                self.conv_out_c, self.transformer_config.TRANSFORMER_D_MODEL
+            ).to(self.device)
+
             encoder_layer = nn.TransformerEncoderLayer(
                 d_model=self.transformer_config.TRANSFORMER_D_MODEL,
                 nhead=self.transformer_config.TRANSFORMER_NHEAD,
                 dim_feedforward=self.transformer_config.TRANSFORMER_DIM_FEEDFORWARD,
                 dropout=self.transformer_config.TRANSFORMER_DROPOUT,
-                activation=self.transformer_config.TRANSFORMER_ACTIVATION,  # Uses config activation (e.g., 'silu')
-                batch_first=True,
+                activation=self.transformer_config.TRANSFORMER_ACTIVATION,
+                batch_first=True,  # Input shape (Batch, Seq, Feature)
                 device=self.device,
             )
             self.transformer_encoder = nn.TransformerEncoder(
                 encoder_layer, num_layers=self.transformer_config.TRANSFORMER_NUM_LAYERS
             ).to(self.device)
-            transformer_output_dim = self.transformer_config.TRANSFORMER_D_MODEL
+
+            # Positional embedding for the flattened spatial features
+            self.num_patches = self.conv_out_h * self.conv_out_w
+            self.pos_embedding = nn.Parameter(
+                torch.randn(
+                    1, self.num_patches, self.transformer_config.TRANSFORMER_D_MODEL
+                )
+            ).to(self.device)
+
+            transformer_output_dim = (
+                self.transformer_config.TRANSFORMER_D_MODEL
+            )  # Output dim after pooling/CLS
             print(
-                f"  Transformer Encoder Added (d_model={transformer_output_dim}, nhead={self.transformer_config.TRANSFORMER_NHEAD}, layers={self.transformer_config.TRANSFORMER_NUM_LAYERS})"
+                f"  Spatial Transformer Added (Input Patches: {self.num_patches}, Proj: {self.conv_out_c}->{transformer_output_dim}, d_model={transformer_output_dim}, nhead={self.transformer_config.TRANSFORMER_NHEAD}, layers={self.transformer_config.TRANSFORMER_NUM_LAYERS})"
             )
+        else:
+            # If no transformer, the input to fusion is the flattened CNN output
+            transformer_output_dim = self.conv_out_h * self.conv_out_w * self.conv_out_c
+            print(
+                f"  Spatial Transformer DISABLED. Using flattened CNN output ({transformer_output_dim})."
+            )
+
+        # --- Fusion MLP ---
+        # Input dim depends on whether Transformer was used
+        combined_features_dim = (
+            transformer_output_dim  # Output of Transformer (pooled) or flattened CNN
+            + self.shape_mlp_out_dim
+            + self.shape_availability_dim
+            + self.explicit_features_dim
+        )
+        print(
+            f"  Combined Features Dim (Spatial Features + Shape MLP + Avail + Explicit): {combined_features_dim}"
+        )
+
+        self.fusion_mlp, self.fusion_output_dim = self._build_fusion_mlp_branch(
+            combined_features_dim
+        )
+        print(f"  Fusion MLP Output Dim: {self.fusion_output_dim}")
 
         # --- Optional LSTM Layer ---
         self.lstm_layer = None
         self.lstm_hidden_size = 0
-        lstm_input_dim = transformer_output_dim  # Input to LSTM is output of Transformer (or Fusion MLP if no Transformer)
-        head_input_dim = lstm_input_dim  # Input to heads is output of LSTM (or Transformer/Fusion MLP)
+        # Input to LSTM is output of Fusion MLP
+        lstm_input_dim = self.fusion_output_dim
+        # Input to heads is output of LSTM (or Fusion MLP if no LSTM)
+        head_input_dim = lstm_input_dim
 
         if self.rnn_config.USE_RNN:
             self.lstm_hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
@@ -126,7 +155,7 @@ class ActorCriticNetwork(nn.Module):
                 batch_first=True,
             ).to(self.device)
             print(
-                f"  LSTM Layer Added (Input: {lstm_input_dim}, Hidden: {self.lstm_hidden_size})"
+                f"  LSTM Layer Added (Input: {lstm_input_dim}, Hidden: {self.lstm_hidden_size}, Layers: {self.rnn_config.LSTM_NUM_LAYERS})"
             )
             head_input_dim = self.lstm_hidden_size  # Heads take LSTM output
 
@@ -178,6 +207,7 @@ class ActorCriticNetwork(nn.Module):
 
     def _get_conv_out_size(self, shape: Tuple[int, int, int]) -> int:
         """Calculates the flattened output size of the CNN."""
+        # This might still be useful for validation or if Transformer is disabled
         with torch.no_grad():
             dummy_input = torch.zeros(1, *shape, device=self.device)
             output = self.conv_base(dummy_input)
@@ -213,6 +243,7 @@ class ActorCriticNetwork(nn.Module):
             ).to(self.device)
             fusion_layers.append(linear_layer)
             if cfg.USE_BATCHNORM_FC:
+                # Use BatchNorm1d for MLP layers
                 fusion_layers.append(nn.BatchNorm1d(hidden_dim).to(self.device))
             fusion_layers.append(
                 cfg.COMBINED_ACTIVATION()
@@ -229,10 +260,13 @@ class ActorCriticNetwork(nn.Module):
         shape_availability_tensor: torch.Tensor,
         explicit_features_tensor: torch.Tensor,
         hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        padding_mask: Optional[torch.Tensor] = None,  # Shape: (batch_size, seq_len)
+        padding_mask: Optional[
+            torch.Tensor
+        ] = None,  # Shape: (batch_size, seq_len) - Not used with spatial transformer
     ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         """
         Forward pass through the network. Handles single step and sequence inputs.
+        Applies Transformer to spatial CNN features if enabled.
         """
         # --- Ensure inputs are on the correct device ---
         model_device = self.device
@@ -245,11 +279,9 @@ class ActorCriticNetwork(nn.Module):
                 hidden_state[0].to(model_device),
                 hidden_state[1].to(model_device),
             )
-        if padding_mask is not None:
-            padding_mask = padding_mask.to(model_device)
+        # padding_mask is not used in this spatial transformer setup
 
         # --- Determine input shape and flatten if necessary ---
-        # Input can be (B, C, H, W) or (B, T, C, H, W)
         is_sequence_input = grid_tensor.ndim == 5
         initial_batch_size = grid_tensor.shape[0]
         seq_len = grid_tensor.shape[1] if is_sequence_input else 1
@@ -270,53 +302,86 @@ class ActorCriticNetwork(nn.Module):
         )
 
         # --- Feature Extraction ---
-        conv_features_flat = self.conv_base(grid_input_flat).view(num_samples, -1)
-        shape_features_flat = self.shape_mlp(shape_feature_input_flat)
+        # CNN processing
+        conv_features_spatial = self.conv_base(grid_input_flat)  # Shape: (N, C, H', W')
+
+        # Shape MLP processing
+        shape_features_flat = self.shape_mlp(
+            shape_feature_input_flat
+        )  # Shape: (N, ShapeMLPDim)
+
+        # --- Optional Spatial Transformer ---
+        spatial_features_processed = None
+        if (
+            self.transformer_config.USE_TRANSFORMER
+            and self.transformer_encoder is not None
+            and self.patch_projection is not None
+            and self.pos_embedding is not None
+        ):
+            # Reshape spatial features for Transformer: (N, C, H', W') -> (N, H'*W', C)
+            n_samples, c_out, h_out, w_out = conv_features_spatial.shape
+            spatial_flat_patches = conv_features_spatial.flatten(2).permute(
+                0, 2, 1
+            )  # Shape: (N, H'*W', C)
+
+            # Project patches to Transformer dimension
+            projected_patches = self.patch_projection(
+                spatial_flat_patches
+            )  # Shape: (N, NumPatches, D_model)
+
+            # Add positional embedding
+            transformer_input = (
+                projected_patches + self.pos_embedding
+            )  # Broadcasting (1, NumPatches, D_model)
+
+            # Apply Transformer encoder
+            # Note: padding_mask is not typically used with spatial features like this
+            transformer_output = self.transformer_encoder(
+                transformer_input
+            )  # Shape: (N, NumPatches, D_model)
+
+            # Pool the transformer output (e.g., mean pooling)
+            spatial_features_processed = transformer_output.mean(
+                dim=1
+            )  # Shape: (N, D_model)
+
+        else:
+            # If no transformer, flatten the CNN output
+            spatial_features_processed = conv_features_spatial.view(
+                num_samples, -1
+            )  # Shape: (N, C*H'*W')
 
         # --- Feature Fusion ---
         combined_features_flat = torch.cat(
             (
-                conv_features_flat,
+                spatial_features_processed,  # Output from Transformer or flattened CNN
                 shape_features_flat,
                 shape_availability_input_flat,
                 explicit_features_input_flat,
             ),
             dim=1,
         )
-        fused_features_flat = self.fusion_mlp(combined_features_flat)
-
-        # --- Optional Transformer ---
-        current_features = fused_features_flat  # Start with fused features
-        if (
-            self.transformer_config.USE_TRANSFORMER
-            and self.transformer_encoder is not None
-        ):
-            # Reshape to (B, T, Dim) for Transformer
-            transformer_input = current_features.view(
-                initial_batch_size, seq_len, self.fusion_output_dim
-            )
-            # Apply Transformer encoder with padding mask if provided
-            transformer_output = self.transformer_encoder(
-                transformer_input, src_key_padding_mask=padding_mask
-            )
-            # Flatten back to (N, Dim)
-            current_features = transformer_output.reshape(num_samples, -1)
+        fused_features_flat = self.fusion_mlp(
+            combined_features_flat
+        )  # Shape: (N, FusionDim)
 
         # --- Optional LSTM ---
         next_hidden_state = hidden_state  # Pass incoming state through
         head_input_features = (
-            current_features  # Input to heads starts as output of previous layer
+            fused_features_flat  # Input to heads starts as output of Fusion MLP
         )
 
         if self.rnn_config.USE_RNN and self.lstm_layer is not None:
             # Reshape to (B, T, Dim) for LSTM
-            lstm_input = current_features.view(initial_batch_size, seq_len, -1)
+            lstm_input = fused_features_flat.view(initial_batch_size, seq_len, -1)
             # Apply LSTM
             lstm_output_seq, next_hidden_state_tuple = self.lstm_layer(
                 lstm_input, hidden_state
             )
             # Flatten output for heads
-            head_input_features = lstm_output_seq.reshape(num_samples, -1)
+            head_input_features = lstm_output_seq.reshape(
+                num_samples, -1
+            )  # Shape: (N, LSTMDim)
             # Update the hidden state to be returned
             next_hidden_state = next_hidden_state_tuple
 

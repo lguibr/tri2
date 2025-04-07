@@ -1,4 +1,7 @@
-# File: config/__init__.py
+# config/__init__.py
+# This file marks the 'config' directory as a Python package.
+
+# Import core configuration classes to make them available directly under 'config'
 from .core import (
     VisConfig,
     EnvConfig,
@@ -13,22 +16,30 @@ from .core import (
     ObsNormConfig,
     TransformerConfig,
 )
+
+# Import general configuration settings and functions
 from .general import (
-    DEVICE,  # Keep DEVICE as it's set early
+    DEVICE,
     RANDOM_SEED,
+    TOTAL_TRAINING_STEPS,
     BASE_CHECKPOINT_DIR,
     BASE_LOG_DIR,
-    TOTAL_TRAINING_STEPS,
-    # Import getter functions instead of direct constants
+    set_device,
     get_run_id,
+    set_run_id,
     get_run_checkpoint_dir,
     get_run_log_dir,
-    get_model_save_path,
     get_console_log_dir,
+    get_model_save_path,
 )
+
+# Import utility functions
 from .utils import get_config_dict
+
+# Import validation function
 from .validation import print_config_info_and_validate
 
+# Import constants
 from .constants import (
     WHITE,
     BLACK,
@@ -44,12 +55,10 @@ from .constants import (
     GAME_OVER_FLASH_COLOR,
 )
 
-# Assign RUN_LOG_DIR to TensorBoardConfig using the getter
-# This ensures it uses the potentially resumed run's log directory
-TensorBoardConfig.LOG_DIR = get_run_log_dir()
 
+# Define __all__ to control what 'from config import *' imports
 __all__ = [
-    # Core Classes
+    # Core Configs
     "VisConfig",
     "EnvConfig",
     "RewardConfig",
@@ -62,19 +71,20 @@ __all__ = [
     "DemoConfig",
     "ObsNormConfig",
     "TransformerConfig",
-    # General Constants/Paths
+    # General Configs
     "DEVICE",
     "RANDOM_SEED",
+    "TOTAL_TRAINING_STEPS",
     "BASE_CHECKPOINT_DIR",
     "BASE_LOG_DIR",
-    "TOTAL_TRAINING_STEPS",
-    # Getters for dynamic paths
+    "set_device",
     "get_run_id",
+    "set_run_id",
     "get_run_checkpoint_dir",
     "get_run_log_dir",
-    "get_model_save_path",
     "get_console_log_dir",
-    # Utils/Validation
+    "get_model_save_path",
+    # Utils
     "get_config_dict",
     "print_config_info_and_validate",
     # Constants

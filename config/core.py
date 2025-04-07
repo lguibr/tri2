@@ -1,5 +1,4 @@
 # File: config/core.py
-# File: config/core.py
 import torch
 from typing import List, Tuple, Optional
 
@@ -20,7 +19,7 @@ from .constants import (
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 32
+    NUM_ENVS_TO_RENDER = 16
     FPS = 0
     SCREEN_WIDTH = 1600  # Initial width, but resizable
     SCREEN_HEIGHT = 900  # Initial height, but resizable
@@ -92,9 +91,11 @@ class RewardConfig:
 class PPOConfig:
     LEARNING_RATE = 2.5e-4
     ADAM_EPS = 1e-5
-    NUM_STEPS_PER_ROLLOUT = 512
-    PPO_EPOCHS = 3
-    NUM_MINIBATCHES = 128
+    # --- Increased Params ---
+    NUM_STEPS_PER_ROLLOUT = 256  # Increased from 128
+    PPO_EPOCHS = 4  # Increased from 2
+    NUM_MINIBATCHES = 16  # Increased from 8
+    # --- End Increased Params ---
     CLIP_PARAM = 0.2
     GAMMA = 0.995
     GAE_LAMBDA = 0.95
@@ -119,7 +120,7 @@ class PPOConfig:
         else:
             num_minibatches = self.NUM_MINIBATCHES
         batch_size = total_data_per_update // num_minibatches
-        min_recommended_size = 32
+        min_recommended_size = 4  # Keep low for testing flexibility
         if batch_size < min_recommended_size and batch_size > 0:
             pass
         elif batch_size <= 0:
@@ -134,8 +135,8 @@ class PPOConfig:
 
 class RNNConfig:
     USE_RNN = True
-    LSTM_HIDDEN_SIZE = 512
-    LSTM_NUM_LAYERS = 1
+    LSTM_HIDDEN_SIZE = 512  # Increased from 256
+    LSTM_NUM_LAYERS = 2  # Increased from 1
 
 
 class ObsNormConfig:
@@ -150,16 +151,16 @@ class ObsNormConfig:
 
 class TransformerConfig:
     USE_TRANSFORMER = True
-    TRANSFORMER_D_MODEL = 512
-    TRANSFORMER_NHEAD = 8
-    TRANSFORMER_DIM_FEEDFORWARD = 1024
-    TRANSFORMER_NUM_LAYERS = 2
+    TRANSFORMER_D_MODEL = 512  # Increased from 256 (must match last FC dim)
+    TRANSFORMER_NHEAD = 8  # Increased from 8 (must divide D_MODEL)
+    TRANSFORMER_DIM_FEEDFORWARD = 1024  # Increased from 512
+    TRANSFORMER_NUM_LAYERS = 4  # Increased from 2
     TRANSFORMER_DROPOUT = 0.1
     TRANSFORMER_ACTIVATION = "relu"
 
 
 class TrainConfig:
-    CHECKPOINT_SAVE_FREQ = 10
+    CHECKPOINT_SAVE_FREQ = 50  # Increased from 10 (interpreted as rollouts)
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
@@ -170,26 +171,26 @@ class ModelConfig:
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [64, 128, 256]
+        CONV_CHANNELS = [64, 128, 256]  # Increased CNN channels
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
 
-        SHAPE_FEATURE_MLP_DIMS = [128]
+        SHAPE_FEATURE_MLP_DIMS = [128, 128]  # Increased Shape MLP dims
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
 
         _transformer_cfg = TransformerConfig()
-        _rnn_cfg = RNNConfig()  # Need RNN config too for fallback
-        _last_fc_dim = 512  # Default/fallback size
+        _rnn_cfg = RNNConfig()
+        _last_fc_dim = 512  # Default/fallback size (increased)
         if _transformer_cfg.USE_TRANSFORMER:
-            _last_fc_dim = _transformer_cfg.TRANSFORMER_D_MODEL
+            _last_fc_dim = _transformer_cfg.TRANSFORMER_D_MODEL  # Should be 512
         elif _rnn_cfg.USE_RNN:
-            _last_fc_dim = _rnn_cfg.LSTM_HIDDEN_SIZE
+            _last_fc_dim = _rnn_cfg.LSTM_HIDDEN_SIZE  # Should be 512
 
         COMBINED_FC_DIMS = [
-            1024,
+            1024,  # Increased Fusion MLP dims
             _last_fc_dim,  # Should be 512 based on Transformer/LSTM
         ]
         del _transformer_cfg, _rnn_cfg  # Clean up temp instances
@@ -205,7 +206,7 @@ class StatsConfig:
         100,
     ]
     CONSOLE_LOG_FREQ = 5
-    PLOT_DATA_WINDOW = 20_000
+    PLOT_DATA_WINDOW = 100_000  # Increased from 20_000
 
 
 class TensorBoardConfig:

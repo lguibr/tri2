@@ -7,10 +7,12 @@ from config import VisConfig, EnvConfig, DemoConfig
 from environment.game_state import GameState
 from .panels import LeftPanelRenderer, GameAreaRenderer
 from .overlays import OverlayRenderer
-from .tooltips import TooltipRenderer
+
+# Removed TooltipRenderer import
 from .plotter import Plotter
 from .demo_renderer import DemoRenderer
 from .input_handler import InputHandler
+from app_state import AppState  # Import Enum
 
 
 class UIRenderer:
@@ -23,7 +25,7 @@ class UIRenderer:
         self.left_panel = LeftPanelRenderer(screen, vis_config, self.plotter)
         self.game_area = GameAreaRenderer(screen, vis_config)
         self.overlays = OverlayRenderer(screen, vis_config)
-        self.tooltips = TooltipRenderer(screen, vis_config)
+        # Removed TooltipRenderer instance
         self.demo_config = DemoConfig()
         self.demo_renderer = DemoRenderer(
             screen, vis_config, self.demo_config, self.game_area
@@ -33,19 +35,14 @@ class UIRenderer:
     def set_input_handler(self, input_handler: InputHandler):
         """Sets the InputHandler reference after it's initialized."""
         self.left_panel.input_handler = input_handler
+        # Also set the reference in the button renderer
+        if hasattr(self.left_panel, "button_status_renderer"):
+            self.left_panel.button_status_renderer.input_handler_ref = input_handler
 
-    def check_hover(self, mouse_pos: Tuple[int, int], app_state: str):
+    def check_hover(self, mouse_pos: Tuple[int, int], app_state_str: str):
         """Passes hover check to the tooltip renderer."""
-        if app_state == "MainMenu":
-            if self.left_panel.input_handler:
-                self.tooltips.update_rects_and_texts(
-                    self.left_panel.get_stat_rects(),
-                    self.left_panel.get_tooltip_texts(),
-                )
-                self.tooltips.check_hover(mouse_pos)
-        else:
-            self.tooltips.hovered_stat_key = None
-            self.tooltips.stat_rects.clear()
+        # Removed tooltip hover check logic
+        pass
 
     def force_redraw(self):
         """Forces components like the plotter to redraw on the next frame."""
@@ -53,7 +50,7 @@ class UIRenderer:
 
     def render_all(
         self,
-        app_state: str,
+        app_state: str,  # Keep as string for now, internal logic uses Enum
         is_process_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
@@ -68,10 +65,21 @@ class UIRenderer:
         demo_env: Optional[GameState] = None,
         update_progress_details: Dict[str, Any] = {},
         agent_param_count: int = 0,
+        worker_counts: Dict[str, int] = {
+            "env_runners": 0,
+            "trainers": 0,
+        },  # Added worker_counts
     ):
         """Renders UI based on the application state."""
         try:
-            if app_state == "MainMenu":
+            # Convert string state back to Enum for comparison if needed, or keep using string
+            current_app_state = (
+                AppState(app_state)
+                if app_state in AppState._value2member_map_
+                else AppState.UNKNOWN
+            )
+
+            if current_app_state == AppState.MAIN_MENU:
                 self._render_main_menu(
                     is_process_running=is_process_running,
                     status=status,
@@ -86,39 +94,41 @@ class UIRenderer:
                     update_progress_details=update_progress_details,
                     app_state=app_state,
                     agent_param_count=agent_param_count,
+                    worker_counts=worker_counts,  # Pass worker counts
                 )
-            elif app_state == "Playing":
+            elif current_app_state == AppState.PLAYING:
                 if demo_env:
                     self.demo_renderer.render(demo_env, env_config, is_debug=False)
                 else:
-                    print("Error: Attempting to render demo mode without demo_env.")
                     self._render_simple_message("Demo Env Error!", VisConfig.RED)
-            elif app_state == "Debug":
+            elif current_app_state == AppState.DEBUG:
                 if demo_env:
-                    self._render_debug_mode(demo_env, env_config)
+                    self.demo_renderer.render(demo_env, env_config, is_debug=True)
                 else:
-                    print("Error: Attempting to render debug mode without demo_env.")
                     self._render_simple_message("Debug Env Error!", VisConfig.RED)
-            elif app_state == "Initializing":
+            elif current_app_state == AppState.INITIALIZING:
                 self._render_initializing_screen(status)
-            elif app_state == "Error":
+            elif current_app_state == AppState.ERROR:
                 self._render_error_screen(status)
 
-            if cleanup_confirmation_active and app_state != "Error":
+            if cleanup_confirmation_active and current_app_state != AppState.ERROR:
                 self.overlays.render_cleanup_confirmation()
             elif not cleanup_confirmation_active:
                 self.overlays.render_status_message(
                     cleanup_message, last_cleanup_message_time
                 )
 
-            if app_state == "MainMenu" and not cleanup_confirmation_active:
-                self.tooltips.render_tooltip()
+            # Removed tooltip rendering call
+            # if (
+            #     current_app_state == AppState.MAIN_MENU
+            #     and not cleanup_confirmation_active
+            # ):
+            #     self.tooltips.render_tooltip()
 
             pygame.display.flip()
 
         except pygame.error as e:
             print(f"Pygame rendering error in render_all: {e}")
-            traceback.print_exc()
         except Exception as e:
             print(f"Unexpected critical rendering error in render_all: {e}")
             traceback.print_exc()
@@ -143,28 +153,22 @@ class UIRenderer:
         update_progress_details: Dict[str, Any],
         app_state: str,
         agent_param_count: int,
+        worker_counts: Dict[str, int],  # Added worker_counts
     ):
-        """Renders the main training dashboard view with adjusted panel widths."""
+        """Renders the main training dashboard view."""
         self.screen.fill(VisConfig.BLACK)
         current_width, current_height = self.screen.get_size()
-
-        # --- Calculate panel widths based on VisConfig.LEFT_PANEL_RATIO ---
-        # Ensure ratio is within reasonable bounds
         left_panel_ratio = max(0.1, min(0.9, self.vis_config.LEFT_PANEL_RATIO))
         lp_width = int(current_width * left_panel_ratio)
         ga_width = current_width - lp_width
-
-        # Ensure minimum width for left panel if needed (e.g., for plots/text)
         min_lp_width = 300
         if lp_width < min_lp_width and current_width > min_lp_width:
             lp_width = min_lp_width
             ga_width = max(0, current_width - lp_width)
-        elif current_width <= min_lp_width:  # Handle very small screen case
+        elif current_width <= min_lp_width:
             lp_width = current_width
             ga_width = 0
-        # --- End width calculation ---
 
-        # Render Left Panel (now takes calculated width)
         self.left_panel.render(
             panel_width=lp_width,
             is_process_running=is_process_running,
@@ -175,9 +179,8 @@ class UIRenderer:
             app_state=app_state,
             update_progress_details=update_progress_details,
             agent_param_count=agent_param_count,
+            worker_counts=worker_counts,  # Pass worker counts
         )
-
-        # Render Game Area (now takes calculated width and offset)
         self.game_area.render(
             envs=envs,
             num_envs=num_envs,
@@ -186,26 +189,12 @@ class UIRenderer:
             panel_x_offset=lp_width,
         )
 
-    def _render_debug_mode(self, demo_env: GameState, env_config: EnvConfig):
-        """Renders the UI specifically for Debug mode."""
-        if not self.demo_renderer:
-            print("Error: Cannot render debug mode - demo_renderer missing.")
-            return
-        try:
-            self.demo_renderer.render(demo_env, env_config, is_debug=True)
-        except Exception as render_debug_err:
-            print(f"CRITICAL ERROR in _render_debug_mode: {render_debug_err}")
-            traceback.print_exc()
-            self._render_simple_message("Debug Render Error!", VisConfig.RED)
-
     def _render_initializing_screen(
         self, status_message: str = "Initializing RL Components..."
     ):
-        """Renders the initializing screen with a status message."""
         self._render_simple_message(status_message, VisConfig.WHITE)
 
     def _render_error_screen(self, status_message: str):
-        """Renders the error screen."""
         try:
             self.screen.fill((40, 0, 0))
             font_title = pygame.font.SysFont(None, 70)
@@ -234,7 +223,6 @@ class UIRenderer:
             self._render_simple_message(f"Error State: {status_message}", VisConfig.RED)
 
     def _render_simple_message(self, message: str, color: Tuple[int, int, int]):
-        """Renders a simple centered text message."""
         try:
             self.screen.fill(VisConfig.BLACK)
             font = pygame.font.SysFont(None, 50)

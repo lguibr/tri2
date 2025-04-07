@@ -1,7 +1,7 @@
+# File: utils/init_checks.py
 import sys
 import traceback
 import numpy as np
-
 
 from environment.game_state import GameState
 
@@ -20,7 +20,7 @@ def run_pre_checks() -> bool:
     print("--- Pre-Run Checks ---")
     try:
         print("Checking GameState and Configuration Compatibility...")
-        env_config_instance = EnvConfig()  # Now EnvConfig is available here
+        env_config_instance = EnvConfig()
 
         gs_test = GameState()
         gs_test.reset()
@@ -47,11 +47,11 @@ def run_pre_checks() -> bool:
             )
         print(f"GameState 'grid' state shape check PASSED (Shape: {grid_state.shape}).")
 
-        # Check 'shapes' component (features - flattened)
+        # Check 'shapes' component
         if "shapes" not in s_test_dict:
             raise KeyError("State dictionary missing 'shapes' key.")
         shape_state = s_test_dict["shapes"]
-        expected_shape_shape = (env_config_instance.SHAPE_STATE_DIM,)  # Flattened
+        expected_shape_shape = (env_config_instance.SHAPE_STATE_DIM,)
         if not isinstance(shape_state, np.ndarray):
             raise TypeError(
                 f"State 'shapes' component should be numpy array, but got {type(shape_state)}"
@@ -103,20 +103,25 @@ def run_pre_checks() -> bool:
             print("Potential outcome calculation is ENABLED in EnvConfig.")
         else:
             print("Potential outcome calculation is DISABLED in EnvConfig.")
-        if hasattr(gs_test, "_calculate_potential"):
-            _ = gs_test._calculate_potential()
+
+        # --- MODIFIED LINE ---
+        # Access calculate_potential through the features attribute
+        if hasattr(gs_test, "features") and hasattr(
+            gs_test.features, "calculate_potential"
+        ):
+            _ = gs_test.features.calculate_potential()  # Call via gs_test.features
             print("GameState PBRS potential calculation check PASSED.")
         else:
             raise AttributeError(
-                "GameState missing '_calculate_potential' method for PBRS."
+                "GameState missing 'features' attribute or 'features' missing 'calculate_potential' method for PBRS."
             )
+        # --- END MODIFIED LINE ---
 
         _ = gs_test.valid_actions()
         print("GameState valid_actions check PASSED.")
         if not hasattr(gs_test, "game_score"):
             raise AttributeError("GameState missing 'game_score' attribute!")
         print("GameState 'game_score' attribute check PASSED.")
-
         if not hasattr(gs_test, "triangles_cleared_this_episode"):
             raise AttributeError(
                 "GameState missing 'triangles_cleared_this_episode' attribute!"
@@ -133,4 +138,4 @@ def run_pre_checks() -> bool:
     except Exception as e:
         print(f"FATAL ERROR during GameState pre-check: {e}")
         traceback.print_exc()
-    sys.exit(1)  # Exit if checks fail
+    sys.exit(1)

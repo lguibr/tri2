@@ -1,5 +1,6 @@
+# File: ui/input_handler.py
 import pygame
-from typing import Tuple, Callable, Dict
+from typing import Tuple, Callable, Dict, TYPE_CHECKING
 
 # Type Aliases for Callbacks
 HandleDemoMouseMotionCallback = Callable[[Tuple[int, int]], None]
@@ -15,10 +16,10 @@ StartDebugModeCallback = Callable[[], None]
 ExitDebugModeCallback = Callable[[], None]
 HandleDebugInputCallback = Callable[[pygame.event.Event], None]
 
-
 # Forward declaration for type hinting
-if False:
+if TYPE_CHECKING:
     from .renderer import UIRenderer
+    from app_state import AppState  # Import Enum
 
 
 class InputHandler:
@@ -35,8 +36,8 @@ class InputHandler:
         exit_app_cb: ExitAppCallback,
         start_demo_mode_cb: StartDemoModeCallback,
         exit_demo_mode_cb: ExitDemoModeCallback,
-        handle_demo_mouse_motion_cb: HandleDemoMouseMotionCallback, 
-        handle_demo_mouse_button_down_cb: HandleDemoMouseButtonDownCallback, 
+        handle_demo_mouse_motion_cb: HandleDemoMouseMotionCallback,
+        handle_demo_mouse_button_down_cb: HandleDemoMouseButtonDownCallback,
         start_debug_mode_cb: StartDebugModeCallback,
         exit_debug_mode_cb: ExitDebugModeCallback,
         handle_debug_input_cb: HandleDebugInputCallback,
@@ -58,47 +59,91 @@ class InputHandler:
 
         self.shape_preview_rects: Dict[int, pygame.Rect] = {}
 
-        self._update_button_rects()
+        # Button rects are now managed within ButtonStatusRenderer,
+        # but we need references for click detection here.
+        self.run_btn_rect = pygame.Rect(0, 0, 0, 0)
+        self.cleanup_btn_rect = pygame.Rect(0, 0, 0, 0)
+        self.demo_btn_rect = pygame.Rect(0, 0, 0, 0)
+        self.debug_btn_rect = pygame.Rect(0, 0, 0, 0)
+        self.confirm_yes_rect = pygame.Rect(0, 0, 0, 0)
+        self.confirm_no_rect = pygame.Rect(0, 0, 0, 0)
+        self._update_button_rects()  # Initial calculation
 
     def _update_button_rects(self):
         """Calculates button rects based on initial layout assumptions."""
         # These rects are primarily for click detection, actual rendering is in LeftPanel
-        self.run_btn_rect = pygame.Rect(10, 10, 100, 40)
-        self.cleanup_btn_rect = pygame.Rect(self.run_btn_rect.right + 10, 10, 160, 40)
-        self.demo_btn_rect = pygame.Rect(self.cleanup_btn_rect.right + 10, 10, 120, 40)
-        self.debug_btn_rect = pygame.Rect(self.demo_btn_rect.right + 10, 10, 120, 40)
+        # TODO: Get these rects dynamically from the ButtonStatusRenderer if possible
+        # For now, keep the static calculation as a fallback.
+        button_height = 40
+        button_y_pos = 10
+        run_button_width = 100
+        cleanup_button_width = 160
+        demo_button_width = 120
+        debug_button_width = 120
+        button_spacing = 10
+
+        self.run_btn_rect = pygame.Rect(
+            button_spacing, button_y_pos, run_button_width, button_height
+        )
+        current_x = self.run_btn_rect.right + button_spacing
+        self.cleanup_btn_rect = pygame.Rect(
+            current_x, button_y_pos, cleanup_button_width, button_height
+        )
+        current_x = self.cleanup_btn_rect.right + button_spacing
+        self.demo_btn_rect = pygame.Rect(
+            current_x, button_y_pos, demo_button_width, button_height
+        )
+        current_x = self.demo_btn_rect.right + button_spacing
+        self.debug_btn_rect = pygame.Rect(
+            current_x, button_y_pos, debug_button_width, button_height
+        )
+
         # Confirmation buttons are positioned dynamically during rendering
         sw, sh = self.screen.get_size()
         self.confirm_yes_rect = pygame.Rect(0, 0, 100, 40)
         self.confirm_no_rect = pygame.Rect(0, 0, 100, 40)
-        self.confirm_yes_rect.center = (sw // 2 - 60, sh // 2 + 50)
-        self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)
+        self.confirm_yes_rect.center = (
+            sw // 2 - 60,
+            sh // 2 + 50,
+        )  # Approximate center
+        self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)  # Approximate center
 
-    def handle_input(self, app_state: str, cleanup_confirmation_active: bool) -> bool:
+    def handle_input(
+        self, app_state_str: str, cleanup_confirmation_active: bool
+    ) -> bool:
         """
         Processes Pygame events. Returns True to continue running, False to exit.
         """
+        from app_state import AppState  # Local import for Enum comparison
+
         try:
             mouse_pos = pygame.mouse.get_pos()
         except pygame.error:
-            mouse_pos = (0, 0)  # Gracefully handle if display not ready
+            mouse_pos = (0, 0)
 
-        # Update dynamic rects
+        # Update dynamic rects (like confirmation buttons)
         sw, sh = self.screen.get_size()
         self.confirm_yes_rect.center = (sw // 2 - 60, sh // 2 + 50)
         self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)
 
-        # Update shape preview rects if in demo mode (needed for mapping clicks)
-        if app_state == "Playing" and self.renderer and self.renderer.demo_renderer:
+        # Update shape preview rects if in demo mode
+        if (
+            app_state_str == AppState.PLAYING.value
+            and self.renderer
+            and self.renderer.demo_renderer
+        ):
             self.shape_preview_rects = (
                 self.renderer.demo_renderer.get_shape_preview_rects()
             )
         else:
             self.shape_preview_rects.clear()
 
-        if app_state == "MainMenu" and not cleanup_confirmation_active:
+        if (
+            app_state_str == AppState.MAIN_MENU.value
+            and not cleanup_confirmation_active
+        ):
             if hasattr(self.renderer, "check_hover"):
-                self.renderer.check_hover(mouse_pos, app_state)
+                self.renderer.check_hover(mouse_pos, app_state_str)
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -111,7 +156,7 @@ class InputHandler:
                         (new_w, new_h), pygame.RESIZABLE
                     )
                     self._update_ui_screen_references(self.screen)
-                    self._update_button_rects()
+                    self._update_button_rects()  # Recalculate static button rects on resize
                     if hasattr(self.renderer, "force_redraw"):
                         self.renderer.force_redraw()
                     print(f"Window resized: {new_w}x{new_h}")
@@ -131,18 +176,17 @@ class InputHandler:
                 continue
 
             # --- Playing (Demo) Mode ---
-            elif app_state == "Playing":
+            elif app_state_str == AppState.PLAYING.value:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         self.exit_demo_mode_cb()
-                    # Remove other key handling if mouse is primary
                 elif event.type == pygame.MOUSEMOTION:
                     self.handle_demo_mouse_motion_cb(event.pos)
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     self.handle_demo_mouse_button_down_cb(event)
 
             # --- Debug Mode ---
-            elif app_state == "Debug":
+            elif app_state_str == AppState.DEBUG.value:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         self.exit_debug_mode_cb()
@@ -152,14 +196,14 @@ class InputHandler:
                     self.handle_debug_input_cb(event)
 
             # --- Main Menu Mode ---
-            elif app_state == "MainMenu":
+            elif app_state_str == AppState.MAIN_MENU.value:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         return self.exit_app_cb()
                     elif event.key == pygame.K_p:
                         self.toggle_training_run_cb()
-
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    # Use the stored rects for collision detection
                     if self.run_btn_rect.collidepoint(mouse_pos):
                         self.toggle_training_run_cb()
                     elif self.cleanup_btn_rect.collidepoint(mouse_pos):
@@ -170,7 +214,7 @@ class InputHandler:
                         self.start_debug_mode_cb()
 
             # --- Error Mode ---
-            elif app_state == "Error":
+            elif app_state_str == AppState.ERROR.value:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     return self.exit_app_cb()
 
@@ -185,6 +229,16 @@ class InputHandler:
             getattr(self.renderer, "overlays", None),
             getattr(self.renderer, "tooltips", None),
             getattr(self.renderer, "demo_renderer", None),
+            # Add demo sub-renderers if they hold screen refs
+            getattr(
+                getattr(self.renderer, "demo_renderer", None), "grid_renderer", None
+            ),
+            getattr(
+                getattr(self.renderer, "demo_renderer", None), "preview_renderer", None
+            ),
+            getattr(
+                getattr(self.renderer, "demo_renderer", None), "hud_renderer", None
+            ),
         ]
         for component in components_to_update:
             if component and hasattr(component, "screen"):

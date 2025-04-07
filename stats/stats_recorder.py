@@ -1,9 +1,12 @@
+# File: stats/stats_recorder.py
 import time
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Deque, List, Dict, Any, Optional, Union
 import numpy as np
 import torch
+
+# Removed: from .stats_recorder import StatsRecorderBase
 
 
 class StatsRecorderBase(ABC):
@@ -72,6 +75,6 @@ class StatsRecorderBase(ABC):
         pass
 
     @abstractmethod
-    def close(self):
+    def close(self, is_cleanup: bool = False):
         """Perform any necessary cleanup."""
         pass

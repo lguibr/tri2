@@ -1,4 +1,3 @@
-# File: ui/plotter.py
 import pygame
 from typing import Dict, Optional, Deque
 from collections import deque
@@ -24,8 +23,9 @@ class Plotter:
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        # Increased plot update interval
-        self.plot_update_interval: float = 2.0  # Changed from 1.0
+        # --- Reduced plot update interval ---
+        self.plot_update_interval: float = 0.2  # Changed from 2.0 to 0.2
+        # --- End Reduced plot update interval ---
         self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
 
@@ -36,7 +36,9 @@ class Plotter:
             "value_loss": normalize_color_for_matplotlib(VisConfig.BLUE),
             "entropy": normalize_color_for_matplotlib((150, 150, 150)),
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
-            "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
+            "minibatch_sps": normalize_color_for_matplotlib(
+                VisConfig.LIGHTG
+            ),  # Changed key
             "tris_cleared": normalize_color_for_matplotlib(VisConfig.YELLOW),
             "lr": normalize_color_for_matplotlib((255, 0, 255)),
             "cpu": normalize_color_for_matplotlib((255, 165, 0)),  # Orange
@@ -59,14 +61,14 @@ class Plotter:
             "episode_triangles_cleared",
             "episode_scores",
             "episode_lengths",
-            "sps_values",
+            "minibatch_update_sps_values",  # Changed key
             "lr_values",
-            "value_loss",
-            "policy_loss",
-            "entropy",
+            "value_losses",
+            "policy_losses",
+            "entropies",
             "cpu_usage",
             "memory_usage",
-            "gpu_memory_usage_percent",  # Changed key
+            "gpu_memory_usage_percent",
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
@@ -130,13 +132,14 @@ class Plotter:
                     self.rolling_window_sizes,
                     placeholder_text="Episode Length",
                 )
+                # Changed plot data key, title, and color key
                 render_single_plot(
                     axes_flat[4],
-                    data_lists["sps_values"],
-                    "Steps/Sec",
-                    self.colors["sps"],
+                    data_lists["minibatch_update_sps_values"],  # Changed key
+                    "Minibatch Steps/Sec",  # Changed title
+                    self.colors["minibatch_sps"],  # Changed key
                     self.rolling_window_sizes,
-                    placeholder_text="SPS",
+                    placeholder_text="Minibatch SPS",
                 )
                 render_single_plot(
                     axes_flat[5],
@@ -151,7 +154,7 @@ class Plotter:
                 # Row 3: Losses & Entropy
                 render_single_plot(
                     axes_flat[6],
-                    data_lists["value_loss"],
+                    data_lists["value_losses"],
                     "Value Loss",
                     self.colors["value_loss"],
                     self.rolling_window_sizes,
@@ -159,7 +162,7 @@ class Plotter:
                 )
                 render_single_plot(
                     axes_flat[7],
-                    data_lists["policy_loss"],
+                    data_lists["policy_losses"],
                     "Policy Loss",
                     self.colors["policy_loss"],
                     self.rolling_window_sizes,
@@ -167,7 +170,7 @@ class Plotter:
                 )
                 render_single_plot(
                     axes_flat[8],
-                    data_lists["entropy"],
+                    data_lists["entropies"],
                     "Entropy",
                     self.colors["entropy"],
                     self.rolling_window_sizes,

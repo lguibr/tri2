@@ -1,4 +1,3 @@
-# File: utils/helpers.py
 import torch
 import numpy as np
 import random
@@ -88,7 +87,7 @@ def save_object(obj: Any, filepath: str):
             cloudpickle.dump(obj, f, protocol=pickle.HIGHEST_PROTOCOL)
     except Exception as e:
         print(f"Error saving object to {filepath}: {e}")
-        raise e  # Re-raise after loggingcpu
+        raise e  # Re-raise after logging
 
 
 def load_object(filepath: str) -> Any:

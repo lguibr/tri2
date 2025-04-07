@@ -6,11 +6,12 @@ import traceback
 import re
 import time
 from typing import Optional, Dict, Any, Tuple
-import pickle  # Import pickle for the specific error type
+import pickle
 
 from agent.ppo_agent import PPOAgent
 from utils.running_mean_std import RunningMeanStd
-from stats.aggregator import StatsAggregator
+from stats.aggregator import StatsAggregator  # Updated import path
+from config.general import TOTAL_TRAINING_STEPS
 
 
 def find_latest_run_and_checkpoint(
@@ -29,7 +30,6 @@ def find_latest_run_and_checkpoint(
         )
         return None, None
 
-    # 1. Find the latest run directory
     try:
         for item in os.listdir(base_checkpoint_dir):
             item_path = os.path.join(base_checkpoint_dir, item)
@@ -40,7 +40,7 @@ def find_latest_run_and_checkpoint(
                         latest_run_mtime = mtime
                         latest_run_id = item
                 except OSError:
-                    continue  # Ignore directories we can't access
+                    continue
     except OSError as e:
         print(
             f"[CheckpointFinder] Error listing base checkpoint directory {base_checkpoint_dir}: {e}"
@@ -54,7 +54,6 @@ def find_latest_run_and_checkpoint(
     latest_run_dir = os.path.join(base_checkpoint_dir, latest_run_id)
     print(f"[CheckpointFinder] Identified latest run directory: {latest_run_dir}")
 
-    # 2. Find the latest checkpoint within that directory
     latest_checkpoint_path = find_latest_checkpoint_in_dir(latest_run_dir)
 
     if latest_checkpoint_path:
@@ -66,7 +65,7 @@ def find_latest_run_and_checkpoint(
         print(
             f"[CheckpointFinder] No valid checkpoints found in the latest run directory: {latest_run_dir}"
         )
-        return latest_run_id, None  # Return run_id even if no checkpoint found in it
+        return latest_run_id, None
 
 
 def find_latest_checkpoint_in_dir(checkpoint_dir: str) -> Optional[str]:
@@ -89,8 +88,8 @@ def find_latest_checkpoint_in_dir(checkpoint_dir: str) -> Optional[str]:
 
             if filename == "FINAL_agent_state.pth":
                 final_checkpoint = full_path
-                # Prioritize FINAL checkpoint
-                return final_checkpoint  # Return immediately if FINAL found
+                # Don't return immediately, check if step checkpoints are newer
+                # return final_checkpoint # Removed immediate return
             else:
                 match = step_pattern.match(filename)
                 if match:
@@ -101,10 +100,21 @@ def find_latest_checkpoint_in_dir(checkpoint_dir: str) -> Optional[str]:
         print(f"[CheckpointFinder] Error listing directory {checkpoint_dir}: {e}")
         return None
 
-    if not checkpoints:
-        return None
+    # Prioritize FINAL if it exists and no step checkpoints are newer
+    if final_checkpoint:
+        final_mtime = os.path.getmtime(final_checkpoint)
+        newer_step_checkpoints = [
+            cp for step, cp in checkpoints if os.path.getmtime(cp) > final_mtime
+        ]
+        if not newer_step_checkpoints:
+            print(f"[CheckpointFinder] Using FINAL checkpoint: {final_checkpoint}")
+            return final_checkpoint
 
-    # Sort by step number (descending) and return the latest
+    if not checkpoints:
+        # If no step checkpoints and FINAL wasn't returned, return FINAL if it exists
+        return final_checkpoint
+
+    # Otherwise, return the latest step checkpoint
     checkpoints.sort(key=lambda x: x[0], reverse=True)
     return checkpoints[0][1]
 
@@ -115,45 +125,39 @@ class CheckpointManager:
     def __init__(
         self,
         agent: PPOAgent,
-        stats_aggregator: StatsAggregator,
-        base_checkpoint_dir: str,  # Use base directory
-        run_checkpoint_dir: str,  # Current run's checkpoint dir for saving
-        load_checkpoint_path_config: Optional[str],  # Explicit path from config
+        stats_aggregator: StatsAggregator,  # Use updated import
+        base_checkpoint_dir: str,
+        run_checkpoint_dir: str,
+        load_checkpoint_path_config: Optional[str],
         device: torch.device,
         obs_rms_dict: Optional[Dict[str, RunningMeanStd]] = None,
     ):
         self.agent = agent
         self.stats_aggregator = stats_aggregator
         self.base_checkpoint_dir = base_checkpoint_dir
-        self.run_checkpoint_dir = (
-            run_checkpoint_dir  # Directory for *saving* checkpoints for the current run
-        )
+        self.run_checkpoint_dir = run_checkpoint_dir
         self.device = device
         self.obs_rms_dict = obs_rms_dict if obs_rms_dict else {}
 
         self.global_step = 0
         self.episode_count = 0
-        # training_target_step will be loaded from checkpoint or set by Trainer
-        self.training_target_step = 0
+        # Initialize target step from config, will be overwritten by load if successful
+        self.training_target_step = TOTAL_TRAINING_STEPS
 
-        # --- Determine Checkpoint to Load ---
         self.run_id_to_load_from: Optional[str] = None
         self.checkpoint_path_to_load: Optional[str] = None
 
         if load_checkpoint_path_config:
-            # Priority 1: Explicit path from config
             print(
                 f"[CheckpointManager] Using explicit checkpoint path from config: {load_checkpoint_path_config}"
             )
             if os.path.isfile(load_checkpoint_path_config):
                 self.checkpoint_path_to_load = load_checkpoint_path_config
-                # Try to extract run_id from the path (best effort)
                 try:
-                    # Assumes path structure like .../checkpoints/run_XXXX/step_YYY.pth
                     parent_dir = os.path.dirname(load_checkpoint_path_config)
                     self.run_id_to_load_from = os.path.basename(parent_dir)
                     if not self.run_id_to_load_from.startswith("run_"):
-                        self.run_id_to_load_from = None  # Invalid format
+                        self.run_id_to_load_from = None
                 except Exception:
                     self.run_id_to_load_from = None
                 if self.run_id_to_load_from:
@@ -169,7 +173,6 @@ class CheckpointManager:
                     f"[CheckpointManager] WARNING: Explicit checkpoint path not found: {load_checkpoint_path_config}. Starting fresh."
                 )
         else:
-            # Priority 2: Auto-resume from the overall latest run
             print(
                 f"[CheckpointManager] No explicit checkpoint path. Searching for latest run in: {self.base_checkpoint_dir}"
             )
@@ -191,104 +194,116 @@ class CheckpointManager:
                     f"[CheckpointManager] No previous runs found in {self.base_checkpoint_dir}. Starting fresh."
                 )
 
-        # Note: Actual loading happens in the load_checkpoint method, called externally.
+        # Ensure aggregator has the initial target step
+        if self.stats_aggregator:
+            self.stats_aggregator.storage.training_target_step = (
+                self.training_target_step
+            )
 
     def get_run_id_to_load_from(self) -> Optional[str]:
-        """Returns the run_id determined during initialization, if any."""
         return self.run_id_to_load_from
 
     def get_checkpoint_path_to_load(self) -> Optional[str]:
-        """Returns the checkpoint path determined during initialization, if any."""
         return self.checkpoint_path_to_load
 
     def load_checkpoint(self):
-        """
-        Loads agent state, observation normalization, and stats aggregator state
-        using the path determined during initialization.
-        """
+        """Loads agent state, observation normalization, and stats aggregator state."""
         if not self.checkpoint_path_to_load:
             print(
                 "[CheckpointManager] No checkpoint path specified for loading. Skipping load."
             )
-            # Ensure aggregator episode count matches if starting fresh
-            self.stats_aggregator.total_episodes = self.episode_count
+            # Ensure initial target step is set in aggregator
+            if self.stats_aggregator:
+                self.stats_aggregator.storage.training_target_step = (
+                    self.training_target_step
+                )
+                self.stats_aggregator.storage.total_episodes = (
+                    self.episode_count
+                )  # Sync episode count
             return
 
         if not os.path.isfile(self.checkpoint_path_to_load):
             print(
                 f"[CheckpointManager] LOAD ERROR: Checkpoint file not found: {self.checkpoint_path_to_load}"
             )
-            self._reset_all_states()  # Reset state if specified file doesn't exist
+            self._reset_all_states()  # This sets target step and updates aggregator
             return
 
         print(
             f"[CheckpointManager] Loading checkpoint from: {self.checkpoint_path_to_load}"
         )
+        loaded_target_step = None
+        agent_load_successful = False
         try:
-            # Load checkpoint onto the correct device immediately
             checkpoint = torch.load(
                 self.checkpoint_path_to_load,
                 map_location=self.device,
                 weights_only=False,
             )
 
-            # --- Load Agent State ---
             if "agent_state_dict" in checkpoint:
+                # Agent load_state_dict now handles internal errors more gracefully
                 self.agent.load_state_dict(checkpoint["agent_state_dict"])
-                print("  -> Agent state loaded successfully.")
+                # We assume if no critical error was raised, it's "successful" enough to proceed
+                agent_load_successful = True
+                print("  -> Agent state loading attempted.")
             else:
                 print(
                     "  -> WARNING: 'agent_state_dict' key missing. Agent state NOT loaded."
                 )
 
-            # --- Load Global Step ---
             self.global_step = checkpoint.get("global_step", 0)
             print(f"  -> Loaded Global Step: {self.global_step}")
 
-            # --- Load Stats Aggregator State ---
             if "stats_aggregator_state_dict" in checkpoint and self.stats_aggregator:
                 try:
                     self.stats_aggregator.load_state_dict(
                         checkpoint["stats_aggregator_state_dict"]
                     )
                     print("  -> Stats Aggregator state loaded successfully.")
-                    # Overwrite episode_count with the one from the aggregator for consistency
-                    self.episode_count = self.stats_aggregator.total_episodes
-                    # Load the training target step from the aggregator state
-                    self.training_target_step = (
-                        self.stats_aggregator.training_target_step
+                    self.episode_count = self.stats_aggregator.storage.total_episodes
+                    # Get target step loaded by aggregator
+                    loaded_target_step = getattr(
+                        self.stats_aggregator.storage, "training_target_step", None
                     )
-                    # Log the loaded start time
-                    loaded_start_time = self.stats_aggregator.start_time
+                    if loaded_target_step is not None:
+                        print(
+                            f"  -> Loaded Training Target Step from Stats: {loaded_target_step}"
+                        )
+                    else:
+                        print(
+                            "  -> WARNING: 'training_target_step' not found in loaded stats."
+                        )
+                    loaded_start_time = self.stats_aggregator.storage.start_time
                     print(
                         f"  -> Loaded Run Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(loaded_start_time))}"
-                    )
-                    print(
-                        f"  -> Loaded Training Target Step: {self.training_target_step}"
                     )
                 except Exception as stats_err:
                     print(
                         f"  -> ERROR loading Stats Aggregator state: {stats_err}. Stats reset."
                     )
-                    self._reset_aggregator_state()  # Reset only aggregator on specific failure
-                    self.episode_count = 0  # Reset episode count too
-                    self.training_target_step = 0  # Reset target step
+                    self._reset_aggregator_state()  # Resets aggregator, including target step
+                    self.episode_count = 0
             elif self.stats_aggregator:
                 print(
                     "  -> WARNING: 'stats_aggregator_state_dict' not found. Stats Aggregator reset."
                 )
-                self._reset_aggregator_state()
-                self.episode_count = 0  # Reset episode count too
-                self.training_target_step = 0  # Reset target step
-            else:  # Fallback if no aggregator exists (should not happen with current setup)
+                self._reset_aggregator_state()  # Resets aggregator, including target step
+                self.episode_count = 0
+            else:
+                # Fallback if no aggregator (shouldn't happen in normal flow)
                 self.episode_count = checkpoint.get("episode_count", 0)
-                self.training_target_step = checkpoint.get("training_target_step", 0)
+                # Try loading target step directly from checkpoint if stats failed/missing
+                loaded_target_step = checkpoint.get("training_target_step", None)
+                if loaded_target_step is not None:
+                    print(
+                        f"  -> Loaded Training Target Step from Checkpoint (fallback): {loaded_target_step}"
+                    )
 
             print(
                 f"  -> Resuming from Step: {self.global_step}, Ep: {self.episode_count}"
             )
 
-            # --- Load Observation RMS State ---
             if "obs_rms_state_dict" in checkpoint and self.obs_rms_dict:
                 rms_state_dict = checkpoint["obs_rms_state_dict"]
                 loaded_keys = set()
@@ -314,7 +329,6 @@ class CheckpointManager:
                             f"  -> WARNING: Obs RMS state for '{key}' not found in checkpoint. Using initial RMS."
                         )
                         rms_instance.reset()
-
                 extra_keys = set(rms_state_dict.keys()) - loaded_keys
                 if extra_keys:
                     print(
@@ -327,67 +341,100 @@ class CheckpointManager:
                 for rms in self.obs_rms_dict.values():
                     rms.reset()
 
+            # Determine final training target step
+            if loaded_target_step is not None and loaded_target_step > self.global_step:
+                self.training_target_step = loaded_target_step
+                print(
+                    f"[CheckpointManager] Using loaded Training Target Step: {self.training_target_step}"
+                )
+            else:
+                # Calculate new target based on current global step + config steps
+                self.training_target_step = self.global_step + TOTAL_TRAINING_STEPS
+                if loaded_target_step is not None:
+                    print(
+                        f"[CheckpointManager] WARNING: Loaded target step ({loaded_target_step}) is not valid or already reached. Calculating new target."
+                    )
+                print(
+                    f"[CheckpointManager] Calculated new Training Target Step: {self.training_target_step} (Current Step {self.global_step} + Config Steps {TOTAL_TRAINING_STEPS})"
+                )
+
+            # Ensure aggregator has the final target step
+            if self.stats_aggregator:
+                self.stats_aggregator.storage.training_target_step = (
+                    self.training_target_step
+                )
+
             print("[CheckpointManager] Checkpoint loading finished.")
 
-        except pickle.UnpicklingError as e:  # Catch the specific error
-            print(
-                f"  -> ERROR loading checkpoint (UnpicklingError): {e}. This often happens with PyTorch version changes or corrupted files. State reset."
-            )
+        except pickle.UnpicklingError as e:
+            print(f"  -> ERROR loading checkpoint (UnpicklingError): {e}. State reset.")
             traceback.print_exc()
             self._reset_all_states()
         except KeyError as e:
-            print(
-                f"  -> ERROR loading checkpoint: Missing key '{e}'. Check compatibility. State reset."
-            )
+            print(f"  -> ERROR loading checkpoint: Missing key '{e}'. State reset.")
             traceback.print_exc()
             self._reset_all_states()
         except Exception as e:
-            print(
-                f"  -> ERROR loading checkpoint ('{e}'). Check compatibility. State reset."
-            )
+            print(f"  -> ERROR loading checkpoint ('{e}'). State reset.")
             traceback.print_exc()
             self._reset_all_states()
+
+        # Final check: if agent load failed, ensure target step is calculated fresh
+        if not agent_load_successful:
+            print(
+                "[CheckpointManager] Agent load was unsuccessful. Recalculating target step."
+            )
+            self.training_target_step = self.global_step + TOTAL_TRAINING_STEPS
+            if self.stats_aggregator:
+                self.stats_aggregator.storage.training_target_step = (
+                    self.training_target_step
+                )
+            print(
+                f"[CheckpointManager] Final Training Target Step set to: {self.training_target_step}"
+            )
 
     def _reset_aggregator_state(self):
         """Helper to reset only the stats aggregator state."""
         if self.stats_aggregator:
-            # Preserve avg_windows and plot_window during reset
             avg_windows = self.stats_aggregator.avg_windows
             plot_window = self.stats_aggregator.plot_window
             self.stats_aggregator.__init__(
-                avg_windows=avg_windows,
-                plot_window=plot_window,
+                avg_windows=avg_windows, plot_window=plot_window
             )
-            self.stats_aggregator.total_episodes = 0
-            self.stats_aggregator.training_target_step = 0  # Reset target
+            # Ensure target step is reset in the new aggregator instance
+            self.stats_aggregator.storage.training_target_step = (
+                self.training_target_step
+            )
+            self.stats_aggregator.storage.total_episodes = 0  # Reset episode count too
 
     def _reset_all_states(self):
         """Helper to reset all managed states on critical load failure."""
         print("[CheckpointManager] Resetting all managed states due to load failure.")
         self.global_step = 0
         self.episode_count = 0
-        self.training_target_step = 0  # Reset target
+        # Set target step based on config *before* resetting aggregator
+        self.training_target_step = TOTAL_TRAINING_STEPS
         if self.obs_rms_dict:
             for rms in self.obs_rms_dict.values():
                 rms.reset()
-        self._reset_aggregator_state()
+        self._reset_aggregator_state()  # Resets aggregator and sets its target step
 
     def save_checkpoint(
         self,
         global_step: int,
-        episode_count: int,
-        training_target_step: int,  # Add target step parameter
+        episode_count: int,  # This episode count might be slightly behind aggregator's if called mid-rollout
+        training_target_step: int,  # Pass the target step known by the caller (e.g., main thread)
         is_final: bool = False,
     ):
-        """Saves agent, observation normalization, and stats aggregator state to the current run's directory."""
+        """Saves agent, observation normalization, and stats aggregator state."""
         prefix = "FINAL" if is_final else f"step_{global_step}"
-        # Use the run_checkpoint_dir specific to the current run for saving
         save_dir = self.run_checkpoint_dir
         os.makedirs(save_dir, exist_ok=True)
         filename = f"{prefix}_agent_state.pth"
         full_save_path = os.path.join(save_dir, filename)
 
         print(f"[CheckpointManager] Saving checkpoint ({prefix}) to {save_dir}...")
+        temp_save_path = full_save_path + ".tmp"
         try:
             agent_save_data = self.agent.get_state_dict()
 
@@ -395,7 +442,7 @@ class CheckpointManager:
             if self.obs_rms_dict:
                 for key, rms_instance in self.obs_rms_dict.items():
                     rms_state = rms_instance.state_dict()
-                    # Ensure RMS state is saved as numpy arrays
+                    # Ensure data is numpy before saving
                     if isinstance(rms_state.get("mean"), torch.Tensor):
                         rms_state["mean"] = rms_state["mean"].cpu().numpy()
                     if isinstance(rms_state.get("var"), torch.Tensor):
@@ -403,33 +450,35 @@ class CheckpointManager:
                     obs_rms_save_data[key] = rms_state
 
             stats_aggregator_save_data = {}
+            aggregator_episode_count = episode_count  # Use passed value as default
+            aggregator_target_step = training_target_step  # Use passed value as default
             if self.stats_aggregator:
-                # Ensure aggregator has the latest target step before saving its state
-                self.stats_aggregator.training_target_step = training_target_step
+                # Ensure the target step is up-to-date before saving stats
+                self.stats_aggregator.storage.training_target_step = (
+                    training_target_step
+                )
                 stats_aggregator_save_data = self.stats_aggregator.state_dict()
-                # Ensure episode count in checkpoint matches aggregator's count
-                episode_count = self.stats_aggregator.total_episodes
+                # Use episode count and target step from aggregator storage for consistency
+                aggregator_episode_count = self.stats_aggregator.storage.total_episodes
+                aggregator_target_step = (
+                    self.stats_aggregator.storage.training_target_step
+                )
 
-            # Combine into a single checkpoint dictionary
             checkpoint_data = {
                 "global_step": global_step,
-                "episode_count": episode_count,  # Use count from aggregator if available
-                "training_target_step": training_target_step,  # Save target step
+                "episode_count": aggregator_episode_count,  # Save aggregator's count
+                "training_target_step": aggregator_target_step,  # Save aggregator's target
                 "agent_state_dict": agent_save_data,
                 "obs_rms_state_dict": obs_rms_save_data,
-                "stats_aggregator_state_dict": stats_aggregator_save_data,  # Add stats state
+                "stats_aggregator_state_dict": stats_aggregator_save_data,
             }
 
-            # Use a temporary file and rename for atomicity
-            temp_save_path = full_save_path + ".tmp"
             torch.save(checkpoint_data, temp_save_path)
-            os.replace(temp_save_path, full_save_path)  # Atomic rename
-
+            os.replace(temp_save_path, full_save_path)
             print(f"  -> Checkpoint saved: {filename}")
         except Exception as e:
             print(f"  -> ERROR saving checkpoint: {e}")
             traceback.print_exc()
-            # Clean up temporary file if saving failed
             if os.path.exists(temp_save_path):
                 try:
                     os.remove(temp_save_path)
@@ -438,5 +487,4 @@ class CheckpointManager:
 
     def get_initial_state(self) -> Tuple[int, int]:
         """Returns the initial global step and episode count after potential loading."""
-        # Episode count is now primarily sourced from the loaded stats aggregator
         return self.global_step, self.episode_count

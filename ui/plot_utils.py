@@ -144,11 +144,16 @@ def _interpolate_visual_property(
     Rank (total_ranks - 1) corresponds to min_val (least prominent).
     """
     if total_ranks <= 1:
-        return max_val
+        return float(max_val)  # Ensure float
     inverted_rank = (total_ranks - 1) - rank
     fraction = inverted_rank / max(1, total_ranks - 1)
-    value = min_val + (max_val - min_val) * fraction
-    return np.clip(value, min_val, max_val)
+    # --- Explicitly cast to float before subtraction/addition ---
+    f_min_val = float(min_val)
+    f_max_val = float(max_val)
+    value = f_min_val + (f_max_val - f_min_val) * fraction
+    # --- End explicit cast ---
+    # Clip using original min/max in case casting caused issues, ensure float return
+    return float(np.clip(value, min_val, max_val))
 
 
 def _format_value(value: float, is_loss: bool) -> str:

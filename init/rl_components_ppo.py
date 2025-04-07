@@ -14,11 +14,12 @@ from config import (
     TensorBoardConfig,
     ObsNormConfig,
     TransformerConfig,
-    get_run_log_dir,  # Import getter for TB log dir
+    get_run_log_dir,
 )
 from environment.game_state import GameState, StateType
 from agent.ppo_agent import PPOAgent
-from training.trainer import Trainer
+
+# Removed Trainer import
 from stats.stats_recorder import StatsRecorderBase
 from stats.aggregator import StatsAggregator
 from stats.simple_stats_recorder import SimpleStatsRecorder
@@ -31,6 +32,7 @@ def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
     print(f"Initializing {num_envs} game environments...")
     try:
         envs = [GameState() for _ in range(num_envs)]
+        # State checks remain the same
         s_test_dict = envs[0].reset()
         if not isinstance(s_test_dict, dict):
             raise TypeError("Env reset did not return a dict.")
@@ -119,7 +121,7 @@ def initialize_stats_recorder(
     transformer_config: TransformerConfig,
     is_reinit: bool = False,
 ) -> StatsRecorderBase:
-    """Initializes the statistics recording components (Aggregator, Console, TensorBoard)."""
+    """Initializes the statistics recording components."""
     print(f"Initializing Statistics Components... Re-init: {is_reinit}")
     stats_aggregator = StatsAggregator(
         avg_windows=stats_config.STATS_AVG_WINDOW,
@@ -132,14 +134,13 @@ def initialize_stats_recorder(
     model_for_graph_cpu = None
     dummy_input_tuple = None
     print("[Stats Init] Model graph logging DISABLED.")
-    # Use the getter for the log directory
     current_run_log_dir = get_run_log_dir()
     print(f"Using TensorBoard Logger (Log Dir: {current_run_log_dir})")
     try:
         tb_recorder = TensorBoardStatsRecorder(
             aggregator=stats_aggregator,
             console_recorder=console_recorder,
-            log_dir=current_run_log_dir,  # Pass the dynamically obtained log dir
+            log_dir=current_run_log_dir,
             hparam_dict=(config_dict if not is_reinit else None),
             model_for_graph=model_for_graph_cpu,
             dummy_input_for_graph=dummy_input_tuple,
@@ -160,37 +161,3 @@ def initialize_stats_recorder(
         raise e
 
 
-def initialize_trainer(
-    envs: List[GameState],
-    agent: PPOAgent,
-    stats_recorder: StatsRecorderBase,
-    env_config: EnvConfig,
-    ppo_config: PPOConfig,
-    rnn_config: RNNConfig,
-    train_config: TrainConfig,
-    model_config: ModelConfig,
-    obs_norm_config: ObsNormConfig,
-    transformer_config: TransformerConfig,
-    device: torch.device,
-    # model_save_path: str, # Removed parameter
-    load_checkpoint_path: Optional[str],
-) -> Trainer:
-    """Initializes the PPO Trainer."""
-    print("Initializing PPO Trainer...")
-    trainer = Trainer(
-        envs=envs,
-        agent=agent,
-        stats_recorder=stats_recorder,
-        env_config=env_config,
-        ppo_config=ppo_config,
-        rnn_config=rnn_config,
-        train_config=train_config,
-        model_config=model_config,
-        obs_norm_config=obs_norm_config,
-        transformer_config=transformer_config,
-        # model_save_path=model_save_path, # Removed argument
-        load_checkpoint_path=load_checkpoint_path,
-        device=device,
-    )
-    print("PPO Trainer initialization finished.")
-    return trainer

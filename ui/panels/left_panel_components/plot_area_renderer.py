@@ -1,3 +1,4 @@
+# File: ui/panels/left_panel_components/plot_area_renderer.py
 import pygame
 from typing import Dict, Deque, Any, Optional, Tuple
 import numpy as np
@@ -25,10 +26,6 @@ class PlotAreaRenderer:
         self.screen = screen
         self.fonts = fonts
         self.plotter = plotter
-        # Removed best value fonts as they are no longer rendered here
-
-    # Removed _format_steps_ago method
-    # Removed _render_best_values_summary method
 
     def render(
         self,
@@ -36,18 +33,14 @@ class PlotAreaRenderer:
         panel_width: int,
         screen_height: int,
         plot_data: Dict[str, Deque],
-        # Removed stats_summary parameter
         status: str,
     ):
         """Renders the plot area."""
-
-        # Calculate plot area position and size directly from y_start
-        plot_area_y_start = y_start  # Use the provided y_start directly
+        plot_area_y_start = y_start
         plot_area_height = screen_height - plot_area_y_start - 10
         plot_area_width = panel_width - 20
 
         if plot_area_width <= 50 or plot_area_height <= 50:
-            # Optionally render a message if plot area is too small
             return
 
         plot_surface = self.plotter.get_cached_or_updated_plot(
@@ -60,7 +53,6 @@ class PlotAreaRenderer:
         if plot_surface:
             self.screen.blit(plot_surface, plot_area_rect.topleft)
         else:
-            # Render placeholder if no plot surface
             pygame.draw.rect(self.screen, (40, 40, 40), plot_area_rect, 1)
             placeholder_text = "Waiting for data..."
             if status == "Buffering":
@@ -72,9 +64,7 @@ class PlotAreaRenderer:
 
             placeholder_font = self.fonts.get("plot_placeholder")
             if placeholder_font:
-                placeholder_surf = placeholder_font.render(
-                    placeholder_text, True, GRAY  # Use GRAY from config
-                )
+                placeholder_surf = placeholder_font.render(placeholder_text, True, GRAY)
                 placeholder_rect = placeholder_surf.get_rect(
                     center=plot_area_rect.center
                 )
@@ -91,13 +81,13 @@ class PlotAreaRenderer:
             else:  # Fallback cross
                 pygame.draw.line(
                     self.screen,
-                    GRAY,  # Use GRAY from config
+                    GRAY,
                     plot_area_rect.topleft,
                     plot_area_rect.bottomright,
                 )
                 pygame.draw.line(
                     self.screen,
-                    GRAY,  # Use GRAY from config
+                    GRAY,
                     plot_area_rect.topright,
                     plot_area_rect.bottomleft,
                 )
