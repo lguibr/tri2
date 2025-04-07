@@ -1,4 +1,5 @@
 # File: training/trainer.py
+# File: training/trainer.py
 import time
 import torch
 import numpy as np
@@ -21,9 +22,9 @@ from config import (
     TensorBoardConfig,
     VisConfig,
     RewardConfig,
-    TOTAL_TRAINING_STEPS,
-    BASE_CHECKPOINT_DIR,  # Import base checkpoint dir
-    get_run_checkpoint_dir,  # Import getter for run-specific dir
+    TOTAL_TRAINING_STEPS,  # Import the base increment value
+    BASE_CHECKPOINT_DIR,
+    get_run_checkpoint_dir,
 )
 from environment.game_state import GameState
 from agent.ppo_agent import PPOAgent
@@ -35,7 +36,7 @@ from .training_utils import get_env_image_as_numpy
 
 
 class Trainer:
-    """Orchestrates the PPO training process, including LR scheduling."""
+    """Orchestrates the PPO training process, including LR scheduling and dynamic target steps."""
 
     def __init__(
         self,
@@ -49,17 +50,13 @@ class Trainer:
         model_config: ModelConfig,
         obs_norm_config: ObsNormConfig,
         transformer_config: TransformerConfig,
-        # model_save_path: str, # Removed - handled by CheckpointManager
         device: torch.device,
-        load_checkpoint_path: Optional[
-            str
-        ] = None,  # Explicit path from config or auto-detected
+        load_checkpoint_path: Optional[str] = None,
     ):
         print("[Trainer-PPO] Initializing...")
         self.envs = envs
         self.agent = agent
         self.stats_recorder = stats_recorder
-        # --- Get the StatsAggregator instance from the recorder ---
         if not hasattr(stats_recorder, "aggregator") or not isinstance(
             stats_recorder.aggregator, StatsAggregator
         ):
@@ -67,7 +64,6 @@ class Trainer:
                 "StatsRecorder provided to Trainer must have a 'aggregator' attribute of type StatsAggregator."
             )
         self.stats_aggregator: StatsAggregator = stats_recorder.aggregator
-        # ---
 
         self.num_envs = env_config.NUM_ENVS
         self.device = device
@@ -82,7 +78,6 @@ class Trainer:
         self.tb_config = TensorBoardConfig()
         self.vis_config = VisConfig()
 
-        # Initialize RolloutCollector first, as CheckpointManager needs its obs_rms_dict
         self.rollout_collector = RolloutCollector(
             envs=self.envs,
             agent=self.agent,
@@ -97,34 +92,47 @@ class Trainer:
         )
         self.rollout_storage = self.rollout_collector.rollout_storage
 
-        # Initialize CheckpointManager - pass the StatsAggregator instance
-        # Pass base checkpoint dir and the specific dir for the current run
         self.checkpoint_manager = CheckpointManager(
             agent=self.agent,
             stats_aggregator=self.stats_aggregator,
-            base_checkpoint_dir=BASE_CHECKPOINT_DIR,  # Pass base dir for searching
-            run_checkpoint_dir=get_run_checkpoint_dir(),  # Pass current run's dir for saving
-            load_checkpoint_path_config=load_checkpoint_path,  # Pass explicit/auto path
+            base_checkpoint_dir=BASE_CHECKPOINT_DIR,
+            run_checkpoint_dir=get_run_checkpoint_dir(),
+            load_checkpoint_path_config=load_checkpoint_path,
             device=self.device,
             obs_rms_dict=self.rollout_collector.get_obs_rms_dict(),
         )
 
-        # --- Load Checkpoint ---
-        # CheckpointManager determines the path, now we explicitly call load
+        # --- Load Checkpoint and Determine Training Target ---
+        self.global_step = 0
+        self.training_target_step = TOTAL_TRAINING_STEPS  # Default target for new run
+
         if self.checkpoint_manager.get_checkpoint_path_to_load():
             self.checkpoint_manager.load_checkpoint()
+            # Get loaded step count AFTER loading
+            loaded_global_step, initial_episode_count = (
+                self.checkpoint_manager.get_initial_state()
+            )
+            self.global_step = loaded_global_step
+            # Set the new target by adding the configured steps to the loaded steps
+            self.training_target_step = self.global_step + TOTAL_TRAINING_STEPS
+            print(
+                f"[Trainer] Resumed from step {self.global_step}. New target: {self.training_target_step} steps."
+            )
+            # Sync aggregator's target step (loaded from checkpoint or set here)
+            self.stats_aggregator.training_target_step = self.training_target_step
         else:
-            print("[Trainer] No checkpoint found or specified to load.")
+            print(
+                f"[Trainer] No checkpoint loaded. Starting fresh. Target: {self.training_target_step} steps."
+            )
+            # Ensure aggregator's target step is set for a new run
+            self.stats_aggregator.training_target_step = self.training_target_step
             # Ensure aggregator start time is current time if starting fresh
             self.stats_aggregator.start_time = time.time()
 
         # Get initial state AFTER CheckpointManager has potentially loaded a checkpoint
-        self.global_step, initial_episode_count = (
-            self.checkpoint_manager.get_initial_state()
-        )
-        # Set the episode count in the collector based on loaded state
+        # Note: global_step is already set above
+        _, initial_episode_count = self.checkpoint_manager.get_initial_state()
         self.rollout_collector.episode_count = initial_episode_count
-        # Ensure aggregator's internal step counter is also synced if loaded
         self.stats_aggregator.current_global_step = self.global_step
 
         self.current_update_epoch = 0
@@ -137,7 +145,6 @@ class Trainer:
         self.current_update_data: Optional[Dict[str, torch.Tensor]] = None
         self.update_start_time: float = 0.0
 
-        # --- General State ---
         self.last_image_log_step = -1
         self.last_checkpoint_step = self.global_step
         self.rollouts_completed_since_last_checkpoint = 0
@@ -204,10 +211,11 @@ class Trainer:
                 "lr": initial_lr,
                 "global_step": self.global_step,
                 "episode_count": self.rollout_collector.get_episode_count(),
+                "training_target_step": self.training_target_step,  # Log target
             }
         )
         print(
-            f"  -> Start Step={self.global_step}, Ep={self.rollout_collector.get_episode_count()}, LR={initial_lr:.1e}"
+            f"  -> Start Step={self.global_step}, Target Step={self.training_target_step}, Ep={self.rollout_collector.get_episode_count()}, LR={initial_lr:.1e}"
         )
 
     def _get_current_lr(self) -> float:
@@ -224,7 +232,8 @@ class Trainer:
         """Updates the learning rate based on the configured schedule."""
         if not self.ppo_config.USE_LR_SCHEDULER:
             return
-        total_steps = max(1, TOTAL_TRAINING_STEPS)
+        # Use the dynamic training target step for LR scheduling
+        total_steps = max(1, self.training_target_step)
         current_progress = self.global_step / total_steps
         initial_lr = self.ppo_config.LEARNING_RATE
         schedule_type = getattr(self.ppo_config, "LR_SCHEDULE_TYPE", "linear")
@@ -365,6 +374,7 @@ class Trainer:
             "update_time": update_duration,
             "lr": self._get_current_lr(),
             "global_step": self.global_step,
+            "training_target_step": self.training_target_step,  # Include target
         }
         step_record_data_update.update(avg_metrics)
         self.stats_recorder.record_step(step_record_data_update)
@@ -393,6 +403,14 @@ class Trainer:
         step_start_time = time.time()
 
         if self.current_phase == "Collecting":
+            # Check if training target is already reached before collecting
+            if self.global_step >= self.training_target_step:
+                self.current_phase = "Complete"  # Or some other terminal state
+                print(
+                    f"Training target ({self.training_target_step}) reached. Stopping collection."
+                )
+                return
+
             steps_collected_this_iter = self.rollout_collector.collect_one_step(
                 self.global_step
             )
@@ -412,11 +430,16 @@ class Trainer:
                 "num_steps_processed": steps_collected_this_iter,
                 "global_step": self.global_step,
                 "lr": self._get_current_lr(),
+                "training_target_step": self.training_target_step,  # Include target
             }
             self.stats_recorder.record_step(step_record_data_timing)
 
         elif self.current_phase == "Updating":
             self._iterate_regular_update()
+
+        elif self.current_phase == "Complete":
+            # Do nothing if training is complete
+            pass
 
     def maybe_save_checkpoint(self, force_save=False):
         """Saves a checkpoint based on frequency or if forced."""
@@ -429,8 +452,11 @@ class Trainer:
             print(
                 f"[Trainer] Saving checkpoint. Force: {force_save}, FreqMet: {should_save_freq}, Rollouts Since Last: {self.rollouts_completed_since_last_checkpoint}"
             )
+            # Pass the current training target step to the checkpoint manager
             self.checkpoint_manager.save_checkpoint(
-                self.global_step, self.stats_aggregator.total_episodes
+                self.global_step,
+                self.stats_aggregator.total_episodes,
+                training_target_step=self.training_target_step,
             )
             self.rollouts_completed_since_last_checkpoint = 0
             self.last_checkpoint_step = self.global_step
@@ -474,10 +500,12 @@ class Trainer:
         should_save = save_final and self.global_step > 0
         if should_save:
             print("[Trainer-PPO] Saving final checkpoint...")
+            # Pass the current training target step to the checkpoint manager
             self.checkpoint_manager.save_checkpoint(
                 self.global_step,
                 self.stats_aggregator.total_episodes,
                 is_final=True,
+                training_target_step=self.training_target_step,
             )
         else:
             print(

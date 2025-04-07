@@ -1,4 +1,5 @@
 # File: stats/aggregator.py
+# File: stats/aggregator.py
 import time
 from collections import deque
 from typing import Deque, Dict, Any, Optional, List
@@ -48,6 +49,12 @@ class StatsAggregator:
         self.best_game_score_history: Deque[int] = deque(maxlen=plot_window)
         self.lr_values: Deque[float] = deque(maxlen=plot_window)
         self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
+        # Resource Usage Deques
+        self.cpu_usage: Deque[float] = deque(maxlen=plot_window)
+        self.memory_usage: Deque[float] = deque(maxlen=plot_window)
+        self.gpu_memory_usage_percent: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Changed key
 
         # --- Scalar State Variables ---
         self.total_episodes = 0
@@ -58,7 +65,12 @@ class StatsAggregator:
         self.current_global_step: int = 0
         self.current_sps: float = 0.0
         self.current_lr: float = 0.0
-        self.start_time: float = time.time()  # Initialize start time
+        self.start_time: float = time.time()
+        self.training_target_step: int = 0
+        # Resource Usage Scalars
+        self.current_cpu_usage: float = 0.0
+        self.current_memory_usage: float = 0.0
+        self.current_gpu_memory_usage_percent: float = 0.0  # Changed key
 
         # --- Best Value Tracking ---
         self.best_score: float = -float("inf")
@@ -98,7 +110,7 @@ class StatsAggregator:
         if triangles_cleared is not None:
             self.episode_triangles_cleared.append(triangles_cleared)
             self.total_triangles_cleared += triangles_cleared
-        self.total_episodes = episode_num  # Use the provided episode_num directly
+        self.total_episodes = episode_num
 
         if episode_score > self.best_score:
             self.previous_best_score = self.best_score
@@ -124,6 +136,9 @@ class StatsAggregator:
         g_step = step_data.get("global_step", self.current_global_step)
         if g_step > self.current_global_step:
             self.current_global_step = g_step
+
+        if "training_target_step" in step_data:
+            self.training_target_step = step_data["training_target_step"]
 
         update_info = {"new_best_loss": False}
 
@@ -182,6 +197,23 @@ class StatsAggregator:
             self.sps_values.append(sps)
             self.current_sps = sps
 
+        # Record resource usage
+        if "cpu_usage" in step_data and step_data["cpu_usage"] is not None:
+            self.cpu_usage.append(step_data["cpu_usage"])
+            self.current_cpu_usage = step_data["cpu_usage"]
+        if "memory_usage" in step_data and step_data["memory_usage"] is not None:
+            self.memory_usage.append(step_data["memory_usage"])
+            self.current_memory_usage = step_data["memory_usage"]
+        # Changed key for GPU memory
+        if (
+            "gpu_memory_usage_percent" in step_data
+            and step_data["gpu_memory_usage_percent"] is not None
+        ):
+            self.gpu_memory_usage_percent.append(step_data["gpu_memory_usage_percent"])
+            self.current_gpu_memory_usage_percent = step_data[
+                "gpu_memory_usage_percent"
+            ]
+
         return update_info
 
     def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
@@ -224,7 +256,12 @@ class StatsAggregator:
             "num_ep_scores": len(self.episode_scores),
             "num_losses": len(self.value_losses),
             "summary_avg_window_size": summary_window,
-            "start_time": self.start_time,  # Include start time in summary
+            "start_time": self.start_time,
+            "training_target_step": self.training_target_step,
+            # Add current resource usage
+            "current_cpu_usage": self.current_cpu_usage,
+            "current_memory_usage": self.current_memory_usage,
+            "current_gpu_memory_usage_percent": self.current_gpu_memory_usage_percent,  # Changed key
         }
         return summary
 
@@ -245,12 +282,16 @@ class StatsAggregator:
             "best_game_score_history": self.best_game_score_history.copy(),
             "lr_values": self.lr_values.copy(),
             "epsilon_values": self.epsilon_values.copy(),
+            # Resource Usage
+            "cpu_usage": self.cpu_usage.copy(),
+            "memory_usage": self.memory_usage.copy(),
+            "gpu_memory_usage_percent": self.gpu_memory_usage_percent.copy(),  # Changed key
         }
 
     def state_dict(self) -> Dict[str, Any]:
         """Returns the state of the aggregator for saving."""
         state = {
-            # Deques (convert to list for saving)
+            # Deques
             "policy_losses": list(self.policy_losses),
             "value_losses": list(self.value_losses),
             "entropies": list(self.entropies),
@@ -267,6 +308,11 @@ class StatsAggregator:
             "best_game_score_history": list(self.best_game_score_history),
             "lr_values": list(self.lr_values),
             "epsilon_values": list(self.epsilon_values),
+            "cpu_usage": list(self.cpu_usage),
+            "memory_usage": list(self.memory_usage),
+            "gpu_memory_usage_percent": list(
+                self.gpu_memory_usage_percent
+            ),  # Changed key
             # Scalar State Variables
             "total_episodes": self.total_episodes,
             "total_triangles_cleared": self.total_triangles_cleared,
@@ -276,7 +322,11 @@ class StatsAggregator:
             "current_global_step": self.current_global_step,
             "current_sps": self.current_sps,
             "current_lr": self.current_lr,
-            "start_time": self.start_time,  # Save start time
+            "start_time": self.start_time,
+            "training_target_step": self.training_target_step,
+            "current_cpu_usage": self.current_cpu_usage,
+            "current_memory_usage": self.current_memory_usage,
+            "current_gpu_memory_usage_percent": self.current_gpu_memory_usage_percent,  # Changed key
             # Best Value Tracking
             "best_score": self.best_score,
             "previous_best_score": self.previous_best_score,
@@ -287,7 +337,7 @@ class StatsAggregator:
             "best_value_loss": self.best_value_loss,
             "previous_best_value_loss": self.previous_best_value_loss,
             "best_value_loss_step": self.best_value_loss_step,
-            # Config (optional, but useful for consistency check)
+            # Config
             "plot_window": self.plot_window,
             "avg_windows": self.avg_windows,
         }
@@ -296,7 +346,6 @@ class StatsAggregator:
     def load_state_dict(self, state_dict: Dict[str, Any]):
         """Loads the state of the aggregator from a dictionary."""
         print("[StatsAggregator] Loading state...")
-        # Restore Deques (recreate with maxlen)
         self.plot_window = state_dict.get("plot_window", self.plot_window)
         deque_keys = [
             "policy_losses",
@@ -315,11 +364,13 @@ class StatsAggregator:
             "best_game_score_history",
             "lr_values",
             "epsilon_values",
+            "cpu_usage",
+            "memory_usage",
+            "gpu_memory_usage_percent",  # Changed key
         ]
         for key in deque_keys:
             if key in state_dict:
                 try:
-                    # Ensure data is list or tuple before creating deque
                     data = state_dict[key]
                     if isinstance(data, (list, tuple)):
                         setattr(self, key, deque(data, maxlen=self.plot_window))
@@ -336,7 +387,6 @@ class StatsAggregator:
                 )
                 setattr(self, key, deque(maxlen=self.plot_window))
 
-        # Restore Scalar State Variables
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
@@ -346,10 +396,13 @@ class StatsAggregator:
             "current_global_step",
             "current_sps",
             "current_lr",
-            "start_time",  # Load start time
+            "start_time",
+            "training_target_step",
+            "current_cpu_usage",
+            "current_memory_usage",
+            "current_gpu_memory_usage_percent",  # Changed key
         ]
-        # Use current time as default for start_time if not found
-        default_values = {"start_time": time.time()}
+        default_values = {"start_time": time.time(), "training_target_step": 0}
         for key in scalar_keys:
             if key in state_dict:
                 setattr(self, key, state_dict[key])
@@ -362,7 +415,6 @@ class StatsAggregator:
                     f"  -> Warning: Scalar '{key}' not found in state_dict. Using default ({default_val})."
                 )
 
-        # Restore Best Value Tracking
         best_value_keys = [
             "best_score",
             "previous_best_score",
@@ -382,15 +434,13 @@ class StatsAggregator:
                     f"  -> Warning: Best value key '{key}' not found in state_dict. Using default."
                 )
 
-        # Restore config (optional)
         self.avg_windows = state_dict.get("avg_windows", self.avg_windows)
         self.summary_avg_window = self.avg_windows[0] if self.avg_windows else 100
 
         print("[StatsAggregator] State loaded.")
-        # Ensure current_global_step is consistent if loaded elsewhere (e.g., CheckpointManager)
-        # This value might be overwritten by CheckpointManager's global_step later.
         print(f"  -> Loaded total_episodes: {self.total_episodes}")
         print(f"  -> Loaded best_score: {self.best_score}")
         print(
             f"  -> Loaded start_time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.start_time))}"
         )
+        print(f"  -> Loaded training_target_step: {self.training_target_step}")

@@ -4,3 +4,4 @@ torch>=1.10.0
 tensorboard
 cloudpickle
 matplotlib
+psutil

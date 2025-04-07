@@ -1,10 +1,11 @@
 # File: ui/panels/left_panel_components/button_status_renderer.py
+# File: ui/panels/left_panel_components/button_status_renderer.py
 import pygame
 import time
 from typing import Dict, Tuple, Any
 
 from config import (
-    TOTAL_TRAINING_STEPS,
+    # TOTAL_TRAINING_STEPS, # Removed import, use dynamic target
     WHITE,
     YELLOW,
     RED,
@@ -90,13 +91,16 @@ class ButtonStatusRenderer:
 
         # Line 2: Steps | Episodes | SPS
         global_step = stats_summary.get("global_step", 0)
+        # Get the dynamic target step from the summary
+        training_target_step = stats_summary.get("training_target_step", 0)
         total_episodes = stats_summary.get("total_episodes", 0)
         sps = stats_summary.get("steps_per_second", 0.0)
-        # Display total steps without the target if target is reached
-        if global_step >= TOTAL_TRAINING_STEPS:
+
+        # Display steps relative to the dynamic target
+        if training_target_step > 0:
+            steps_str = f"{global_step/1e6:.2f}M/{training_target_step/1e6:.1f}M Steps"
+        else:  # Fallback if target is 0 or not set
             steps_str = f"{global_step/1e6:.2f}M Steps"
-        else:
-            steps_str = f"{global_step/1e6:.2f}M/{TOTAL_TRAINING_STEPS/1e6:.1f}M Steps"
 
         eps_str = f"{total_episodes} Eps"
         sps_str = f"{sps:.0f} SPS"
@@ -195,13 +199,14 @@ class ButtonStatusRenderer:
                 overall_eta_str = format_eta(remaining_time_overall)
 
             if epoch_progress > 1e-6 and num_minibatches_per_epoch > 0:
-                time_per_epoch_so_far = time_elapsed / max(
-                    1, (current_epoch - 1) + epoch_progress
-                )
-                total_estimated_epoch_time = time_per_epoch_so_far / epoch_progress
-                time_elapsed_this_epoch = time_per_epoch_so_far * epoch_progress
+                # Estimate time per epoch based on overall progress through epochs
+                # Avoid division by zero if current_epoch is 1 and epoch_progress is small
+                effective_epochs_done = max(1e-6, (current_epoch - 1) + epoch_progress)
+                time_per_epoch_estimate = time_elapsed / effective_epochs_done
+                # Estimate remaining time for the current epoch
+                remaining_epoch_fraction = 1.0 - epoch_progress
                 remaining_time_epoch = max(
-                    0.0, total_estimated_epoch_time - time_elapsed_this_epoch
+                    0.0, time_per_epoch_estimate * remaining_epoch_fraction
                 )
                 epoch_eta_str = format_eta(remaining_time_epoch)
             elif epoch_progress == 0.0:
@@ -295,29 +300,38 @@ class ButtonStatusRenderer:
             progress_bar_y = button_y_pos
 
             global_step = stats_summary.get("global_step", 0)
+            # Get the dynamic target step from the summary
+            training_target_step = stats_summary.get("training_target_step", 0)
             start_time = stats_summary.get("start_time", 0.0)
-            progress = global_step / max(1, TOTAL_TRAINING_STEPS)
+            progress = (
+                global_step / max(1, training_target_step)
+                if training_target_step > 0
+                else 0.0
+            )
             progress_bar_color = (20, 100, 20)  # Dark green
 
             # Determine text based on whether target is reached
-            if global_step >= TOTAL_TRAINING_STEPS:
+            if global_step >= training_target_step and training_target_step > 0:
                 progress_text = (
                     f"Target Reached ({global_step/1e6:.2f}M Steps) - Continuing..."
                 )
                 progress = 1.0  # Keep bar full
                 progress_bar_color = (100, 150, 100)  # Lighter green when complete
-            else:
+            elif training_target_step > 0:
                 eta_str = "N/A"
                 time_elapsed = time.time() - start_time if start_time > 0 else 0.0
                 if progress > 1e-6 and progress < 1.0 and time_elapsed > 1.0:
                     total_estimated_time = time_elapsed / progress
                     remaining_time = max(0.0, total_estimated_time - time_elapsed)
                     eta_str = format_eta(remaining_time)
-                elif progress >= 1.0:  # Should not happen here due to outer check
+                elif progress >= 1.0:
                     eta_str = "Done"
                 else:
                     eta_str = "Calculating..." if global_step > 0 else "N/A"
-                progress_text = f"{global_step/1e6:.2f}M / {TOTAL_TRAINING_STEPS/1e6:.1f}M Steps ({progress:.1%}) | ETA: {eta_str}"
+                progress_text = f"{global_step/1e6:.2f}M / {training_target_step/1e6:.1f}M Steps ({progress:.1%}) | ETA: {eta_str}"
+            else:  # Handle case where target step is 0 (e.g., before loading)
+                progress_text = f"{global_step/1e6:.2f}M Steps (No Target)"
+                progress = 0.0  # No progress if no target
 
             progress_rect = self._render_single_progress_bar(
                 progress_bar_y,

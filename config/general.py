@@ -1,4 +1,5 @@
 # File: config/general.py
+# File: config/general.py
 import torch
 import os
 import time
@@ -71,5 +72,5 @@ def get_model_save_path() -> str:
 
 
 # --- Training Goal ---
-# Reduced total training steps drastically for testing
-TOTAL_TRAINING_STEPS = 50_000  # Changed from 2_000_000
+# Increased total training steps significantly for serious training
+TOTAL_TRAINING_STEPS = 1_000_000  # Changed from 50_000

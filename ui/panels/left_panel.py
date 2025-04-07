@@ -1,4 +1,3 @@
-# File: ui/panels/left_panel.py
 import pygame
 from typing import Dict, Any, Optional, Deque
 
@@ -6,18 +5,18 @@ from config import (
     VisConfig,
     RNNConfig,
     TransformerConfig,
-    TOTAL_TRAINING_STEPS,  # Import total steps
+    ModelConfig,
+    TOTAL_TRAINING_STEPS,
 )
 from config.general import DEVICE
 
 from ui.plotter import Plotter
-from ui.input_handler import InputHandler  # Import InputHandler for type hint
+from ui.input_handler import InputHandler
 from .left_panel_components import (
     ButtonStatusRenderer,
     InfoTextRenderer,
     TBStatusRenderer,
     PlotAreaRenderer,
-    # Removed NotificationRenderer import as best values are now in PlotAreaRenderer
 )
 
 TOOLTIP_TEXTS_BASE = {
@@ -26,16 +25,21 @@ TOOLTIP_TEXTS_BASE = {
     "Cleanup Button": "Click to DELETE agent ckpt for CURRENT run ONLY, then re-init. Enabled only when stopped in Main Menu.",
     "Play Demo Button": "Click to enter interactive play mode. Enabled only when stopped in Main Menu.",
     "Debug Mode Button": "Click to enter grid debug mode (toggle cells, check lines). Enabled only when stopped in Main Menu.",
-    "Training Progress": f"Overall training progress towards {TOTAL_TRAINING_STEPS/1e6:.1f}M steps. Shows current steps, percentage, and estimated time remaining (ETA). Visible only during training.",
+    "Training Progress": f"Overall training progress towards the current target step count. Shows current steps, percentage, and estimated time remaining (ETA). Visible only during training.",
     "Device": "Computation device detected.",
-    "Network": "Neural network architecture.",
+    "Network": "High-level description of the network architecture.",
+    "Params": "Total number of trainable parameters in the network model.",
+    "Network Details": "Detailed configuration of network layers (CNN, MLP, Transformer, LSTM).",
+    "Run Started": "Timestamp when the current run (or resumed run) was started.",
+    # Updated tooltip for resource usage
+    "Resource Usage": "Live system resource usage: CPU %, System Memory %, GPU Memory (% allocated by PyTorch).",
     "TensorBoard Status": "Indicates TB logging status and log directory.",
-    "Steps Info": "Global Steps / Total Planned Steps (Regular Training)",
-    "Episodes Info": "Total Completed Episodes (Regular Training)",
-    "SPS Info": "Steps Per Second (Collection + Update Avg, Regular Training)",
+    "Steps Info": "Global Steps / Target Steps for this training session.",
+    "Episodes Info": "Total Completed Episodes.",
+    "SPS Info": "Steps Per Second (Collection + Update Avg).",
     "Update Epoch Info": "Current PPO Epoch / Total PPO Epochs for this update cycle.",
-    "Update Epoch Progress": "Progress through minibatches within the current PPO epoch. Shows percentage and estimated time remaining (ETA) for this epoch.",  # Updated tooltip
-    "Update Overall Progress": "Overall progress through all minibatches across all PPO epochs for this update cycle. Shows percentage and estimated time remaining (ETA) for the entire update phase.",  # Updated tooltip
+    "Update Epoch Progress": "Progress through minibatches within the current PPO epoch. Shows percentage and estimated time remaining (ETA) for this epoch.",
+    "Update Overall Progress": "Overall progress through all minibatches across all PPO epochs for this update cycle. Shows percentage and estimated time remaining (ETA) for the entire update phase.",
 }
 
 
@@ -58,6 +62,7 @@ class LeftPanelRenderer:
         )
         self.rnn_config = RNNConfig()
         self.transformer_config = TransformerConfig()
+        self.model_config_net = ModelConfig.Network()
 
     def _init_fonts(self):
         """Initializes fonts used in the left panel."""
@@ -67,10 +72,10 @@ class LeftPanelRenderer:
             "status": 28,
             "logdir": 16,
             "plot_placeholder": 20,
-            "notification_label": 16,  # Keep for plot area best values
+            "notification_label": 16,
             "plot_title_values": 8,
             "progress_bar": 14,
-            "notification": 18,  # Keep for plot area best values
+            "notification": 18,
         }
         for key, size in font_configs.items():
             try:
@@ -83,7 +88,7 @@ class LeftPanelRenderer:
 
     def render(
         self,
-        panel_width: int,  # Accept panel_width
+        panel_width: int,
         is_process_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
@@ -91,10 +96,10 @@ class LeftPanelRenderer:
         plot_data: Dict[str, Deque],
         app_state: str,
         update_progress_details: Dict[str, Any],
+        agent_param_count: int,
     ):
         """Renders the entire left panel within the given width."""
         current_height = self.screen.get_height()
-        # Use the provided panel_width
         lp_width = panel_width
         lp_rect = pygame.Rect(0, 0, lp_width, current_height)
 
@@ -108,8 +113,8 @@ class LeftPanelRenderer:
             "Playing Demo": (30, 30, 40),
             "Debugging Grid": (40, 30, 40),
             "Initializing": (40, 40, 40),
+            "Training Complete": (30, 50, 30),
         }
-        # Handle status text containing epoch info during update
         base_status = status.split(" (")[0] if "(" in status else status
         bg_color = status_color_map.get(base_status, (30, 30, 30))
 
@@ -121,45 +126,41 @@ class LeftPanelRenderer:
         # Render Buttons, Status, and Update Progress
         next_y, rects_bs = self.button_status_renderer.render(
             y_start=current_y,
-            panel_width=lp_width,  # Pass width
+            panel_width=lp_width,
             app_state=app_state,
             is_process_running=is_process_running,
-            status=status,  # Pass full status string
+            status=status,
             stats_summary=stats_summary,
             update_progress_details=update_progress_details,
         )
-        self.stat_rects.update(
-            rects_bs
-        )  # Add rects from renderer (buttons, progress, status)
+        self.stat_rects.update(rects_bs)
         current_y = next_y
 
         # Render Info Text Block
         next_y, rects_info = self.info_text_renderer.render(
-            current_y + 5, stats_summary, lp_width  # Pass width
+            current_y + 5, stats_summary, lp_width, agent_param_count
         )
         self.stat_rects.update(rects_info)
         current_y = next_y
 
         # Render TensorBoard Status
         next_y, rects_tb = self.tb_status_renderer.render(
-            current_y + 10, tensorboard_log_dir, lp_width  # Pass width
+            current_y + 10, tensorboard_log_dir, lp_width
         )
         self.stat_rects.update(rects_tb)
         current_y = next_y
 
-        # Render Plot Area (pass stats_summary for best values)
+        # Render Plot Area
         self.plot_area_renderer.render(
-            y_start=current_y + 5,  # Use current_y directly
+            y_start=current_y + 5,
             panel_width=lp_width,
             screen_height=current_height,
             plot_data=plot_data,
-            # stats_summary=stats_summary, # Removed stats_summary
             status=status,
         )
 
     def get_stat_rects(self) -> Dict[str, pygame.Rect]:
         """Returns the dictionary of rectangles for tooltip detection."""
-        # Ensure rects from button_status_renderer are included
         return self.stat_rects.copy()
 
     def get_tooltip_texts(self) -> Dict[str, str]:
@@ -169,15 +170,18 @@ class LeftPanelRenderer:
         if DEVICE and hasattr(DEVICE, "type"):
             device_type_str = DEVICE.type.upper()
         texts["Device"] = f"Computation device detected ({device_type_str})."
-        parts = ["CNN+MLP Fusion"]
-        if self.transformer_config.USE_TRANSFORMER:
-            parts.append("Transformer")
-        if self.rnn_config.USE_RNN:
-            parts.append("LSTM")
-        if len(parts) == 1:
-            texts["Network"] = "Actor-Critic network using CNN and MLP feature fusion."
+        texts["Network"] = self.info_text_renderer._get_network_description()
+        texts["Network Details"] = self.info_text_renderer._get_network_details()
+
+        # Update steps info tooltip based on target step from cached summary
+        target_step = self.info_text_renderer.stats_summary_cache.get(
+            "training_target_step", 0
+        )
+        if target_step > 0:
+            texts["Steps Info"] = (
+                f"Global Steps / Target Steps ({target_step/1e6:.1f}M) for this training session."
+            )
         else:
-            texts["Network"] = f"Actor-Critic network using {' -> '.join(parts)}."
-        if "Update Epoch Progress" in texts:
-            texts.pop("Update Progress", None)  # Clean up old key if present
+            texts["Steps Info"] = "Global Steps accumulated so far."
+
         return texts

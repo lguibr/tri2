@@ -1,4 +1,5 @@
 # File: config/core.py
+# File: config/core.py
 import torch
 from typing import List, Tuple, Optional
 
@@ -19,12 +20,13 @@ from .constants import (
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 4
+    NUM_ENVS_TO_RENDER = 32
     FPS = 0
-    SCREEN_WIDTH = 1600
-    SCREEN_HEIGHT = 900
+    SCREEN_WIDTH = 1600  # Initial width, but resizable
+    SCREEN_HEIGHT = 900  # Initial height, but resizable
     VISUAL_STEP_DELAY = 0.00
-    LEFT_PANEL_WIDTH = int(SCREEN_WIDTH * 0.8)  # Keep large for plot + legend
+    # Changed LEFT_PANEL_WIDTH to LEFT_PANEL_RATIO
+    LEFT_PANEL_RATIO = 0.7
     ENV_SPACING = 0
     ENV_GRID_PADDING = 0
 
@@ -70,16 +72,18 @@ class EnvConfig:
 
 
 class RewardConfig:
-    REWARD_PLACE_PER_TRI = 0.01
-    REWARD_PER_CLEARED_TRIANGLE = 0.15  # Adjust value as needed
-    REWARD_ALIVE_STEP = 0.001
+    REWARD_PLACE_PER_TRI = 0.0
+    REWARD_PER_CLEARED_TRIANGLE = 0.2
+    REWARD_ALIVE_STEP = 0.01
     PENALTY_INVALID_MOVE = -0.1
-    PENALTY_GAME_OVER = -1.5
+    PENALTY_GAME_OVER = -2
+
     PENALTY_MAX_HEIGHT_FACTOR = -0.005
     PENALTY_BUMPINESS_FACTOR = -0.01
     PENALTY_HOLE_PER_HOLE = -0.07
     PENALTY_NEW_HOLE = -0.15
     ENABLE_PBRS = True
+
     PBRS_HEIGHT_COEF = -0.05
     PBRS_HOLE_COEF = -0.20
     PBRS_BUMPINESS_COEF = -0.02
@@ -88,9 +92,9 @@ class RewardConfig:
 class PPOConfig:
     LEARNING_RATE = 2.5e-4
     ADAM_EPS = 1e-5
-    NUM_STEPS_PER_ROLLOUT = 256  # Reduced significantly for short run
-    PPO_EPOCHS = 4  # Slightly reduced epochs
-    NUM_MINIBATCHES = 64  # Adjusted for 128 envs * 256 steps / 64 = 512 MB size
+    NUM_STEPS_PER_ROLLOUT = 512
+    PPO_EPOCHS = 3
+    NUM_MINIBATCHES = 128
     CLIP_PARAM = 0.2
     GAMMA = 0.995
     GAE_LAMBDA = 0.95
@@ -130,7 +134,7 @@ class PPOConfig:
 
 class RNNConfig:
     USE_RNN = True
-    LSTM_HIDDEN_SIZE = 1024
+    LSTM_HIDDEN_SIZE = 512
     LSTM_NUM_LAYERS = 1
 
 
@@ -146,8 +150,8 @@ class ObsNormConfig:
 
 class TransformerConfig:
     USE_TRANSFORMER = True
-    TRANSFORMER_D_MODEL = 1024
-    TRANSFORMER_NHEAD = 16
+    TRANSFORMER_D_MODEL = 512
+    TRANSFORMER_NHEAD = 8
     TRANSFORMER_DIM_FEEDFORWARD = 1024
     TRANSFORMER_NUM_LAYERS = 2
     TRANSFORMER_DROPOUT = 0.1
@@ -155,7 +159,7 @@ class TransformerConfig:
 
 
 class TrainConfig:
-    CHECKPOINT_SAVE_FREQ = 3  # Save every 3 rollouts (very frequent for short run)
+    CHECKPOINT_SAVE_FREQ = 10
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
@@ -166,27 +170,29 @@ class ModelConfig:
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [128, 256, 512]
+        CONV_CHANNELS = [64, 128, 256]
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
 
-        SHAPE_FEATURE_MLP_DIMS = [256]
+        SHAPE_FEATURE_MLP_DIMS = [128]
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
 
         _transformer_cfg = TransformerConfig()
-        _last_fc_dim = (
-            _transformer_cfg.TRANSFORMER_D_MODEL
-            if _transformer_cfg.USE_TRANSFORMER
-            else 1024
-        )
+        _rnn_cfg = RNNConfig()  # Need RNN config too for fallback
+        _last_fc_dim = 512  # Default/fallback size
+        if _transformer_cfg.USE_TRANSFORMER:
+            _last_fc_dim = _transformer_cfg.TRANSFORMER_D_MODEL
+        elif _rnn_cfg.USE_RNN:
+            _last_fc_dim = _rnn_cfg.LSTM_HIDDEN_SIZE
+
         COMBINED_FC_DIMS = [
-            2048,
-            _last_fc_dim,
+            1024,
+            _last_fc_dim,  # Should be 512 based on Transformer/LSTM
         ]
-        del _transformer_cfg
+        del _transformer_cfg, _rnn_cfg  # Clean up temp instances
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
         DROPOUT_FC = 0.0
@@ -194,19 +200,19 @@ class ModelConfig:
 
 class StatsConfig:
     STATS_AVG_WINDOW: List[int] = [
-        10,
         25,
-        50,  # Reduced windows for short run
+        50,
+        100,
     ]
-    CONSOLE_LOG_FREQ = 2  # Log every 2 rollouts (very frequent)
-    PLOT_DATA_WINDOW = 10_000  # Reduced plot window slightly
+    CONSOLE_LOG_FREQ = 5
+    PLOT_DATA_WINDOW = 20_000
 
 
 class TensorBoardConfig:
     LOG_HISTOGRAMS = False
-    HISTOGRAM_LOG_FREQ = 10  # Log every 10 rollouts
+    HISTOGRAM_LOG_FREQ = 20
     LOG_IMAGES = False
-    IMAGE_LOG_FREQ = 10  # Log every 10 rollouts
+    IMAGE_LOG_FREQ = 20
     LOG_DIR: Optional[str] = None
     LOG_SHAPE_PLACEMENT_Q_VALUES = False
 

@@ -1,3 +1,4 @@
+# File: ui/plotter.py
 import pygame
 from typing import Dict, Optional, Deque
 from collections import deque
@@ -35,10 +36,13 @@ class Plotter:
             "entropy": normalize_color_for_matplotlib((150, 150, 150)),
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
             "sps": normalize_color_for_matplotlib(VisConfig.LIGHTG),
-            "tris_cleared": normalize_color_for_matplotlib(
-                VisConfig.YELLOW
-            ),  # Added color
+            "tris_cleared": normalize_color_for_matplotlib(VisConfig.YELLOW),
             "lr": normalize_color_for_matplotlib((255, 0, 255)),
+            "cpu": normalize_color_for_matplotlib((255, 165, 0)),  # Orange
+            "memory": normalize_color_for_matplotlib((0, 191, 255)),  # Deep Sky Blue
+            "gpu_mem": normalize_color_for_matplotlib(
+                (123, 104, 238)
+            ),  # Medium Slate Blue
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
 
@@ -51,7 +55,7 @@ class Plotter:
 
         data_keys = [
             "game_scores",
-            "episode_triangles_cleared",  # Changed from best_game_score_history
+            "episode_triangles_cleared",
             "episode_scores",
             "episode_lengths",
             "sps_values",
@@ -59,6 +63,9 @@ class Plotter:
             "value_loss",
             "policy_loss",
             "entropy",
+            "cpu_usage",
+            "memory_usage",
+            "gpu_memory_usage_percent",  # Changed key
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
@@ -75,39 +82,33 @@ class Plotter:
                 fig_height_in = max(1, target_height / dpi)
 
                 fig, axes = plt.subplots(
-                    3, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
+                    4, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
-                # Adjust spacing to make plots closer
                 fig.subplots_adjust(
-                    hspace=0.15,  # Reduced vertical space
-                    wspace=0.10,  # Reduced horizontal space
+                    hspace=0.18,
+                    wspace=0.10,
                     left=0.08,
                     right=0.98,
-                    bottom=0.05,  # Reduced bottom margin
-                    top=0.95,  # Reduced top margin
+                    bottom=0.05,
+                    top=0.95,
                 )
                 axes_flat = axes.flatten()
 
-                # Removed plot_window_label as xlabel is removed from render_single_plot
-
-                # Row 1
+                # Row 1: Performance Metrics
                 render_single_plot(
                     axes_flat[0],
                     data_lists["game_scores"],
                     "Game Score",
                     self.colors["game_score"],
                     self.rolling_window_sizes,
-                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Game Score",
                 )
-                # Replaced Best Game Score History with Triangles Cleared
                 render_single_plot(
                     axes_flat[1],
                     data_lists["episode_triangles_cleared"],
                     "Tris Cleared / Ep",
                     self.colors["tris_cleared"],
                     self.rolling_window_sizes,
-                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Triangles Cleared",
                 )
                 render_single_plot(
@@ -116,18 +117,16 @@ class Plotter:
                     "RL Score",
                     self.colors["rl_score"],
                     self.rolling_window_sizes,
-                    # xlabel=plot_window_label, # Removed
                     placeholder_text="RL Score",
                 )
 
-                # Row 2
+                # Row 2: Training Dynamics
                 render_single_plot(
                     axes_flat[3],
                     data_lists["episode_lengths"],
                     "Ep Length",
                     self.colors["len"],
                     self.rolling_window_sizes,
-                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Episode Length",
                 )
                 render_single_plot(
@@ -136,7 +135,6 @@ class Plotter:
                     "Steps/Sec",
                     self.colors["sps"],
                     self.rolling_window_sizes,
-                    # xlabel=plot_window_label, # Removed
                     placeholder_text="SPS",
                 )
                 render_single_plot(
@@ -144,20 +142,18 @@ class Plotter:
                     data_lists["lr_values"],
                     "Learning Rate",
                     self.colors["lr"],
-                    [],  # No rolling average for LR
-                    # xlabel=plot_window_label, # Removed
+                    [],
                     y_log_scale=True,
                     placeholder_text="Learning Rate",
                 )
 
-                # Row 3
+                # Row 3: Losses & Entropy
                 render_single_plot(
                     axes_flat[6],
                     data_lists["value_loss"],
                     "Value Loss",
                     self.colors["value_loss"],
                     self.rolling_window_sizes,
-                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Value Loss",
                 )
                 render_single_plot(
@@ -166,7 +162,6 @@ class Plotter:
                     "Policy Loss",
                     self.colors["policy_loss"],
                     self.rolling_window_sizes,
-                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Policy Loss",
                 )
                 render_single_plot(
@@ -175,16 +170,42 @@ class Plotter:
                     "Entropy",
                     self.colors["entropy"],
                     self.rolling_window_sizes,
-                    # xlabel=plot_window_label, # Removed
                     placeholder_text="Entropy",
                 )
 
-                # Remove x-axis labels/ticks for inner plots to reduce clutter
+                # Row 4: Resource Usage
+                render_single_plot(
+                    axes_flat[9],
+                    data_lists["cpu_usage"],
+                    "CPU Usage (%)",
+                    self.colors["cpu"],
+                    self.rolling_window_sizes,
+                    placeholder_text="CPU %",
+                )
+                render_single_plot(
+                    axes_flat[10],
+                    data_lists["memory_usage"],
+                    "Memory Usage (%)",
+                    self.colors["memory"],
+                    self.rolling_window_sizes,
+                    placeholder_text="Mem %",
+                )
+                # Changed plot data key and title
+                render_single_plot(
+                    axes_flat[11],
+                    data_lists["gpu_memory_usage_percent"],
+                    "GPU Memory (%)",
+                    self.colors["gpu_mem"],
+                    self.rolling_window_sizes,
+                    placeholder_text="GPU Mem %",
+                )
+
+                # Remove x-axis labels/ticks for inner plots
                 for i, ax in enumerate(axes_flat):
-                    if i < 6:  # Keep x-axis only for bottom row
+                    if i < 9:
                         ax.set_xticklabels([])
                         ax.set_xlabel("")
-                    ax.tick_params(axis="x", rotation=0)  # Keep rotation 0
+                    ax.tick_params(axis="x", rotation=0)
 
                 buf = BytesIO()
                 fig.savefig(
@@ -233,13 +254,10 @@ class Plotter:
                 new_plot_surface = self.create_plot_surface(
                     plot_data, target_width, target_height
                 )
-                # Only update cache if plot creation was successful
                 if new_plot_surface:
                     self.plot_surface = new_plot_surface
-                # If creation failed (e.g., due to error), keep the old cached plot (if any)
-                # else: self.plot_surface = None # Optionally clear cache on failure
                 self.last_plot_update_time = current_time
-            elif not has_data:  # No data at all, clear cache
+            elif not has_data:
                 self.plot_surface = None
 
         return self.plot_surface

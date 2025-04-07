@@ -1,4 +1,5 @@
 # File: training/checkpoint_manager.py
+# File: training/checkpoint_manager.py
 import os
 import torch
 import traceback
@@ -132,6 +133,8 @@ class CheckpointManager:
 
         self.global_step = 0
         self.episode_count = 0
+        # training_target_step will be loaded from checkpoint or set by Trainer
+        self.training_target_step = 0
 
         # --- Determine Checkpoint to Load ---
         self.run_id_to_load_from: Optional[str] = None
@@ -223,11 +226,10 @@ class CheckpointManager:
         )
         try:
             # Load checkpoint onto the correct device immediately
-            # Explicitly set weights_only=False to handle NumPy arrays etc.
             checkpoint = torch.load(
                 self.checkpoint_path_to_load,
                 map_location=self.device,
-                weights_only=False,  # <<< ADDED THIS ARGUMENT
+                weights_only=False,
             )
 
             # --- Load Agent State ---
@@ -238,8 +240,6 @@ class CheckpointManager:
                 print(
                     "  -> WARNING: 'agent_state_dict' key missing. Agent state NOT loaded."
                 )
-                # Optionally attempt legacy load here if needed, but safer to fail
-                # raise KeyError("Checkpoint missing 'agent_state_dict'.")
 
             # --- Load Global Step ---
             self.global_step = checkpoint.get("global_step", 0)
@@ -254,10 +254,17 @@ class CheckpointManager:
                     print("  -> Stats Aggregator state loaded successfully.")
                     # Overwrite episode_count with the one from the aggregator for consistency
                     self.episode_count = self.stats_aggregator.total_episodes
+                    # Load the training target step from the aggregator state
+                    self.training_target_step = (
+                        self.stats_aggregator.training_target_step
+                    )
                     # Log the loaded start time
                     loaded_start_time = self.stats_aggregator.start_time
                     print(
                         f"  -> Loaded Run Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(loaded_start_time))}"
+                    )
+                    print(
+                        f"  -> Loaded Training Target Step: {self.training_target_step}"
                     )
                 except Exception as stats_err:
                     print(
@@ -265,14 +272,17 @@ class CheckpointManager:
                     )
                     self._reset_aggregator_state()  # Reset only aggregator on specific failure
                     self.episode_count = 0  # Reset episode count too
+                    self.training_target_step = 0  # Reset target step
             elif self.stats_aggregator:
                 print(
                     "  -> WARNING: 'stats_aggregator_state_dict' not found. Stats Aggregator reset."
                 )
                 self._reset_aggregator_state()
                 self.episode_count = 0  # Reset episode count too
+                self.training_target_step = 0  # Reset target step
             else:  # Fallback if no aggregator exists (should not happen with current setup)
                 self.episode_count = checkpoint.get("episode_count", 0)
+                self.training_target_step = checkpoint.get("training_target_step", 0)
 
             print(
                 f"  -> Resuming from Step: {self.global_step}, Ep: {self.episode_count}"
@@ -341,24 +351,33 @@ class CheckpointManager:
     def _reset_aggregator_state(self):
         """Helper to reset only the stats aggregator state."""
         if self.stats_aggregator:
+            # Preserve avg_windows and plot_window during reset
+            avg_windows = self.stats_aggregator.avg_windows
+            plot_window = self.stats_aggregator.plot_window
             self.stats_aggregator.__init__(
-                avg_windows=self.stats_aggregator.avg_windows,
-                plot_window=self.stats_aggregator.plot_window,
+                avg_windows=avg_windows,
+                plot_window=plot_window,
             )
             self.stats_aggregator.total_episodes = 0
+            self.stats_aggregator.training_target_step = 0  # Reset target
 
     def _reset_all_states(self):
         """Helper to reset all managed states on critical load failure."""
         print("[CheckpointManager] Resetting all managed states due to load failure.")
         self.global_step = 0
         self.episode_count = 0
+        self.training_target_step = 0  # Reset target
         if self.obs_rms_dict:
             for rms in self.obs_rms_dict.values():
                 rms.reset()
         self._reset_aggregator_state()
 
     def save_checkpoint(
-        self, global_step: int, episode_count: int, is_final: bool = False
+        self,
+        global_step: int,
+        episode_count: int,
+        training_target_step: int,  # Add target step parameter
+        is_final: bool = False,
     ):
         """Saves agent, observation normalization, and stats aggregator state to the current run's directory."""
         prefix = "FINAL" if is_final else f"step_{global_step}"
@@ -385,6 +404,8 @@ class CheckpointManager:
 
             stats_aggregator_save_data = {}
             if self.stats_aggregator:
+                # Ensure aggregator has the latest target step before saving its state
+                self.stats_aggregator.training_target_step = training_target_step
                 stats_aggregator_save_data = self.stats_aggregator.state_dict()
                 # Ensure episode count in checkpoint matches aggregator's count
                 episode_count = self.stats_aggregator.total_episodes
@@ -393,6 +414,7 @@ class CheckpointManager:
             checkpoint_data = {
                 "global_step": global_step,
                 "episode_count": episode_count,  # Use count from aggregator if available
+                "training_target_step": training_target_step,  # Save target step
                 "agent_state_dict": agent_save_data,
                 "obs_rms_state_dict": obs_rms_save_data,
                 "stats_aggregator_state_dict": stats_aggregator_save_data,  # Add stats state
@@ -400,8 +422,6 @@ class CheckpointManager:
 
             # Use a temporary file and rename for atomicity
             temp_save_path = full_save_path + ".tmp"
-            # Save with default protocol, which should be fine for cross-version compatibility
-            # if needed, specify protocol=pickle.DEFAULT_PROTOCOL or HIGHEST_PROTOCOL
             torch.save(checkpoint_data, temp_save_path)
             os.replace(temp_save_path, full_save_path)  # Atomic rename
 

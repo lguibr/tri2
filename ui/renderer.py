@@ -1,3 +1,4 @@
+# File: ui/renderer.py
 import pygame
 import traceback
 from typing import List, Dict, Any, Optional, Tuple, Deque
@@ -66,6 +67,7 @@ class UIRenderer:
         plot_data: Dict[str, Deque],
         demo_env: Optional[GameState] = None,
         update_progress_details: Dict[str, Any] = {},
+        agent_param_count: int = 0,
     ):
         """Renders UI based on the application state."""
         try:
@@ -83,6 +85,7 @@ class UIRenderer:
                     plot_data=plot_data,
                     update_progress_details=update_progress_details,
                     app_state=app_state,
+                    agent_param_count=agent_param_count,
                 )
             elif app_state == "Playing":
                 if demo_env:
@@ -139,25 +142,31 @@ class UIRenderer:
         plot_data: Dict[str, Deque],
         update_progress_details: Dict[str, Any],
         app_state: str,
+        agent_param_count: int,
     ):
         """Renders the main training dashboard view with adjusted panel widths."""
         self.screen.fill(VisConfig.BLACK)
         current_width, current_height = self.screen.get_size()
 
-        # Calculate panel widths: Game Area max 20%, Left Panel min 80%
-        ga_max_width = int(current_width * 0.20)
-        lp_width = current_width - ga_max_width
-        ga_width = current_width - lp_width  # Actual width for game area
+        # --- Calculate panel widths based on VisConfig.LEFT_PANEL_RATIO ---
+        # Ensure ratio is within reasonable bounds
+        left_panel_ratio = max(0.1, min(0.9, self.vis_config.LEFT_PANEL_RATIO))
+        lp_width = int(current_width * left_panel_ratio)
+        ga_width = current_width - lp_width
 
-        # Ensure minimum width for left panel if needed
-        min_lp_width = 300  # Example minimum width
-        if lp_width < min_lp_width:
+        # Ensure minimum width for left panel if needed (e.g., for plots/text)
+        min_lp_width = 300
+        if lp_width < min_lp_width and current_width > min_lp_width:
             lp_width = min_lp_width
             ga_width = max(0, current_width - lp_width)
+        elif current_width <= min_lp_width:  # Handle very small screen case
+            lp_width = current_width
+            ga_width = 0
+        # --- End width calculation ---
 
         # Render Left Panel (now takes calculated width)
         self.left_panel.render(
-            panel_width=lp_width,  # Pass calculated width
+            panel_width=lp_width,
             is_process_running=is_process_running,
             status=status,
             stats_summary=stats_summary,
@@ -165,6 +174,7 @@ class UIRenderer:
             plot_data=plot_data,
             app_state=app_state,
             update_progress_details=update_progress_details,
+            agent_param_count=agent_param_count,
         )
 
         # Render Game Area (now takes calculated width and offset)
@@ -172,8 +182,8 @@ class UIRenderer:
             envs=envs,
             num_envs=num_envs,
             env_config=env_config,
-            panel_width=ga_width,  # Pass calculated width
-            panel_x_offset=lp_width,  # Pass left panel width as offset
+            panel_width=ga_width,
+            panel_x_offset=lp_width,
         )
 
     def _render_debug_mode(self, demo_env: GameState, env_config: EnvConfig):
