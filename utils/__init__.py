@@ -9,7 +9,6 @@ from .helpers import (
 )
 from .init_checks import run_pre_checks
 from .types import StateType, ActionType, AgentStateDict
-from .running_mean_std import RunningMeanStd
 
 
 __all__ = [
@@ -23,5 +22,4 @@ __all__ = [
     "StateType",
     "ActionType",
     "AgentStateDict",
-    "RunningMeanStd",
 ]

@@ -40,3 +40,19 @@ class TBStatusRenderer:
             if len(basename) > max_chars
             else basename
         )
+
+    def render(
+        self, y_start: int, tb_info: Dict[str, Optional[TensorBoardConfig]]
+    ) -> Tuple[int, Dict[str, pygame.Rect]]:
+        """Renders the TensorBoard status block."""
+        stat_rects: Dict[str, pygame.Rect] = {}
+        if not tb_info or not self.fonts.get("tb_status"):
+            return y_start, stat_rects
+
+        x_margin = 10
+        current_y = y_start
+        line_height = self.fonts["tb_status"].get_linesize()
+
+        tb_path = tb_info.get("tb_path", None)
+        if tb_path:
+            tb_path = self._shorten_path(tb_path, 50)

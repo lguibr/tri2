@@ -1,15 +1,12 @@
-# File: training/checkpoint_manager.py
 import os
 import torch
 import traceback
 import re
 import time
-from typing import Optional, Dict, Tuple, Any
+from typing import Optional, Tuple, Any
 import pickle
 
-# Removed RunningMeanStd import
 from stats.aggregator import StatsAggregator
-from agent.base_agent import BaseAgent  # Assuming a base class for NN agent
 
 
 def find_latest_run_and_checkpoint(
@@ -124,7 +121,7 @@ class CheckpointManager:
 
     def __init__(
         self,
-        agent: Optional[BaseAgent],  # Agent is now the NN, can be None initially
+        agent: Optional[Any],  # Agent is now the NN, can be None initially
         stats_aggregator: Optional[StatsAggregator],
         base_checkpoint_dir: str,
         run_checkpoint_dir: str,

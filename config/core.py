@@ -19,7 +19,7 @@ from .constants import (
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 16
+    NUM_ENVS_TO_RENDER = 1
     FPS = 60
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900

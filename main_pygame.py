@@ -18,12 +18,10 @@ except ImportError:
     print("Install it using: pip install psutil")
     psutil = None
 
-# Path Adjustment (Keep)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
-# Config Imports (Updated)
 try:
     from config import (
         VisConfig,
@@ -36,26 +34,18 @@ try:
         DemoConfig,
         RNNConfig,
         TransformerConfig,
-        # Removed ObsNormConfig
-        # Removed RewardConfig
-        DEVICE,
         RANDOM_SEED,
-        # Removed TOTAL_TRAINING_STEPS
         BASE_CHECKPOINT_DIR,
-        BASE_LOG_DIR,
         set_device,
         get_run_id,
         set_run_id,
-        get_run_checkpoint_dir,
         get_run_log_dir,
         get_console_log_dir,
-        print_config_info_and_validate,
         get_config_dict,
     )
     from utils.helpers import get_device as get_torch_device, set_random_seeds
     from logger import TeeLogger
     from utils.init_checks import run_pre_checks
-    from utils.types import AgentStateDict  # Keep for potential NN state dict type
 
 except ImportError as e:
     print(f"Error importing configuration classes or utils: {e}")

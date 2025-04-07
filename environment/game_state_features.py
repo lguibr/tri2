@@ -1,4 +1,3 @@
-File: environment / game_state_features.py
 import numpy as np
 from typing import TYPE_CHECKING, Dict, List
 import copy

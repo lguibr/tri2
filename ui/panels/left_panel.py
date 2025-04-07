@@ -123,10 +123,10 @@ class LeftPanelRenderer:
         current_y = next_y
 
         # Render TB Status (unchanged)
-        next_y = self.tb_status_renderer.render(
-            current_y + 10, tensorboard_log_dir, panel_width
-        )
-        current_y = next_y
+        # next_y = self.tb_status_renderer.render(
+        #     current_y + 10, tensorboard_log_dir, panel_width
+        # )
+        # current_y = next_y
 
         # Render Plots (unchanged condition, but plots themselves are simplified)
         if app_state == AppState.MAIN_MENU.value:

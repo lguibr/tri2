@@ -1,4 +1,3 @@
-File: ui / plotter.py
 import pygame
 from typing import Dict, Optional, Deque
 from collections import deque
