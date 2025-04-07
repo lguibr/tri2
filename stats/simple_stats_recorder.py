@@ -88,7 +88,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
                 f"--- 🎮 New Best Game: {self.aggregator.storage.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
             )
         # Check for new best NN losses
-        if update_info.get("new_best_loss"):  # Value loss
+        if update_info.get("new_best_value_loss"):  # Value loss
             prev_str = (
                 f"{self.aggregator.storage.previous_best_value_loss:.4f}"
                 if self.aggregator.storage.previous_best_value_loss < float("inf")
@@ -110,6 +110,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         # Trigger console log based on episode count if interval is set
         log_now = False
         with self._lock:
+            # Increment counter based on episodes
             self.updates_since_last_log += 1
             if (
                 self.console_log_interval > 0
@@ -129,7 +130,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         )
 
         # Print new best loss immediately if it occurred during this step's update
-        if update_info.get("new_best_loss"):  # Value loss
+        if update_info.get("new_best_value_loss"):  # Value loss
             prev_str = (
                 f"{self.aggregator.storage.previous_best_value_loss:.4f}"
                 if self.aggregator.storage.previous_best_value_loss < float("inf")
@@ -192,8 +193,8 @@ class SimpleStatsRecorder(StatsRecorderBase):
             else "N/A"
         )
         best_v_loss_val = (
-            f"{summary['best_loss']:.4f}"  # Value loss
-            if summary["best_loss"] < float("inf")
+            f"{summary['best_value_loss']:.4f}"  # Value loss
+            if summary["best_value_loss"] < float("inf")
             else "N/A"
         )
         best_p_loss_val = (

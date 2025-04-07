@@ -15,7 +15,7 @@ class AggregatorLogic:
 
     def update_episode_stats(
         self,
-        episode_score: float,
+        episode_score: float,  # RL Score (may be removed later)
         episode_length: int,
         episode_num: int,
         current_step: int,
@@ -66,9 +66,9 @@ class AggregatorLogic:
             self.storage.training_target_step = step_data["training_target_step"]
 
         update_info = {
-            "new_best_loss": False,
+            "new_best_value_loss": False,
             "new_best_policy_loss": False,
-        }  # Added policy loss flag
+        }
 
         # Append to deques
         # --- NN Policy Loss ---
@@ -98,9 +98,7 @@ class AggregatorLogic:
                     self.storage.previous_best_value_loss = self.storage.best_value_loss
                     self.storage.best_value_loss = current_value_loss
                     self.storage.best_value_loss_step = g_step
-                    update_info["new_best_loss"] = (
-                        True  # Keep original flag name for value loss
-                    )
+                    update_info["new_best_value_loss"] = True
             else:
                 print(
                     f"[Aggregator Warning] Received non-finite Value Loss: {current_value_loss}"
@@ -112,11 +110,11 @@ class AggregatorLogic:
         # Append other optional metrics
         optional_metrics = [
             # Removed grad_norm, update_steps_per_second, minibatch_update_sps
-            ("avg_max_q", "avg_max_qs"),
-            ("beta", "beta_values"),
-            ("buffer_size", "buffer_sizes"),
-            ("lr", "lr_values"),
-            ("epsilon", "epsilon_values"),
+            ("avg_max_q", "avg_max_qs"),  # Keep if Q-values estimated
+            ("beta", "beta_values"),  # Keep if PER used
+            ("buffer_size", "buffer_sizes"),  # Keep for replay/MCTS buffer
+            ("lr", "lr_values"),  # Keep for NN LR
+            ("epsilon", "epsilon_values"),  # Keep if epsilon-greedy used
             ("cpu_usage", "cpu_usage"),
             ("memory_usage", "memory_usage"),
             ("gpu_memory_usage_percent", "gpu_memory_usage_percent"),
@@ -195,16 +193,15 @@ class AggregatorLogic:
             "best_game_score": self.storage.best_game_score,
             "previous_best_game_score": self.storage.previous_best_game_score,
             "best_game_score_step": self.storage.best_game_score_step,
-            "best_loss": self.storage.best_value_loss,  # Keep as value loss best
-            "previous_best_loss": self.storage.previous_best_value_loss,
-            "best_loss_step": self.storage.best_value_loss_step,
-            "best_policy_loss": self.storage.best_policy_loss,  # Added policy loss best
+            "best_value_loss": self.storage.best_value_loss,
+            "previous_best_value_loss": self.storage.previous_best_value_loss,
+            "best_value_loss_step": self.storage.best_value_loss_step,
+            "best_policy_loss": self.storage.best_policy_loss,
             "previous_best_policy_loss": self.storage.previous_best_policy_loss,
             "best_policy_loss_step": self.storage.best_policy_loss_step,
             "num_ep_scores": len(self.storage.episode_scores),
-            "num_losses": len(
-                self.storage.value_losses
-            ),  # Maybe rename to num_value_losses?
+            "num_value_losses": len(self.storage.value_losses),
+            "num_policy_losses": len(self.storage.policy_losses),
             "summary_avg_window_size": summary_avg_window,
             "start_time": self.storage.start_time,
             "training_target_step": self.storage.training_target_step,

@@ -1,3 +1,4 @@
+# File: ui/overlays.py
 import pygame
 import time
 import traceback
@@ -63,8 +64,8 @@ class OverlayRenderer:
                 "DELETE CURRENT RUN DATA?", True, VisConfig.RED
             )
             prompt_l2 = self.fonts["overlay_text"].render(
-                "(Agent Checkpoint & Buffer State)", True, VisConfig.WHITE
-            )
+                "(NN Checkpoint & Stats)", True, VisConfig.WHITE
+            )  # Updated text
             prompt_l3 = self.fonts["overlay_text"].render(
                 "This action cannot be undone!", True, VisConfig.YELLOW
             )

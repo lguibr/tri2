@@ -1,4 +1,3 @@
-# File: config/general.py
 import torch
 import os
 import time

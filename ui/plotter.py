@@ -1,4 +1,4 @@
-# File: ui/plotter.py
+File: ui / plotter.py
 import pygame
 from typing import Dict, Optional, Deque
 from collections import deque
@@ -41,7 +41,7 @@ class Plotter:
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
             # Removed minibatch_sps
             "tris_cleared": normalize_color_for_matplotlib(VisConfig.YELLOW),
-            # Removed lr (can add back if needed for NN)
+            "lr": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[2]),
             "cpu": normalize_color_for_matplotlib((255, 165, 0)),
             "memory": normalize_color_for_matplotlib((0, 191, 255)),
             "gpu_mem": normalize_color_for_matplotlib((123, 104, 238)),
@@ -63,14 +63,13 @@ class Plotter:
             "episode_lengths",
             "policy_losses",  # Added NN policy loss
             "value_losses",  # Kept NN value loss
-            # Removed: minibatch_update_sps_values, lr_values, entropies
+            "lr_values",  # Keep LR for NN
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
             # Add placeholders for other potential plots
             "placeholder1",
             "placeholder2",
-            "placeholder3",
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
@@ -142,7 +141,8 @@ class Plotter:
                     self.colors["policy_loss"],
                     self.rolling_window_sizes,
                     placeholder_text="Policy Loss",
-                )  # NN Policy Loss
+                    y_log_scale=True,
+                )  # NN Policy Loss (Log Scale)
                 render_single_plot(
                     axes_flat[5],
                     data_lists["value_losses"],
@@ -150,9 +150,10 @@ class Plotter:
                     self.colors["value_loss"],
                     self.rolling_window_sizes,
                     placeholder_text="Value Loss",
-                )  # NN Value Loss
+                    y_log_scale=True,
+                )  # NN Value Loss (Log Scale)
 
-                # Row 3: Resource Usage
+                # Row 3: Resource Usage & LR
                 render_single_plot(
                     axes_flat[6],
                     data_lists["cpu_usage"],
@@ -178,9 +179,18 @@ class Plotter:
                     placeholder_text="GPU Mem %",
                 )
 
-                # Row 4: Placeholders / Future Plots
+                # Row 4: LR & Placeholders
                 render_single_plot(
                     axes_flat[9],
+                    data_lists["lr_values"],
+                    "Learning Rate",
+                    self.colors["lr"],
+                    [],  # No rolling avg for LR
+                    placeholder_text="Learning Rate",
+                    y_log_scale=True,
+                )
+                render_single_plot(
+                    axes_flat[10],
                     data_lists["placeholder1"],
                     "Future Plot 1",
                     self.colors["placeholder"],
@@ -188,20 +198,12 @@ class Plotter:
                     placeholder_text="Future Plot 1",
                 )
                 render_single_plot(
-                    axes_flat[10],
+                    axes_flat[11],
                     data_lists["placeholder2"],
                     "Future Plot 2",
                     self.colors["placeholder"],
                     [],
                     placeholder_text="Future Plot 2",
-                )
-                render_single_plot(
-                    axes_flat[11],
-                    data_lists["placeholder3"],
-                    "Future Plot 3",
-                    self.colors["placeholder"],
-                    [],
-                    placeholder_text="Future Plot 3",
                 )
 
                 # Remove x-axis labels/ticks for inner plots

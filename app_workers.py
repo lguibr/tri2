@@ -40,7 +40,7 @@ class AppWorkerManager:
         #
         # print("Starting AlphaZero worker threads...")
         # self.app.stop_event.clear()
-        # self.app.pause_event.clear() # Or set based on initial state
+        # # self.app.pause_event.clear() # Removed pause event
         #
         # # MCTS Self-Play Worker(s)
         # self.mcts_worker_thread = MCTSSelfPlayWorker(...)
@@ -61,7 +61,7 @@ class AppWorkerManager:
 
         print("[AppWorkerManager] Stopping worker threads (Placeholder)...")
         self.app.stop_event.set()
-        # self.app.pause_event.clear() # Ensure threads aren't stuck paused if pause is used
+        # self.app.pause_event.clear() # Removed pause event
 
         join_timeout = 5.0
 

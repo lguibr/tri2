@@ -3,7 +3,7 @@ import time
 import numpy as np
 from typing import List, Optional, Tuple, Dict
 
-from config import EnvConfig, RewardConfig, PPOConfig, VisConfig
+from config import EnvConfig, VisConfig  # Removed RewardConfig, PPOConfig
 from .grid import Grid
 from .shape import Shape
 from .game_logic import GameLogic
@@ -18,18 +18,19 @@ class GameState:
     Represents the state of a single game instance.
     Delegates logic to helper classes: GameLogic, GameStateFeatures, GameDemoLogic.
     Timer updates are now primarily handled within GameLogic.step().
+    Reward calculation is removed.
     """
 
     def __init__(self):
         self.env_config = EnvConfig()
-        self.rewards = RewardConfig()
-        self.ppo_config = PPOConfig()
+        # Removed self.rewards = RewardConfig()
+        # Removed self.ppo_config = PPOConfig()
         self.vis_config = VisConfig()
 
         self.grid = Grid(self.env_config)
         self.shapes: List[Optional[Shape]] = []
-        self.score: float = 0.0
-        self.game_score: int = 0
+        # Removed self.score (RL score)
+        self.game_score: int = 0  # Keep game score for tracking performance
         self.triangles_cleared_this_episode: int = 0
         self.pieces_placed_this_episode: int = 0
 
@@ -47,7 +48,7 @@ class GameState:
 
         self.game_over: bool = False
         self._last_action_valid: bool = True
-        self._last_potential: float = 0.0
+        # Removed self._last_potential
 
         # Demo state
         self.demo_selected_shape_idx: int = 0
@@ -65,7 +66,7 @@ class GameState:
         """Resets the game to its initial state."""
         self.grid = Grid(self.env_config)
         self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
-        self.score = 0.0
+        # Removed self.score reset
         self.game_score = 0
         self.triangles_cleared_this_episode = 0
         self.pieces_placed_this_episode = 0
@@ -86,16 +87,19 @@ class GameState:
         self.demo_dragged_shape_idx = None
         self.demo_snapped_position = None
 
-        self._last_potential = self.features.calculate_potential()
+        # Removed self._last_potential reset
 
         return self.get_state()
 
-    def step(self, action_index: int) -> Tuple[float, bool]:
+    def step(self, action_index: int) -> Tuple[Optional[StateType], bool]:
         """
         Performs one game step based on the action index.
         Timer updates are handled within GameLogic.step().
+        Returns (None, is_game_over). State should be fetched via get_state().
         """
-        return self.logic.step(action_index)
+        _, done = self.logic.step(action_index)
+        # Return None for state, caller should call get_state() if needed
+        return None, done
 
     def get_state(self) -> StateType:
         """Returns the current game state as a dictionary of numpy arrays."""
@@ -104,7 +108,7 @@ class GameState:
     def valid_actions(self) -> List[int]:
         """Returns a list of valid action indices for the current state."""
         # Removed is_frozen check here. Logic.step handles frozen state.
-        # The collector also checks is_frozen separately.
+        # The caller (e.g., MCTS) should check is_frozen separately if needed.
         return self.logic.valid_actions()
 
     def decode_action(self, action_index: int) -> Tuple[int, int, int]:

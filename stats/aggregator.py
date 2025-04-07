@@ -45,7 +45,7 @@ class StatsAggregator:
 
     def record_episode(
         self,
-        episode_score: float,
+        episode_score: float,  # This might be repurposed or removed for AlphaZero
         episode_length: int,
         episode_num: int,
         global_step: Optional[int] = None,
@@ -109,6 +109,7 @@ class StatsAggregator:
             print(
                 f"  -> Loaded start_time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.storage.start_time))}"
             )
+            # Target step is now loaded within storage.load_state_dict
             print(
                 f"  -> Loaded training_target_step: {self.storage.training_target_step}"
             )

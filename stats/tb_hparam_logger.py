@@ -34,10 +34,12 @@ class TBHparamLogger:
             return
         with self._lock:
             try:
+                # Updated initial metrics
                 initial_metrics = {
                     "hparam/final_best_rl_score": -float("inf"),
                     "hparam/final_best_game_score": -float("inf"),
-                    "hparam/final_best_loss": float("inf"),
+                    "hparam/final_best_value_loss": float("inf"),
+                    "hparam/final_best_policy_loss": float("inf"),
                     "hparam/final_total_episodes": 0,
                 }
                 filtered_hparams = self._filter_hparams(self.hparam_dict)
@@ -75,6 +77,7 @@ class TBHparamLogger:
                 "[TensorBoardStatsRecorder] Skipping final hparam logging (hparam_dict not set)."
             )
             return
+        # Updated final metrics
         final_metrics = {
             "hparam/final_best_rl_score": final_summary.get(
                 "best_score", -float("inf")
@@ -82,7 +85,12 @@ class TBHparamLogger:
             "hparam/final_best_game_score": final_summary.get(
                 "best_game_score", -float("inf")
             ),
-            "hparam/final_best_loss": final_summary.get("best_loss", float("inf")),
+            "hparam/final_best_value_loss": final_summary.get(
+                "best_value_loss", float("inf")
+            ),
+            "hparam/final_best_policy_loss": final_summary.get(
+                "best_policy_loss", float("inf")
+            ),
             "hparam/final_total_episodes": final_summary.get("total_episodes", 0),
         }
         self.log_final_hparams(self.hparam_dict, final_metrics)

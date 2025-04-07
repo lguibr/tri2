@@ -22,7 +22,7 @@ def initialize_pygame(
     screen = pygame.display.set_mode(
         (vis_config.SCREEN_WIDTH, vis_config.SCREEN_HEIGHT), pygame.RESIZABLE
     )
-    pygame.display.set_caption("TriCrack PPO")
+    pygame.display.set_caption("AlphaTri Trainer")  # Updated caption
     clock = pygame.time.Clock()
     print("Pygame initialized.")
     return screen, clock

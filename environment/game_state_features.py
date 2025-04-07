@@ -1,4 +1,4 @@
-# File: environment/game_state_features.py
+File: environment / game_state_features.py
 import numpy as np
 from typing import TYPE_CHECKING, Dict, List
 import copy
@@ -15,21 +15,7 @@ class GameStateFeatures:
     def __init__(self, game_state: "GameState"):
         self.gs = game_state
 
-    def calculate_potential(self) -> float:
-        """Calculates the potential function based on current grid state for PBRS."""
-        if not self.gs.rewards.ENABLE_PBRS:
-            return 0.0
-
-        potential = 0.0
-        max_height = self.gs.grid.get_max_height()
-        num_holes = self.gs.grid.count_holes()
-        bumpiness = self.gs.grid.get_bumpiness()
-
-        potential += self.gs.rewards.PBRS_HEIGHT_COEF * max_height
-        potential += self.gs.rewards.PBRS_HOLE_COEF * num_holes
-        potential += self.gs.rewards.PBRS_BUMPINESS_COEF * bumpiness
-
-        return potential
+    # Removed calculate_potential (PBRS logic)
 
     def _calculate_potential_placement_outcomes(self) -> Dict[str, float]:
         """Calculates potential outcomes (tris cleared, holes, height, bumpiness) for valid moves."""

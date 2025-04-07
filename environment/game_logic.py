@@ -1,4 +1,3 @@
-# File: environment/game_logic.py
 from typing import TYPE_CHECKING, List, Tuple, Optional
 import time
 
@@ -54,34 +53,24 @@ class GameLogic:
                         return False
         return True
 
-    def _calculate_placement_reward(self, placed_shape: "Shape") -> float:
-        return self.gs.rewards.REWARD_PLACE_PER_TRI * len(placed_shape.triangles)
+    # Removed _calculate_placement_reward
+    # Removed _calculate_line_clear_reward
+    # Removed _calculate_state_penalty
 
-    def _calculate_line_clear_reward(self, triangles_cleared: int) -> float:
-        return triangles_cleared * self.gs.rewards.REWARD_PER_CLEARED_TRIANGLE
-
-    def _calculate_state_penalty(self) -> float:
-        penalty = 0.0
-        max_height = self.gs.grid.get_max_height()
-        bumpiness = self.gs.grid.get_bumpiness()
-        num_holes = self.gs.grid.count_holes()
-        penalty += max_height * self.gs.rewards.PENALTY_MAX_HEIGHT_FACTOR
-        penalty += bumpiness * self.gs.rewards.PENALTY_BUMPINESS_FACTOR
-        penalty += num_holes * self.gs.rewards.PENALTY_HOLE_PER_HOLE
-        return penalty
-
-    def _handle_invalid_placement(self) -> float:
+    def _handle_invalid_placement(self):
+        """Handles the state change for an invalid placement attempt."""
         self.gs._last_action_valid = False
-        return self.gs.rewards.PENALTY_INVALID_MOVE
+        # No reward returned
 
-    def _handle_game_over_state_change(self) -> float:
+    def _handle_game_over_state_change(self):
+        """Handles the state change when the game ends."""
         if self.gs.game_over:
-            return 0.0
+            return
         self.gs.game_over = True
         if self.gs.freeze_time <= 0:  # Only set freeze if not already frozen
             self.gs.freeze_time = 1.0
         self.gs.game_over_flash_time = 0.6
-        return self.gs.rewards.PENALTY_GAME_OVER
+        # No reward returned
 
     def _handle_valid_placement(
         self,
@@ -89,12 +78,9 @@ class GameLogic:
         shape_slot_index: int,
         target_row: int,
         target_col: int,
-    ) -> float:
+    ):
+        """Handles the state change for a valid placement."""
         self.gs._last_action_valid = True
-        step_reward = 0.0
-
-        step_reward += self._calculate_placement_reward(shape_to_place)
-        holes_before = self.gs.grid.count_holes()
 
         self.gs.grid.place(shape_to_place, target_row, target_col)
         self.gs.shapes[shape_slot_index] = None
@@ -102,8 +88,7 @@ class GameLogic:
         self.gs.pieces_placed_this_episode += 1
 
         lines_cleared, triangles_cleared, cleared_coords = self.gs.grid.clear_lines()
-        line_clear_reward = self._calculate_line_clear_reward(triangles_cleared)
-        step_reward += line_clear_reward
+        # Removed line clear reward calculation
         self.gs.triangles_cleared_this_episode += triangles_cleared
 
         if triangles_cleared > 0:
@@ -116,14 +101,11 @@ class GameLogic:
             self.gs.last_line_clear_info = (
                 lines_cleared,
                 triangles_cleared,
-                line_clear_reward,
-            )
+                0.0,
+            )  # Reward is 0
 
-        holes_after = self.gs.grid.count_holes()
-        new_holes_created = max(0, holes_after - holes_before)
-
-        step_reward += self._calculate_state_penalty()
-        step_reward += new_holes_created * self.gs.rewards.PENALTY_NEW_HOLE
+        # Removed state penalty calculation
+        # Removed new hole penalty calculation
 
         if all(s is None for s in self.gs.shapes):
             from .shape import Shape  # Local import to avoid cycle
@@ -133,37 +115,29 @@ class GameLogic:
             ]
 
         if self._check_fundamental_game_over():
-            step_reward += self._handle_game_over_state_change()
+            self._handle_game_over_state_change()
 
         self.gs.demo_logic.update_demo_selection_after_placement(shape_slot_index)
-        return step_reward
+        # No reward returned
 
-    def step(self, action_index: int) -> Tuple[float, bool]:
-        """Performs one game step based on the action index."""
+    def step(self, action_index: int) -> Tuple[Optional[dict], bool]:
+        """
+        Performs one game step based on the action index.
+        Updates the internal game state and returns (None, is_game_over).
+        The state representation should be fetched separately via get_state().
+        """
         # Update timers at the very beginning of the step
         self.gs._update_timers()
 
         # Check game over state *after* timer update
         if self.gs.game_over:
-            return (0.0, True)
+            return (None, True)
 
         # Check if frozen *after* timer update
         if self.gs.is_frozen():
-            # If frozen, still calculate potential change but return 0 extrinsic reward
             # print(f"[GameLogic] Step called while frozen ({self.gs.freeze_time:.3f}s left). Skipping action.") # DEBUG
-            current_potential = self.gs.features.calculate_potential()
-            pbrs_reward = (
-                (self.gs.ppo_config.GAMMA * current_potential - self.gs._last_potential)
-                if self.gs.rewards.ENABLE_PBRS
-                else 0.0
-            )
-            self.gs._last_potential = current_potential
-            total_reward = (
-                self.gs.rewards.REWARD_ALIVE_STEP + pbrs_reward
-            )  # Still give alive reward? Maybe not if frozen? Let's keep it for now.
-            self.gs.score += total_reward
             return (
-                total_reward,
+                None,
                 False,
             )  # Return False for done, as game is just paused
 
@@ -180,34 +154,18 @@ class GameLogic:
             shape_to_place, target_row, target_col
         )
 
-        potential_before_action = self.gs.features.calculate_potential()
+        # Removed potential calculation
 
         if is_valid_placement:
-            extrinsic_reward = self._handle_valid_placement(
+            self._handle_valid_placement(
                 shape_to_place, shape_slot_index, target_row, target_col
             )
         else:
             # An invalid action was chosen (e.g., by the agent or debug click)
             # print(f"[GameLogic] Invalid placement attempt: Action {action_index} -> Slot {shape_slot_index}, Pos ({target_row},{target_col})") # DEBUG
-            extrinsic_reward = self._handle_invalid_placement()
+            self._handle_invalid_placement()
             # Check if *any* move is possible after this invalid attempt
             if self._check_fundamental_game_over():
-                extrinsic_reward += self._handle_game_over_state_change()
+                self._handle_game_over_state_change()
 
-        # Add alive reward only if the game didn't end *during* this step
-        if not self.gs.game_over:
-            extrinsic_reward += self.gs.rewards.REWARD_ALIVE_STEP
-
-        potential_after_action = self.gs.features.calculate_potential()
-        pbrs_reward = 0.0
-        if self.gs.rewards.ENABLE_PBRS:
-            pbrs_reward = (
-                self.gs.ppo_config.GAMMA * potential_after_action
-                - potential_before_action
-            )
-
-        total_reward = extrinsic_reward + pbrs_reward
-        self.gs._last_potential = potential_after_action
-
-        self.gs.score += total_reward
-        return (total_reward, self.gs.game_over)
+        return (None, self.gs.game_over)

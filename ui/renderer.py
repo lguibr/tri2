@@ -46,7 +46,7 @@ class UIRenderer:
     def render_all(
         self,
         app_state: str,
-        is_process_running: bool,  # Keep for potential MCTS/NN status
+        is_process_running: bool,  # Keep for potential MCTS/NN status display
         status: str,
         stats_summary: Dict[str, Any],
         envs: List[GameState],  # Keep for visualization

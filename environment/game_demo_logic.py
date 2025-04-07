@@ -92,7 +92,8 @@ class GameDemoLogic:
             action_index = shape_slot_index * locations_per_shape + (
                 target_row * self.gs.grid.cols + target_col
             )
-            _, _ = self.gs.logic.step(action_index)  # Use logic helper
+            # Call the refactored step method (which now returns state, done)
+            _, _ = self.gs.step(action_index)
 
             self.gs.demo_dragged_shape_idx = None
             self.gs.demo_snapped_position = None
@@ -131,9 +132,7 @@ class GameDemoLogic:
         )
 
         lines_cleared, triangles_cleared, cleared_coords = self.gs.grid.clear_lines()
-        line_clear_reward = self.gs.logic._calculate_line_clear_reward(
-            triangles_cleared
-        )  # Use logic helper
+        # Removed reward calculation
 
         if triangles_cleared > 0:
             print(
@@ -149,8 +148,8 @@ class GameDemoLogic:
             self.gs.last_line_clear_info = (
                 lines_cleared,
                 triangles_cleared,
-                line_clear_reward,
-            )
+                0.0,
+            )  # Reward is now 0
         else:
             if self.gs.line_clear_highlight_time <= 0:
                 self.gs.cleared_triangles_coords = []

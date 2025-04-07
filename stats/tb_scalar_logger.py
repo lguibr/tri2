@@ -89,7 +89,7 @@ class TBScalarLogger:
                         self.writer.add_scalar(tag, step_data[key], g_step)
 
                 # --- Corrected Access ---
-                if update_info.get("new_best_loss"):  # Value loss
+                if update_info.get("new_best_value_loss"):  # Value loss
                     self.writer.add_scalar(
                         "Best Performance/Value Loss",
                         aggregator.storage.best_value_loss,

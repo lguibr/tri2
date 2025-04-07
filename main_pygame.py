@@ -37,7 +37,7 @@ try:
         RNNConfig,
         TransformerConfig,
         # Removed ObsNormConfig
-        # Removed RewardConfig (or keep if needed for env rewards)
+        # Removed RewardConfig
         DEVICE,
         RANDOM_SEED,
         # Removed TOTAL_TRAINING_STEPS
@@ -150,8 +150,7 @@ class MainApp:
         # --- Threading & Communication (Updated) ---
         self.stop_event = threading.Event()  # Keep for main loop exit signal
         # Removed self.pause_event (was tied to PPO workers)
-        # Keep queue if needed for future workers, otherwise remove
-        # self.experience_queue = queue.Queue(maxsize=10)
+        # Removed self.experience_queue
 
         # --- RL Components (Managed by Initializer - Updated) ---
         # Placeholders for NN agent, stats, checkpoint manager
@@ -361,7 +360,7 @@ class MainApp:
                     demo_env=self.initializer.demo_env,
                     update_progress_details=self.update_progress_details,  # Pass NN progress later
                     agent_param_count=agent_params,
-                    # worker_counts={}, # Removed worker counts
+                    worker_counts={},  # Removed worker counts
                 )
             else:  # Fallback render
                 self.screen.fill((20, 0, 0))

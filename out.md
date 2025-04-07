@@ -55,14 +55,14 @@ from typing import TYPE_CHECKING, List, Optional, Dict, Any
 from config import (
     VisConfig,
     EnvConfig,
-    PPOConfig,
+    # Removed PPOConfig
     RNNConfig,
     ModelConfig,
     StatsConfig,
-    RewardConfig,
+    # Removed RewardConfig
     TensorBoardConfig,
     DemoConfig,
-    ObsNormConfig,
+    # Removed ObsNormConfig
     TransformerConfig,
     RANDOM_SEED,
     BASE_CHECKPOINT_DIR,
@@ -70,21 +70,22 @@ from config import (
     DEVICE,
 )
 from environment.game_state import GameState
-from agent.ppo_agent import PPOAgent
+
+# Removed PPOAgent import
+# from agent.ppo_agent import PPOAgent
 from stats.stats_recorder import StatsRecorderBase
 from ui.renderer import UIRenderer
 from ui.input_handler import InputHandler
-from init.rl_components_ppo import (
-    initialize_envs,
-    initialize_agent,
-    initialize_stats_recorder,
-)
+
+# Removed init.rl_components_ppo import
 from training.checkpoint_manager import CheckpointManager
-from training.rollout_collector import RolloutCollector
+
+# Removed RolloutCollector import
 from app_state import AppState
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
+    from agent.base_agent import BaseAgent  # Hypothetical base class for NN agent
 
 
 class AppInitializer:
@@ -92,35 +93,33 @@ class AppInitializer:
 
     def __init__(self, app: "MainApp"):
         self.app = app
-        # Config instances (can be accessed via app as well)
+        # Config instances
         self.vis_config = app.vis_config
         self.env_config = app.env_config
-        self.ppo_config = app.ppo_config
+        # Removed self.ppo_config
         self.rnn_config = RNNConfig()
-        # --- Access the stored instance from MainApp ---
         self.train_config = app.train_config_instance
-        # --- End Access ---
         self.model_config = ModelConfig()
         self.stats_config = StatsConfig()
         self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
-        self.reward_config = RewardConfig()
-        self.obs_norm_config = ObsNormConfig()
+        # Removed self.reward_config
+        # Removed self.obs_norm_config
         self.transformer_config = TransformerConfig()
 
         # Components to be initialized
-        self.envs: List[GameState] = []
-        self.agent: Optional[PPOAgent] = None
+        self.envs: List[GameState] = []  # Keep for potential multi-env display
+        self.agent: Optional["BaseAgent"] = None  # Agent is now the NN
         self.stats_recorder: Optional[StatsRecorderBase] = None
         self.demo_env: Optional[GameState] = None
         self.agent_param_count: int = 0
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.rollout_collector: Optional[RolloutCollector] = None
+        # Removed self.rollout_collector
 
     def initialize_all(self, is_reinit: bool = False):
         """Initializes all core components."""
         try:
-            # --- GPU Memory Info ---
+            # GPU Memory Info (Keep)
             if self.app.device.type == "cuda":
                 try:
                     self.app.total_gpu_memory_bytes = torch.cuda.get_device_properties(
@@ -132,12 +131,13 @@ class AppInitializer:
                 except Exception as e:
                     print(f"Warning: Could not get total GPU memory: {e}")
 
-            # --- Renderer and Initial Render ---
+            # Renderer and Initial Render (Keep)
             if not is_reinit:
                 self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
+                # Adapt render_all call later if needed
                 self.app.renderer.render_all(
                     app_state=self.app.app_state.value,
-                    is_process_running=self.app.is_process_running,
+                    is_process_running=False,  # No PPO process running
                     status=self.app.status,
                     stats_summary={},
                     envs=[],
@@ -149,28 +149,34 @@ class AppInitializer:
                     tensorboard_log_dir=None,
                     plot_data={},
                     demo_env=None,
-                    update_progress_details={},
+                    update_progress_details={},  # Keep for potential NN training progress
                     agent_param_count=0,
+                    worker_counts={},  # Remove worker counts for now
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
 
-            # --- RL Components ---
+            # Initialize "RL" components (NN, Stats, Checkpoint Manager)
             self.initialize_rl_components(
                 is_reinit=is_reinit, checkpoint_to_load=self.app.checkpoint_to_load
             )
 
-            # --- Demo Env and Input Handler ---
+            # Demo Env and Input Handler (Keep)
             if not is_reinit:
                 self.initialize_demo_env()
                 self.initialize_input_handler()
 
-            if self.agent:
-                self.agent_param_count = sum(
-                    p.numel()
-                    for p in self.agent.network.parameters()
-                    if p.requires_grad
-                )
+            # Calculate NN parameter count if agent exists
+            if self.agent and hasattr(self.agent, "network"):
+                try:
+                    self.agent_param_count = sum(
+                        p.numel()
+                        for p in self.agent.network.parameters()
+                        if p.requires_grad
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not calculate agent parameters: {e}")
+                    self.agent_param_count = 0
 
         except Exception as init_err:
             print(f"FATAL ERROR during component initialization: {init_err}")
@@ -190,75 +196,98 @@ class AppInitializer:
     def initialize_rl_components(
         self, is_reinit: bool = False, checkpoint_to_load: Optional[str] = None
     ):
-        """Initializes RL components: Envs, Agent, Stats, Collector, CheckpointManager."""
-        print(f"Initializing RL components (PPO)... Re-init: {is_reinit}")
+        """Initializes NN Agent, Stats Recorder, Checkpoint Manager."""
+        print(f"Initializing AlphaZero components... Re-init: {is_reinit}")
         start_time = time.time()
         try:
-            self.envs = initialize_envs(self.env_config.NUM_ENVS, self.env_config)
-            self.agent = initialize_agent(
-                model_config=self.model_config,
-                ppo_config=self.ppo_config,
-                rnn_config=self.rnn_config,
-                env_config=self.env_config,
-                transformer_config=self.transformer_config,
-                device=self.app.device,
-            )
-            self.stats_recorder = initialize_stats_recorder(
-                stats_config=self.stats_config,
-                tb_config=self.tensorboard_config,
-                config_dict=self.app.config_dict,
-                agent=self.agent,
-                env_config=self.env_config,
-                rnn_config=self.rnn_config,
-                transformer_config=self.transformer_config,
-                is_reinit=is_reinit,
-            )
-            if self.stats_recorder is None:
-                raise RuntimeError("Stats Recorder init failed.")
+            # Initialize Envs (only needed for visualization now)
+            # self.envs = initialize_envs(self.env_config.NUM_ENVS, self.env_config) # Removed multi-env init
+            self.envs = []  # No parallel envs needed for core logic now
 
+            # --- Initialize Agent (Neural Network) ---
+            # Replace with AlphaZero NN initialization later
+            # For now, set agent to None or a placeholder
+            self.agent = None  # Placeholder - Initialize AlphaZero NN here later
+            print("Agent (NN) initialization SKIPPED (placeholder).")
+            # Example placeholder for future NN init:
+            # self.agent = initialize_alphazero_agent(
+            #     model_config=self.model_config,
+            #     rnn_config=self.rnn_config,
+            #     env_config=self.env_config,
+            #     transformer_config=self.transformer_config,
+            #     device=self.app.device,
+            # )
+            # --- End Agent Init ---
+
+            # --- Initialize Stats Recorder ---
+            # Adapt initialize_stats_recorder if needed (e.g., remove PPO hparams)
+            # Need to create a simplified version or adapt existing one
+            # For now, assume it's adapted or create a placeholder
+            try:
+                # Assuming init.stats_init exists and is adapted
+                from init.stats_init import initialize_stats_recorder
+
+                self.stats_recorder = initialize_stats_recorder(
+                    stats_config=self.stats_config,
+                    tb_config=self.tensorboard_config,
+                    config_dict=self.app.config_dict,
+                    # Pass agent=None if NN not ready, or pass the NN agent
+                    agent=self.agent,
+                    env_config=self.env_config,
+                    rnn_config=self.rnn_config,  # Keep for potential NN config logging
+                    transformer_config=self.transformer_config,  # Keep for potential NN config logging
+                    is_reinit=is_reinit,
+                )
+            except ImportError:
+                print(
+                    "Warning: init.stats_init.initialize_stats_recorder not found. Skipping stats recorder init."
+                )
+                self.stats_recorder = None  # Fallback
+            except Exception as stats_init_err:
+                print(f"Error initializing stats recorder: {stats_init_err}")
+                traceback.print_exc()
+                self.stats_recorder = None
+
+            if self.stats_recorder is None:
+                print("Warning: Stats Recorder initialization failed or skipped.")
+                # Decide if this is critical - maybe allow running without stats?
+                # raise RuntimeError("Stats Recorder init failed.")
+            # --- End Stats Recorder Init ---
+
+            # --- Initialize Checkpoint Manager ---
+            # Checkpoint manager now handles NN agent state and stats aggregator state
             self.checkpoint_manager = CheckpointManager(
+                # Pass the NN agent (or None if not ready)
                 agent=self.agent,
-                stats_aggregator=self.stats_recorder.aggregator,
+                # Pass stats aggregator if it exists
+                stats_aggregator=getattr(self.stats_recorder, "aggregator", None),
                 base_checkpoint_dir=BASE_CHECKPOINT_DIR,
                 run_checkpoint_dir=get_run_checkpoint_dir(),
                 load_checkpoint_path_config=checkpoint_to_load,
                 device=self.app.device,
-                obs_rms_dict=None,  # Will be set after collector init
+                # obs_rms_dict=None, # Removed Obs RMS
             )
+            # --- End Checkpoint Manager Init ---
 
-            self.rollout_collector = RolloutCollector(
-                envs=self.envs,
-                agent=self.agent,
-                stats_recorder=self.stats_recorder,
-                env_config=self.env_config,
-                ppo_config=self.ppo_config,
-                rnn_config=self.rnn_config,
-                reward_config=self.reward_config,
-                tb_config=self.tensorboard_config,
-                obs_norm_config=self.obs_norm_config,
-                device=self.app.device,
-            )
-
-            # Pass the initialized RMS dict from collector to checkpoint manager
-            self.checkpoint_manager.obs_rms_dict = (
-                self.rollout_collector.get_obs_rms_dict()
-            )
-
+            # --- Load Checkpoint ---
             if self.checkpoint_manager.get_checkpoint_path_to_load():
-                self.checkpoint_manager.load_checkpoint()
+                self.checkpoint_manager.load_checkpoint()  # Loads NN state and stats state
+                # Get initial step/episode count from loaded stats
                 loaded_global_step, initial_episode_count = (
                     self.checkpoint_manager.get_initial_state()
                 )
-                # Sync collector's episode count (global step is managed by aggregator)
-                self.rollout_collector.state.episode_count = initial_episode_count
-                # Aggregator state is loaded within checkpoint_manager.load_checkpoint()
+                # Sync episode count if needed (e.g., if MCTS tracks episodes)
+                # self.mcts_manager.state.episode_count = initial_episode_count # Example
+            # --- End Load Checkpoint ---
 
-            print(f"RL components initialized in {time.time() - start_time:.2f}s")
+            print(
+                f"AlphaZero components initialized in {time.time() - start_time:.2f}s"
+            )
 
         except Exception as e:
-            print(f"Error during RL component initialization: {e}")
+            print(f"Error during AlphaZero component initialization: {e}")
             traceback.print_exc()
-            raise e
+            raise e  # Re-raise to be caught by initialize_all
 
     def initialize_demo_env(self):
         """Initializes the separate environment for demo/debug mode."""
@@ -281,7 +310,7 @@ class AppInitializer:
         self.app.input_handler = InputHandler(
             screen=self.app.screen,
             renderer=self.app.renderer,
-            toggle_training_run_cb=self.app.logic.toggle_training_run,
+            # Removed toggle_training_run_cb
             request_cleanup_cb=self.app.logic.request_cleanup,
             cancel_cleanup_cb=self.app.logic.cancel_cleanup,
             confirm_cleanup_cb=self.app.logic.confirm_cleanup,
@@ -296,7 +325,6 @@ class AppInitializer:
         )
         if self.app.renderer and self.app.renderer.left_panel:
             self.app.renderer.left_panel.input_handler = self.app.input_handler
-            # Also set the reference in the button renderer if needed
             if hasattr(self.app.renderer.left_panel, "button_status_renderer"):
                 self.app.renderer.left_panel.button_status_renderer.input_handler_ref = (
                     self.app.input_handler
@@ -311,7 +339,6 @@ class AppInitializer:
             print("[AppInitializer] Stats recorder exists, attempting close...")
             try:
                 if hasattr(self.stats_recorder, "close"):
-                    # Pass the is_cleanup flag down
                     self.stats_recorder.close(is_cleanup=is_cleanup)
                     print("[AppInitializer] stats_recorder.close() executed.")
                 else:
@@ -325,7 +352,6 @@ class AppInitializer:
 
 
 File: app_logic.py
-# File: app_logic.py
 # File: app_logic.py
 import pygame
 import time
@@ -347,64 +373,34 @@ class AppLogic:
         self.app = app
 
     def check_initial_completion_status(self):
-        """Checks if training was already complete upon loading."""
-        if (
-            self.app.initializer.checkpoint_manager
-            and self.app.initializer.checkpoint_manager.training_target_step > 0
-            and self.app.initializer.checkpoint_manager.global_step
-            >= self.app.initializer.checkpoint_manager.training_target_step
-        ):
-            self.app.status = "Training Complete"
-            print(
-                f"Training already completed ({self.app.initializer.checkpoint_manager.global_step:,}/{self.app.initializer.checkpoint_manager.training_target_step:,} steps). Ready."
-            )
-            # Don't automatically pause here, let the user decide
+        """Checks if training target (e.g., games played) was met upon loading."""
+        # This needs adaptation based on how AlphaZero training progress is tracked.
+        # For now, assume completion isn't automatically checked this way.
+        # Example: Check against games played or NN training steps in aggregator
+        # if (
+        #     self.app.initializer.stats_recorder
+        #     and hasattr(self.app.initializer.stats_recorder, "aggregator")
+        # ):
+        #     aggregator = self.app.initializer.stats_recorder.aggregator
+        #     target_games = getattr(aggregator.storage, "training_target_games", 0) # Example target
+        #     current_games = getattr(aggregator.storage, "total_episodes", 0)
+        #     if target_games > 0 and current_games >= target_games:
+        #         self.app.status = "Target Reached"
+        #         print(f"Target games already reached ({current_games:,}/{target_games:,}). Ready.")
+        pass  # Keep simple for now
 
     def update_status_and_check_completion(self):
-        """Updates the status text based on worker state and checks for training completion."""
-        if (
-            not self.app.initializer.stats_recorder
-            or not hasattr(self.app.initializer.stats_recorder, "aggregator")
-            or not self.app.initializer.checkpoint_manager
-        ):
-            return
+        """Updates the status text based on application state."""
+        # Removed PPO-specific status logic (Collecting, Updating)
+        # Removed completion check based on PPO steps
 
-        current_step = getattr(
-            self.app.initializer.stats_recorder.aggregator.storage,
-            "current_global_step",
-            0,  # Access via storage
-        )
-        target_step = self.app.initializer.checkpoint_manager.training_target_step
-
-        if target_step > 0 and current_step >= target_step:
-            if not self.app.status.startswith("Training Complete"):
-                print(
-                    f"\n--- Training Complete ({current_step:,}/{target_step:,} steps) ---"
-                )
-                self.app.status = "Training Complete"
-            elif self.app.is_process_running and self.app.status == "Training Complete":
-                self.app.status = "Training Complete (Running)"
-            return
-
-        # If not complete, update status based on running state
-        if self.app.is_process_running:
-            # Check if update progress details indicate an active update
-            is_updating = (
-                hasattr(self.app, "update_progress_details")
-                and self.app.update_progress_details.get("current_epoch", 0) > 0
-            )
-            if is_updating:
-                self.app.status = "Updating Agent"
-            elif self.app.experience_queue.qsize() > 0:  # Check queue as fallback
-                self.app.status = "Updating Agent"
-            else:
-                self.app.status = "Collecting Experience"
-        elif self.app.app_state == AppState.MAIN_MENU:
+        # Update status based on AppState
+        if self.app.app_state == AppState.MAIN_MENU:
             if self.app.cleanup_confirmation_active:
                 self.app.status = "Confirm Cleanup"
-            elif not self.app.status.startswith(
-                "Training Complete"
-            ):  # Avoid overwriting completion
+            else:
+                # Check if training is "complete" based on new criteria if needed
+                # For now, just set to Ready if not confirming cleanup
                 self.app.status = "Ready"
         elif self.app.app_state == AppState.PLAYING:
             self.app.status = "Playing Demo"
@@ -412,70 +408,23 @@ class AppLogic:
             self.app.status = "Debugging Grid"
         elif self.app.app_state == AppState.INITIALIZING:
             self.app.status = "Initializing..."
+        elif self.app.app_state == AppState.ERROR:
+            # Status should already be set by the error handler
+            pass
 
-    def toggle_training_run(self):
-        """Starts or stops the worker threads."""
-        print(
-            f"[AppLogic] toggle_training_run called. Current state: {self.app.app_state.value}, is_process_running: {self.app.is_process_running}"
-        )
-        if self.app.app_state != AppState.MAIN_MENU:
-            print(
-                f"[AppLogic] Cannot toggle run outside MainMenu (State: {self.app.app_state.value})."
-            )
-            return
-        if (
-            not self.app.worker_manager.env_runner_thread
-            or not self.app.worker_manager.training_worker_thread
-        ):
-            print("[AppLogic] Cannot toggle run: Workers not initialized.")
-            return
-
-        if not self.app.is_process_running:
-            print("[AppLogic] Attempting to START workers...")
-            print("[AppLogic] Setting is_process_running = True")
-            self.app.is_process_running = True
-            print(
-                f"[AppLogic] Clearing pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )
-            self.app.pause_event.clear()
-            print(
-                f"[AppLogic] Pause event cleared (New is_set: {self.app.pause_event.is_set()})."
-            )
-            # Update status based on completion
-            self.update_status_and_check_completion()  # This will set status correctly
-            print("[AppLogic] Workers should start running.")
-        else:
-            print("[AppLogic] Attempting to PAUSE workers...")
-            print("[AppLogic] Setting is_process_running = False")
-            self.app.is_process_running = False
-            print(
-                f"[AppLogic] Setting pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )
-            self.app.pause_event.set()
-            print(
-                f"[AppLogic] Pause event set (New is_set: {self.app.pause_event.is_set()})."
-            )
-            self.try_save_checkpoint()
-            self.check_initial_completion_status()  # Re-check completion status on pause
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
-            self.app.app_state = AppState.MAIN_MENU
-            print("[AppLogic] Workers should pause.")
+    # Removed toggle_training_run method
 
     def request_cleanup(self):
-        if self.app.is_process_running:
-            print("Cannot request cleanup while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.app_state != AppState.MAIN_MENU:
             print("Cannot request cleanup outside MainMenu.")
             return
         self.app.cleanup_confirmation_active = True
+        self.app.status = "Confirm Cleanup"  # Update status
         print("Cleanup requested. Confirm action.")
 
     def start_demo_mode(self):
-        if self.app.is_process_running:
-            print("Cannot start demo mode while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.initializer.demo_env is None:
             print("Cannot start demo mode: Demo environment failed to initialize.")
             return
@@ -483,15 +432,13 @@ class AppLogic:
             print("Cannot start demo mode outside MainMenu.")
             return
         print("Entering Demo Mode...")
-        self.try_save_checkpoint()
+        self.try_save_checkpoint()  # Save NN weights before switching mode?
         self.app.app_state = AppState.PLAYING
         self.app.status = "Playing Demo"
         self.app.initializer.demo_env.reset()
 
     def start_debug_mode(self):
-        if self.app.is_process_running:
-            print("Cannot start debug mode while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.initializer.demo_env is None:
             print("Cannot start debug mode: Demo environment failed to initialize.")
             return
@@ -499,7 +446,7 @@ class AppLogic:
             print("Cannot start debug mode outside MainMenu.")
             return
         print("Entering Debug Mode...")
-        self.try_save_checkpoint()
+        self.try_save_checkpoint()  # Save NN weights before switching mode?
         self.app.app_state = AppState.DEBUG
         self.app.status = "Debugging Grid"
         self.app.initializer.demo_env.reset()
@@ -508,18 +455,15 @@ class AppLogic:
         if self.app.app_state == AppState.DEBUG:
             print("Exiting Debug Mode...")
             self.app.app_state = AppState.MAIN_MENU
-            # --- Ensure process is marked as stopped/paused ---
-            self.app.is_process_running = False
-            self.app.pause_event.set()
-            # --- End Ensure ---
-            self.check_initial_completion_status()  # Check completion status on exit
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
+            # Removed setting is_process_running and pause_event
+            self.check_initial_completion_status()  # Re-check status
+            self.app.status = "Ready"  # Set status back to Ready
 
     def cancel_cleanup(self):
         self.app.cleanup_confirmation_active = False
         self.app.cleanup_message = "Cleanup cancelled."
         self.app.last_cleanup_message_time = time.time()
+        self.app.status = "Ready"  # Set status back
         print("Cleanup cancelled by user.")
 
     def confirm_cleanup(self):
@@ -533,13 +477,14 @@ class AppLogic:
             self.app.app_state = AppState.ERROR
         finally:
             self.app.cleanup_confirmation_active = False
+            # Status is set within _cleanup_data or error handling
             print(
                 f"Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
             )
 
     def exit_app(self) -> bool:
         print("Exit requested.")
-        self.app.stop_event.set()
+        self.app.stop_event.set()  # Keep stop event for main loop exit
         return False
 
     def exit_demo_mode(self):
@@ -548,13 +493,9 @@ class AppLogic:
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.deselect_dragged_shape()
             self.app.app_state = AppState.MAIN_MENU
-            # --- Ensure process is marked as stopped/paused ---
-            self.app.is_process_running = False
-            self.app.pause_event.set()
-            # --- End Ensure ---
-            self.check_initial_completion_status()  # Check completion status on exit
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
+            # Removed setting is_process_running and pause_event
+            self.check_initial_completion_status()  # Re-check status
+            self.app.status = "Ready"  # Set status back to Ready
 
     def handle_demo_mouse_motion(self, mouse_pos: Tuple[int, int]):
         if (
@@ -622,21 +563,21 @@ class AppLogic:
                 demo_env.toggle_triangle_debug(row, col)
 
     def _cleanup_data(self):
-        """Deletes current run's checkpoint and re-initializes."""
+        """Deletes current run's checkpoint and re-initializes components."""
         from config.general import get_run_checkpoint_dir  # Local import
 
         print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
-        self.app.pause_event.set()  # Ensure workers are paused if running
-        self.app.is_process_running = False
+        # Removed pause_event setting and is_process_running
         self.app.app_state = AppState.INITIALIZING
         self.app.status = "Cleaning"
         messages = []
 
+        # Render cleaning status
         if self.app.renderer:
             try:
                 self.app.renderer.render_all(
                     app_state=self.app.app_state.value,
-                    is_process_running=False,
+                    is_process_running=False,  # No process running now
                     status=self.app.status,
                     stats_summary={},
                     envs=[],
@@ -652,29 +593,27 @@ class AppLogic:
                     agent_param_count=getattr(
                         self.app.initializer, "agent_param_count", 0
                     ),
-                    worker_counts={
-                        "env_runners": 0,
-                        "trainers": 0,
-                    },  # Pass default counts
+                    worker_counts={},  # Removed worker counts
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
             except Exception as render_err:
                 print(f"Warning: Error rendering during cleanup start: {render_err}")
 
-        # --- Stop existing worker threads FIRST ---
-        print("[Cleanup] Stopping existing worker threads...")
-        self.app.worker_manager.stop_worker_threads()  # This calls join()
+        # --- Stop existing worker threads (if any) ---
+        # Keep this structure in case new workers (MCTS/NN) are added later
+        print("[Cleanup] Stopping existing worker threads (if any)...")
+        self.app.worker_manager.stop_worker_threads()
         print("[Cleanup] Existing worker threads stopped.")
         # --- End Stop Workers ---
 
-        # --- Close Stats Recorder AFTER stopping workers ---
+        # --- Close Stats Recorder ---
         print("[Cleanup] Closing stats recorder...")
-        # Pass is_cleanup=True to prevent final hparam logging during cleanup
         self.app.initializer.close_stats_recorder(is_cleanup=True)
         print("[Cleanup] Stats recorder closed.")
         # --- End Close Stats ---
 
+        # --- Delete Checkpoint Directory ---
         print("[Cleanup] Deleting agent checkpoint file/dir...")
         try:
             save_dir = get_run_checkpoint_dir()
@@ -690,48 +629,43 @@ class AppLogic:
             print(f"  - {msg}")
             messages.append(msg)
         print("[Cleanup] Checkpoint deletion attempt finished.")
+        # --- End Delete Checkpoint ---
 
         time.sleep(0.1)
-        print("[Cleanup] Re-initializing RL components...")
+        print("[Cleanup] Re-initializing components...")
         try:
-            # Re-initialize RL components (creates new agent, stats recorder etc.)
+            # Re-initialize components (NN, Stats, Checkpoint Manager)
             self.app.initializer.initialize_rl_components(
                 is_reinit=True, checkpoint_to_load=None
             )
-            print("[Cleanup] RL components re-initialized.")
+            print("[Cleanup] Components re-initialized.")
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
                 print("[Cleanup] Demo env reset.")
 
-            # --- Set pause event BEFORE starting new workers ---
-            print("[Cleanup] Setting pause event before starting new workers...")
-            self.app.pause_event.set()
-            # --- End Set Pause ---
-
-            # Start NEW worker threads with the re-initialized components
-            print("[Cleanup] Starting new worker threads...")
+            # --- Start new worker threads (if any) ---
+            # Keep this structure for future workers
+            print("[Cleanup] Starting new worker threads (if any)...")
             self.app.worker_manager.start_worker_threads()
             print("[Cleanup] New worker threads started.")
+            # --- End Start Workers ---
 
-            print(
-                "[Cleanup] RL components re-initialization and worker start successful."
-            )
-            messages.append("RL components re-initialized.")
+            print("[Cleanup] Component re-initialization and worker start successful.")
+            messages.append("Components re-initialized.")
 
-            # --- Ensure state is PAUSED after cleanup ---
-            self.app.is_process_running = False
-            # self.app.pause_event.set() # Moved before starting workers
+            # --- Set state after cleanup ---
+            # Removed is_process_running and pause_event
             self.app.status = "Ready"
             self.app.app_state = AppState.MAIN_MENU
-            print("[Cleanup] Application state set to MAIN_MENU (Paused).")
-            # --- End Ensure Paused State ---
+            print("[Cleanup] Application state set to MAIN_MENU.")
+            # --- End Set State ---
 
         except Exception as e:
-            print(f"FATAL ERROR during RL re-initialization after cleanup: {e}")
+            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
             traceback.print_exc()
             self.app.status = "Error: Re-init Failed"
             self.app.app_state = AppState.ERROR
-            messages.append("ERROR RE-INITIALIZING RL COMPONENTS!")
+            messages.append("ERROR RE-INITIALIZING COMPONENTS!")
             if self.app.renderer:
                 try:
                     self.app.renderer._render_error_screen(self.app.status)
@@ -745,30 +679,30 @@ class AppLogic:
         )
 
     def try_save_checkpoint(self):
-        """Saves checkpoint if paused and checkpoint manager exists."""
+        """Saves checkpoint (e.g., NN weights) if in main menu."""
+        # Removed check for is_process_running
         if (
             self.app.app_state == AppState.MAIN_MENU
-            and not self.app.is_process_running
             and self.app.initializer.checkpoint_manager
-            and self.app.initializer.stats_recorder  # Ensure stats recorder exists
-            and hasattr(
-                self.app.initializer.stats_recorder, "aggregator"
-            )  # Ensure aggregator exists
+            and self.app.initializer.stats_recorder  # Check if stats exist
+            and hasattr(self.app.initializer.stats_recorder, "aggregator")
         ):
-            print("Saving checkpoint on pause...")
+            print("Saving checkpoint...")
             try:
+                # Get step/episode count from aggregator
                 current_step = getattr(
-                    self.app.initializer.stats_recorder.aggregator.storage,  # Access via storage
+                    self.app.initializer.stats_recorder.aggregator.storage,
                     "current_global_step",
                     0,
-                )
-                target_step = (
-                    self.app.initializer.checkpoint_manager.training_target_step
                 )
                 episode_count = getattr(
                     self.app.initializer.stats_recorder.aggregator.storage,
                     "total_episodes",
-                    0,  # Access via storage
+                    0,
+                )
+                # Target step is now managed within aggregator/checkpoint manager
+                target_step = getattr(
+                    self.app.initializer.checkpoint_manager, "training_target_step", 0
                 )
 
                 self.app.initializer.checkpoint_manager.save_checkpoint(
@@ -778,35 +712,36 @@ class AppLogic:
                     is_final=False,
                 )
             except Exception as e:
-                print(f"Error saving checkpoint on pause: {e}")
-                traceback.print_exc()  # Print traceback for debugging
+                print(f"Error saving checkpoint: {e}")
+                traceback.print_exc()
 
     def save_final_checkpoint(self):
-        """Saves the final checkpoint if conditions are met."""
+        """Saves the final checkpoint (e.g., NN weights)."""
         if (
             self.app.initializer.checkpoint_manager
             and self.app.initializer.stats_recorder
             and hasattr(self.app.initializer.stats_recorder, "aggregator")
         ):
-            current_step = getattr(
-                self.app.initializer.stats_recorder.aggregator.storage,
-                "current_global_step",
-                0,  # Access via storage
-            )
-            target_step = getattr(
-                self.app.initializer.checkpoint_manager, "training_target_step", 0
-            )
-            is_complete = target_step > 0 and current_step >= target_step
             save_on_exit = (
                 self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
-            )  # Always save unless cleaning or error
+            )
 
             if save_on_exit:
                 print("Performing final checkpoint save...")
                 try:
+                    current_step = getattr(
+                        self.app.initializer.stats_recorder.aggregator.storage,
+                        "current_global_step",
+                        0,
+                    )
                     episode_count = getattr(
-                        self.app.initializer.stats_recorder.aggregator.storage,  # Access via storage
+                        self.app.initializer.stats_recorder.aggregator.storage,
                         "total_episodes",
+                        0,
+                    )
+                    target_step = getattr(
+                        self.app.initializer.checkpoint_manager,
+                        "training_target_step",
                         0,
                     )
                     self.app.initializer.checkpoint_manager.save_checkpoint(
@@ -817,7 +752,7 @@ class AppLogic:
                     )
                 except Exception as final_save_err:
                     print(f"Error during final checkpoint save: {final_save_err}")
-                    traceback.print_exc()  # Print traceback for debugging
+                    traceback.print_exc()
             else:
                 print("Skipping final checkpoint save.")
 
@@ -847,7 +782,7 @@ def initialize_pygame(
     screen = pygame.display.set_mode(
         (vis_config.SCREEN_WIDTH, vis_config.SCREEN_HEIGHT), pygame.RESIZABLE
     )
-    pygame.display.set_caption("TriCrack PPO")
+    pygame.display.set_caption("AlphaTri Trainer")  # Updated caption
     clock = pygame.time.Clock()
     print("Pygame initialized.")
     return screen, clock
@@ -996,9 +931,10 @@ import threading
 import queue
 import time
 import traceback
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional  # Added Optional
 
-from workers import EnvironmentRunner, TrainingWorker
+# Removed worker imports
+# from workers import EnvironmentRunner, TrainingWorker
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
@@ -1009,80 +945,81 @@ class AppWorkerManager:
 
     def __init__(self, app: "MainApp"):
         self.app = app
-        self.env_runner_thread: Optional[EnvironmentRunner] = None
-        self.training_worker_thread: Optional[TrainingWorker] = None
+        # Remove specific worker thread attributes
+        # self.env_runner_thread: Optional[EnvironmentRunner] = None
+        # self.training_worker_thread: Optional[TrainingWorker] = None
+        # Add placeholders for future workers if needed
+        self.mcts_worker_thread: Optional[threading.Thread] = None
+        self.nn_training_worker_thread: Optional[threading.Thread] = None
+        print("[AppWorkerManager] Initialized (No workers started by default).")
 
     def start_worker_threads(self):
-        """Creates and starts the environment runner and training worker threads."""
-        if (
-            not self.app.initializer.rollout_collector
-            or not self.app.initializer.agent
-            or not self.app.initializer.stats_recorder
-            or not self.app.initializer.checkpoint_manager
-        ):
-            print("ERROR: Cannot start workers, core components not initialized.")
-            self.app.app_state = self.app.app_state.ERROR
-            self.app.status = "Worker Init Failed"
-            return
-
-        print("Starting worker threads...")
-        self.app.stop_event.clear()
-        # Keep pause_event set initially, toggle run will clear it
-
-        # Environment Runner Thread
-        self.env_runner_thread = EnvironmentRunner(
-            collector=self.app.initializer.rollout_collector,
-            experience_queue=self.app.experience_queue,
-            action_queue=None,  # Not used in this PPO setup
-            stop_event=self.app.stop_event,
-            pause_event=self.app.pause_event,
-            num_steps_per_rollout=self.app.ppo_config.NUM_STEPS_PER_ROLLOUT,
-            stats_recorder=self.app.initializer.stats_recorder,
+        """Creates and starts worker threads (MCTS, NN Training - Placeholder)."""
+        # --- This needs to be implemented based on AlphaZero architecture ---
+        print(
+            "[AppWorkerManager] start_worker_threads called (Placeholder - No workers started)."
         )
-        self.env_runner_thread.start()
-
-        # Training Worker Thread
-        self.training_worker_thread = TrainingWorker(
-            agent=self.app.initializer.agent,
-            experience_queue=self.app.experience_queue,
-            stop_event=self.app.stop_event,
-            pause_event=self.app.pause_event,
-            stats_recorder=self.app.initializer.stats_recorder,
-            ppo_config=self.app.ppo_config,
-            device=self.app.device,
-            checkpoint_manager=self.app.initializer.checkpoint_manager,
-        )
-        self.training_worker_thread.start()
-        print("Worker threads started.")
+        # Example structure:
+        # if not self.app.initializer.agent or not self.app.initializer.mcts_manager:
+        #     print("ERROR: Cannot start workers, core components not initialized.")
+        #     self.app.app_state = self.app.app_state.ERROR
+        #     self.app.status = "Worker Init Failed"
+        #     return
+        #
+        # print("Starting AlphaZero worker threads...")
+        # self.app.stop_event.clear()
+        # # self.app.pause_event.clear() # Removed pause event
+        #
+        # # MCTS Self-Play Worker(s)
+        # self.mcts_worker_thread = MCTSSelfPlayWorker(...)
+        # self.mcts_worker_thread.start()
+        #
+        # # NN Training Worker
+        # self.nn_training_worker_thread = NNTrainingWorker(...)
+        # self.nn_training_worker_thread.start()
+        #
+        # print("AlphaZero worker threads started.")
+        pass
 
     def stop_worker_threads(self):
         """Signals worker threads to stop and waits for them to join."""
         if self.app.stop_event.is_set():
+            print("[AppWorkerManager] Stop event already set.")
             return
 
-        print("Stopping worker threads...")
+        print("[AppWorkerManager] Stopping worker threads (Placeholder)...")
         self.app.stop_event.set()
-        self.app.pause_event.clear()  # Ensure threads aren't stuck paused
+        # self.app.pause_event.clear() # Removed pause event
 
         join_timeout = 5.0
-        if self.env_runner_thread and self.env_runner_thread.is_alive():
-            self.env_runner_thread.join(timeout=join_timeout)
-            if self.env_runner_thread.is_alive():
-                print("EnvRunner thread did not join cleanly.")
-        if self.training_worker_thread and self.training_worker_thread.is_alive():
-            self.training_worker_thread.join(timeout=join_timeout)
-            if self.training_worker_thread.is_alive():
-                print("TrainingWorker thread did not join cleanly.")
 
-        while not self.app.experience_queue.empty():
-            try:
-                self.app.experience_queue.get_nowait()
-            except queue.Empty:
-                break
+        # --- Join future worker threads ---
+        if self.mcts_worker_thread and self.mcts_worker_thread.is_alive():
+            print("[AppWorkerManager] Joining MCTS worker...")
+            self.mcts_worker_thread.join(timeout=join_timeout)
+            if self.mcts_worker_thread.is_alive():
+                print("[AppWorkerManager] MCTS worker thread did not join cleanly.")
+            self.mcts_worker_thread = None
 
-        self.env_runner_thread = None
-        self.training_worker_thread = None
-        print("Worker threads stopped.")
+        if self.nn_training_worker_thread and self.nn_training_worker_thread.is_alive():
+            print("[AppWorkerManager] Joining NN Training worker...")
+            self.nn_training_worker_thread.join(timeout=join_timeout)
+            if self.nn_training_worker_thread.is_alive():
+                print(
+                    "[AppWorkerManager] NN Training worker thread did not join cleanly."
+                )
+            self.nn_training_worker_thread = None
+        # --- End Join ---
+
+        # Clear queues if used by workers
+        # Example:
+        # while not self.app.experience_queue.empty():
+        #     try:
+        #         self.app.experience_queue.get_nowait()
+        #     except queue.Empty:
+        #         break
+
+        print("[AppWorkerManager] Worker threads stopped.")
 
 
 File: check_gpu.py
@@ -1172,7 +1109,6 @@ class TeeLogger:
 
 File: main_pygame.py
 # File: main_pygame.py
-# main_pygame.py
 import pygame
 import sys
 import time
@@ -1180,125 +1116,107 @@ import threading
 import logging
 import argparse
 import os
-import traceback  # Added for error handling
+import traceback
 from typing import Optional, List, Dict, Any
-import torch  # <<< ADDED IMPORT HERE
+import torch
 
-# --- Resource Monitoring Import ---
+# Resource Monitoring Import (Keep)
 try:
     import psutil
 except ImportError:
     print("Warning: psutil not found. CPU/Memory usage monitoring will be disabled.")
     print("Install it using: pip install psutil")
     psutil = None
-# --- End Resource Monitoring Import ---
 
-
-# --- Path Adjustment ---
+# Path Adjustment (Keep)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
-# --- End Path Adjustment ---
 
-# Corrected import: Import specific config classes from the 'config' package
+# Config Imports (Updated)
 try:
     from config import (
         VisConfig,
         EnvConfig,
-        PPOConfig,
-        ModelConfig,  # Changed from NetworkConfig
+        # Removed PPOConfig
+        ModelConfig,
         StatsConfig,
-        TrainConfig,  # Changed from CheckpointConfig
-        TensorBoardConfig,  # Changed from LogConfig
-        DemoConfig,  # Changed from DebugConfig
-        RNNConfig,  # Added
-        TransformerConfig,  # Added
-        ObsNormConfig,  # Added
-        RewardConfig,  # Added
-        DEVICE,  # Import directly
-        RANDOM_SEED,  # Import directly
-        TOTAL_TRAINING_STEPS,  # Import directly
-        BASE_CHECKPOINT_DIR,  # Import directly
-        BASE_LOG_DIR,  # Import directly
-        set_device,  # Import function
-        get_run_id,  # Import function
-        set_run_id,  # Import function
-        get_run_checkpoint_dir,  # Import function
-        get_run_log_dir,  # Import function
-        get_console_log_dir,  # Import function
-        print_config_info_and_validate,  # Import function
-        get_config_dict,  # Import function
+        TrainConfig,
+        TensorBoardConfig,
+        DemoConfig,
+        RNNConfig,
+        TransformerConfig,
+        # Removed ObsNormConfig
+        # Removed RewardConfig
+        DEVICE,
+        RANDOM_SEED,
+        # Removed TOTAL_TRAINING_STEPS
+        BASE_CHECKPOINT_DIR,
+        BASE_LOG_DIR,
+        set_device,
+        get_run_id,
+        set_run_id,
+        get_run_checkpoint_dir,
+        get_run_log_dir,
+        get_console_log_dir,
+        print_config_info_and_validate,
+        get_config_dict,
     )
-    from utils.helpers import (
-        get_device as get_torch_device,
-    )  # Use helper for device detection
-    from utils.helpers import set_random_seeds  # Use helper for seeds
-
-    from logger import TeeLogger  # Import TeeLogger from logger.py
-    from utils.init_checks import run_pre_checks  # Use helper for pre-checks
-    from utils.types import AgentStateDict  # Import type if needed
+    from utils.helpers import get_device as get_torch_device, set_random_seeds
+    from logger import TeeLogger
+    from utils.init_checks import run_pre_checks
+    from utils.types import AgentStateDict  # Keep for potential NN state dict type
 
 except ImportError as e:
     print(f"Error importing configuration classes or utils: {e}")
-    print(
-        "Please ensure 'config/__init__.py' is set up correctly and imports necessary classes from config.core and config.general."
-    )
-    traceback.print_exc()  # Print detailed traceback
+    traceback.print_exc()
     sys.exit(1)
 except Exception as e:
     print(f"An unexpected error occurred during config/util import: {e}")
-    traceback.print_exc()  # Print detailed traceback
+    traceback.print_exc()
     sys.exit(1)
 
-# --- Component Imports (Assuming these paths are correct relative to main_pygame.py) ---
-# Note: The original main_pygame.py had different paths (e.g., game.*, rl_components.*)
-# compared to the app_*.py files (e.g., environment.*, agent.*).
-# Using the paths from app_*.py as they seem more consistent with the provided codebase.
+# Component Imports (Updated)
 try:
     from environment.game_state import GameState
-    from ui.renderer import UIRenderer  # Assuming this is the main renderer now
-    from agent.ppo_agent import PPOAgent
-    from training.rollout_storage import RolloutStorage  # Assuming this is the buffer
-    from training.rollout_collector import RolloutCollector
-    from workers import (
-        EnvironmentRunner,
-        TrainingWorker,
-    )  # Assuming these are the workers
+    from ui.renderer import UIRenderer
 
-    # Corrected stats imports: Import from the package level
+    # Removed PPOAgent import
+    # Removed RolloutStorage, RolloutCollector imports
+    # Removed worker imports (EnvironmentRunner, TrainingWorker)
+
+    # Keep stats imports
     from stats import (
         StatsRecorderBase,
         SimpleStatsRecorder,
         TensorBoardStatsRecorder,
         StatsAggregator,
     )
+
+    # Keep CheckpointManager import (will manage NN weights now)
     from training.checkpoint_manager import (
         CheckpointManager,
         find_latest_run_and_checkpoint,
     )
-    from app_state import AppState  # Use the AppState enum
-    from app_init import AppInitializer  # Use the AppInitializer
-    from app_logic import AppLogic  # Use the AppLogic
-    from app_workers import AppWorkerManager  # Use the AppWorkerManager
+    from app_state import AppState
+    from app_init import AppInitializer
+    from app_logic import AppLogic
+    from app_workers import AppWorkerManager  # Keep manager structure
     from app_setup import (
         initialize_pygame,
         initialize_directories,
         load_and_validate_configs,
-    )  # Use app_setup helpers
-    from app_ui_utils import AppUIUtils  # Use UI utils
-    from ui.input_handler import InputHandler  # Use the InputHandler
-    import queue  # For experience queue
+    )
+    from app_ui_utils import AppUIUtils
+    from ui.input_handler import InputHandler
+    import queue  # Keep queue if needed for future workers
 
 except ImportError as e:
     print(f"Error importing application components: {e}")
-    print(
-        "Please ensure component paths (environment, agent, ui, training, workers, stats, app_*) are correct."
-    )
     traceback.print_exc()
     sys.exit(1)
 
-
-# Setup basic logging
+# Logging Setup (Keep)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
@@ -1306,100 +1224,96 @@ logger = logging.getLogger(__name__)
 
 
 class MainApp:
-    """Main application class orchestrating Pygame UI, RL components, and threads."""
+    """Main application class orchestrating Pygame UI, game logic, and potentially AlphaZero components."""
 
     def __init__(self, checkpoint_to_load: Optional[str] = None):
-        # --- Configuration ---
-        # Instantiate config classes directly
+        # --- Configuration (Updated) ---
         self.vis_config = VisConfig()
         self.env_config = EnvConfig()
-        self.ppo_config = PPOConfig()
+        # Removed self.ppo_config
         self.rnn_config = RNNConfig()
-        self.train_config_instance = TrainConfig()  # Store instance
+        self.train_config_instance = TrainConfig()
         self.model_config = ModelConfig()
         self.stats_config = StatsConfig()
         self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
-        self.reward_config = RewardConfig()
-        self.obs_norm_config = ObsNormConfig()
+        # Removed self.reward_config
+        # Removed self.obs_norm_config
         self.transformer_config = TransformerConfig()
-        self.config_dict = get_config_dict()  # Get combined dict for logging
+        self.config_dict = get_config_dict()
 
-        # --- Core Components ---
+        # --- Core Components (Keep) ---
         self.screen: Optional[pygame.Surface] = None
         self.clock: Optional[pygame.time.Clock] = None
         self.renderer: Optional[UIRenderer] = None
         self.input_handler: Optional[InputHandler] = None
 
-        # --- State ---
+        # --- State (Updated) ---
         self.app_state: AppState = AppState.INITIALIZING
-        self.is_process_running: bool = False  # Training/collection active
+        # Removed self.is_process_running
         self.status: str = "Initializing..."
-        self.running: bool = True  # Main loop flag
-        self.update_progress_details: Dict[str, Any] = {}  # Added attribute
+        self.running: bool = True
+        self.update_progress_details: Dict[str, Any] = (
+            {}
+        )  # Keep for potential NN training progress
 
-        # --- Threading & Communication ---
-        self.stop_event = threading.Event()
-        self.pause_event = threading.Event()
-        self.pause_event.set()  # Start paused
-        self.experience_queue = queue.Queue(maxsize=10)  # Experience buffer queue
+        # --- Threading & Communication (Updated) ---
+        self.stop_event = threading.Event()  # Keep for main loop exit signal
+        # Removed self.pause_event (was tied to PPO workers)
+        # Removed self.experience_queue
 
-        # --- RL Components (Managed by Initializer) ---
-        # Placeholders, will be populated by AppInitializer
-        self.envs: List[GameState] = []
-        self.agent: Optional[PPOAgent] = None
+        # --- RL Components (Managed by Initializer - Updated) ---
+        # Placeholders for NN agent, stats, checkpoint manager
+        self.envs: List[GameState] = []  # Only for visualization now
+        self.agent: Optional[Any] = None  # Placeholder for AlphaZero NN Agent
         self.stats_recorder: Optional[StatsRecorderBase] = None
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.rollout_collector: Optional[RolloutCollector] = None
-        self.demo_env: Optional[GameState] = None  # For demo/debug mode
+        # Removed self.rollout_collector
+        self.demo_env: Optional[GameState] = None
 
-        # --- Helper Classes ---
+        # --- Helper Classes (Keep) ---
         self.device = get_torch_device()
-        set_device(self.device)  # Set global device variable
-        self.checkpoint_to_load = checkpoint_to_load  # Store path from args
+        set_device(self.device)
+        self.checkpoint_to_load = checkpoint_to_load
         self.initializer = AppInitializer(self)
         self.logic = AppLogic(self)
-        self.worker_manager = AppWorkerManager(self)
+        self.worker_manager = AppWorkerManager(self)  # Manages future workers
         self.ui_utils = AppUIUtils(self)
 
-        # --- UI State ---
+        # --- UI State (Keep) ---
         self.cleanup_confirmation_active: bool = False
         self.cleanup_message: str = ""
         self.last_cleanup_message_time: float = 0.0
         self.total_gpu_memory_bytes: Optional[int] = None
 
-        # --- Resource Monitoring ---
+        # --- Resource Monitoring (Keep) ---
         self.last_resource_update_time: float = 0.0
-        self.resource_update_interval: float = 1.0  # Update every second
+        self.resource_update_interval: float = 1.0
 
     def initialize(self):
         """Initializes Pygame, directories, configs, and core components."""
         logger.info("--- Application Initialization ---")
         self.screen, self.clock = initialize_pygame(self.vis_config)
-        initialize_directories()  # Creates checkpoint/log dirs for current run
-        # Configs are already instantiated in __init__
-        # print_config_info_and_validate() # Validate the instantiated configs
+        initialize_directories()
+        # Configs are instantiated in __init__
 
         set_random_seeds(RANDOM_SEED)
-        run_pre_checks()  # Basic GameState checks
+        run_pre_checks()
 
-        # Initialize core RL and UI components via AppInitializer
+        # Initialize core components via AppInitializer (now initializes NN, Stats, etc.)
         self.app_state = AppState.INITIALIZING
         self.initializer.initialize_all()
 
-        # Set input handler reference in renderer after init
+        # Set input handler reference in renderer (Keep)
         if self.renderer and self.initializer.app.input_handler:
             self.renderer.set_input_handler(self.initializer.app.input_handler)
 
-        # Start worker threads (will wait for pause_event to clear)
+        # Start worker threads (Placeholder - will start MCTS/NN workers later)
         self.worker_manager.start_worker_threads()
 
-        # Check initial completion status after loading checkpoint
+        # Check initial completion status (Adapt later if needed)
         self.logic.check_initial_completion_status()
-        if not self.status.startswith(
-            "Training Complete"
-        ):  # Avoid overwriting completion status
-            self.status = "Ready"
+        self.status = "Ready"  # Default status after init
         self.app_state = AppState.MAIN_MENU
 
         logger.info("--- Initialization Complete ---")
@@ -1416,6 +1330,7 @@ class MainApp:
         ):
             return
 
+        # Check if stats recorder and aggregator exist
         if not self.initializer.stats_recorder or not hasattr(
             self.initializer.stats_recorder, "aggregator"
         ):
@@ -1424,9 +1339,7 @@ class MainApp:
         aggregator = self.initializer.stats_recorder.aggregator
         storage = aggregator.storage
 
-        cpu_percent = 0.0
-        mem_percent = 0.0
-        gpu_mem_percent = 0.0
+        cpu_percent, mem_percent, gpu_mem_percent = 0.0, 0.0, 0.0
 
         if psutil:
             try:
@@ -1437,22 +1350,24 @@ class MainApp:
 
         if self.device.type == "cuda" and self.total_gpu_memory_bytes:
             try:
-                # Use torch here, which is now imported at the top
                 allocated = torch.cuda.memory_allocated(self.device)
-                # reserved = torch.cuda.memory_reserved(self.device) # Alternative
                 gpu_mem_percent = (allocated / self.total_gpu_memory_bytes) * 100.0
             except Exception as e:
                 logger.warning(f"Error getting GPU memory usage: {e}")
-                gpu_mem_percent = 0.0  # Reset if error occurs
+                gpu_mem_percent = 0.0
 
-        # Update aggregator storage directly (requires lock)
+        # Update aggregator storage directly (thread-safe via lock)
         with aggregator._lock:
             storage.current_cpu_usage = cpu_percent
             storage.current_memory_usage = mem_percent
             storage.current_gpu_memory_usage_percent = gpu_mem_percent
-            storage.cpu_usage.append(cpu_percent)
-            storage.memory_usage.append(mem_percent)
-            storage.gpu_memory_usage_percent.append(gpu_mem_percent)
+            # Append to deques if they exist (check needed after refactor)
+            if hasattr(storage, "cpu_usage"):
+                storage.cpu_usage.append(cpu_percent)
+            if hasattr(storage, "memory_usage"):
+                storage.memory_usage.append(mem_percent)
+            if hasattr(storage, "gpu_memory_usage_percent"):
+                storage.gpu_memory_usage_percent.append(gpu_mem_percent)
 
         self.last_resource_update_time = current_time
 
@@ -1460,17 +1375,17 @@ class MainApp:
         """The main application loop."""
         logger.info("Starting main application loop...")
         while self.running:
-            dt = self.clock.tick(self.vis_config.FPS) / 1000.0  # Delta time in seconds
+            dt = self.clock.tick(self.vis_config.FPS) / 1000.0
 
-            # Handle Input
+            # Handle Input (Keep)
             if self.input_handler:
                 self.running = self.input_handler.handle_input(
                     self.app_state.value, self.cleanup_confirmation_active
                 )
-                if not self.running:  # Exit requested via input handler
+                if not self.running:
                     self.stop_event.set()
                     break
-            else:  # Fallback exit if input handler fails
+            else:  # Fallback exit
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         self.running = False
@@ -1479,54 +1394,47 @@ class MainApp:
                 if not self.running:
                     break
 
-            # --- Fetch Update Progress Details ---
-            # Fetch details *before* updating status logic
-            if (
-                self.worker_manager.training_worker_thread
-                and self.worker_manager.training_worker_thread.is_alive()
-            ):
-                try:
-                    self.update_progress_details = (
-                        self.worker_manager.training_worker_thread.get_update_progress_details()
-                    )
-                except Exception as e:
-                    logger.warning(f"Could not get update progress details: {e}")
-                    self.update_progress_details = {}  # Reset on error
-            else:
-                self.update_progress_details = {}  # Clear if worker not running
+            # --- Fetch Update Progress Details (Keep for potential NN training) ---
+            # This needs to be adapted to get progress from the NN training worker if implemented
+            self.update_progress_details = {}  # Placeholder
+            # Example:
+            # if self.worker_manager.nn_training_worker_thread and self.worker_manager.nn_training_worker_thread.is_alive():
+            #     try:
+            #         self.update_progress_details = self.worker_manager.nn_training_worker_thread.get_update_progress_details()
+            #     except Exception as e:
+            #         logger.warning(f"Could not get update progress details: {e}")
+            #         self.update_progress_details = {}
+            # else:
+            #     self.update_progress_details = {}
             # --- End Fetch Update Progress Details ---
 
-            # Update Logic & State (uses self.update_progress_details)
+            # Update Logic & State (Simplified)
             self.logic.update_status_and_check_completion()
 
-            # --- Update Resource Stats ---
+            # Update Resource Stats (Keep)
             self._update_resource_stats()
-            # --- End Resource Stats ---
 
-            # --- Update Demo Env Timers ---
-            # Ensure demo env timers decrement even when paused or in demo/debug mode
+            # Update Demo Env Timers (Keep)
             if self.initializer.demo_env:
                 try:
-                    self.initializer.demo_env._update_timers()
+                    # Timers are updated internally by demo_env.step or manually if needed
+                    # self.initializer.demo_env._update_timers() # Call if step isn't called automatically
+                    pass  # Assume timers update within demo logic or step
                 except Exception as timer_err:
-                    # Log error but don't crash the main loop
                     logger.error(
                         f"Error updating demo env timers: {timer_err}", exc_info=False
                     )
-            # --- End Timer Update ---
 
-            # Render UI
+            # Render UI (Adapted)
             if self.renderer:
                 plot_data = {}
                 stats_summary = {}
                 tb_log_dir = None
-                # update_details = {} # Use self.update_progress_details now
                 agent_params = 0
-                worker_counts = {"env_runners": 0, "trainers": 0}
+                # Removed worker_counts
 
                 if self.initializer.stats_recorder:
                     plot_data = self.initializer.stats_recorder.get_plot_data()
-                    # --- Get latest global step directly from aggregator ---
                     current_step = 0
                     if hasattr(self.initializer.stats_recorder, "aggregator"):
                         current_step = getattr(
@@ -1534,38 +1442,25 @@ class MainApp:
                             "current_global_step",
                             0,
                         )
-                    # --- End get latest global step ---
                     stats_summary = self.initializer.stats_recorder.get_summary(
-                        current_step  # Pass the latest step to get_summary
+                        current_step
                     )
                     if isinstance(
                         self.initializer.stats_recorder, TensorBoardStatsRecorder
                     ):
                         tb_log_dir = self.initializer.stats_recorder.log_dir
 
-                # --- Get Worker Counts ---
-                if (
-                    self.worker_manager.env_runner_thread
-                    and self.worker_manager.env_runner_thread.is_alive()
-                ):
-                    worker_counts["env_runners"] = 1
-                if (
-                    self.worker_manager.training_worker_thread
-                    and self.worker_manager.training_worker_thread.is_alive()
-                ):
-                    worker_counts["trainers"] = 1
-                # --- End Worker Counts ---
-
                 if self.initializer.agent:
                     agent_params = self.initializer.agent_param_count
 
+                # Adapt render_all call
                 self.renderer.render_all(
                     app_state=self.app_state.value,
-                    is_process_running=self.is_process_running,
+                    is_process_running=False,  # No PPO process running
                     status=self.status,
-                    stats_summary=stats_summary,  # Pass the summary with latest step
-                    envs=self.initializer.envs,  # Use initialized envs
-                    num_envs=self.env_config.NUM_ENVS,
+                    stats_summary=stats_summary,
+                    envs=self.initializer.envs,  # Pass empty list or visualized envs
+                    num_envs=self.env_config.NUM_ENVS,  # Pass total configured (for layout)
                     env_config=self.env_config,
                     cleanup_confirmation_active=self.cleanup_confirmation_active,
                     cleanup_message=self.cleanup_message,
@@ -1573,12 +1468,11 @@ class MainApp:
                     tensorboard_log_dir=tb_log_dir,
                     plot_data=plot_data,
                     demo_env=self.initializer.demo_env,
-                    update_progress_details=self.update_progress_details,  # Pass stored details
+                    update_progress_details=self.update_progress_details,  # Pass NN progress later
                     agent_param_count=agent_params,
-                    worker_counts=worker_counts,  # Pass worker counts
+                    worker_counts={},  # Removed worker counts
                 )
-            else:
-                # Basic render if main renderer failed
+            else:  # Fallback render
                 self.screen.fill((20, 0, 0))
                 font = pygame.font.Font(None, 30)
                 text_surf = font.render("Renderer Error", True, (255, 50, 50))
@@ -1588,50 +1482,51 @@ class MainApp:
                 pygame.display.flip()
 
         logger.info("Main application loop exited.")
-        # Shutdown is now called explicitly after the loop or in exception handlers
 
     def shutdown(self):
         """Cleans up resources and exits."""
         logger.info("Initiating shutdown sequence...")
 
-        # Signal threads to stop
-        logger.info("Setting stop event for worker threads.")
+        # Signal threads to stop (Keep stop_event)
+        logger.info("Setting stop event for worker threads (if any).")
         self.stop_event.set()
-        self.pause_event.clear()  # Ensure threads aren't stuck paused
+        # Removed pause_event clearing
 
-        # Stop and join worker threads
-        logger.info("Stopping worker threads...")
+        # Stop and join worker threads (Placeholder)
+        logger.info("Stopping worker threads (if any)...")
         self.worker_manager.stop_worker_threads()
         logger.info("Worker threads stopped.")
 
-        # Save final checkpoint (if applicable)
+        # Save final checkpoint (NN weights, stats)
         logger.info("Attempting final checkpoint save...")
         self.logic.save_final_checkpoint()
         logger.info("Final checkpoint save attempt finished.")
 
-        # Close stats recorder (handles TensorBoard writer)
+        # Close stats recorder (Keep)
         logger.info("Closing stats recorder (before pygame.quit)...")
         self.initializer.close_stats_recorder()
         logger.info("Stats recorder closed.")
 
-        # Quit Pygame
+        # Quit Pygame (Keep)
         logger.info("Quitting Pygame...")
         pygame.quit()
         logger.info("Pygame quit.")
         logger.info("Shutdown complete.")
-        # sys.exit(0) # Exit is handled in the main block's finally clause
 
 
-# --- Global variable for TeeLogger instance ---
+# Global variable for TeeLogger instance (Keep)
 tee_logger_instance: Optional[TeeLogger] = None
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TriCrack PPO Trainer")
+    parser = argparse.ArgumentParser(
+        description="AlphaTri Trainer"
+    )  # Updated description
     parser.add_argument(
         "--load-checkpoint",
         type=str,
         default=None,
-        help="Path to a specific checkpoint file to load (e.g., checkpoints/run_xyz/step_1000_agent_state.pth). Overrides auto-resume.",
+        # Updated help text
+        help="Path to a specific checkpoint file to load (e.g., NN weights). Overrides auto-resume.",
     )
     parser.add_argument(
         "--log-level",
@@ -1642,46 +1537,39 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # --- Setup Logging ---
-    # Determine run ID early (needed for log file path)
-    # CheckpointManager will handle resuming the correct ID later if loading
+    # Setup Logging (Keep, checkpoint finding logic might adapt)
     if args.load_checkpoint:
-        # Try to extract run_id from path, otherwise generate new one
         try:
             run_id_from_path = os.path.basename(os.path.dirname(args.load_checkpoint))
             if run_id_from_path.startswith("run_"):
                 set_run_id(run_id_from_path)
                 print(f"Using Run ID from checkpoint path: {get_run_id()}")
             else:
-                get_run_id()  # Generate new one
+                get_run_id()
         except Exception:
-            get_run_id()  # Generate new one if path parsing fails
+            get_run_id()
     else:
-        # Search for latest run to potentially resume ID, otherwise generate new
         latest_run_id, _ = find_latest_run_and_checkpoint(BASE_CHECKPOINT_DIR)
         if latest_run_id:
             set_run_id(latest_run_id)
             print(f"Resuming Run ID: {get_run_id()}")
         else:
-            get_run_id()  # Generate new one
+            get_run_id()
 
-    # Setup TeeLogger
+    # Setup TeeLogger (Keep)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     try:
-        log_file_dir = (
-            get_console_log_dir()
-        )  # Use function from config.general via __init__
+        log_file_dir = get_console_log_dir()
         os.makedirs(log_file_dir, exist_ok=True)
         log_file_path = os.path.join(log_file_dir, "console_output.log")
-        tee_logger_instance = TeeLogger(log_file_path, sys.stdout)  # Redirect stdout
+        tee_logger_instance = TeeLogger(log_file_path, sys.stdout)
         sys.stdout = tee_logger_instance
-        sys.stderr = tee_logger_instance  # Redirect stderr as well
+        sys.stderr = tee_logger_instance
     except Exception as e:
         logger.error(f"Error setting up TeeLogger: {e}", exc_info=True)
-        # Continue without TeeLogger if setup fails
 
-    # Set logging level
+    # Set logging level (Keep)
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
     logger.info(f"Logging level set to: {args.log_level.upper()}")
@@ -1689,51 +1577,44 @@ if __name__ == "__main__":
     if args.load_checkpoint:
         logger.info(f"Attempting to load checkpoint: {args.load_checkpoint}")
 
-    # --- Create and Run Application ---
+    # Create and Run Application (Keep structure)
     app = None
     exit_code = 0
     try:
         app = MainApp(checkpoint_to_load=args.load_checkpoint)
         app.initialize()
-        app.run_main_loop()  # This loop now exits cleanly via self.running = False
-        app.shutdown()  # Call shutdown explicitly after loop finishes normally
+        app.run_main_loop()
+        app.shutdown()
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received. Shutting down.")
         if app:
             app.shutdown()
         else:
-            pygame.quit()  # Ensure pygame quits even if app init failed
-        exit_code = 130  # Standard exit code for Ctrl+C
+            pygame.quit()
+        exit_code = 130
     except Exception as e:
         logger.critical(f"An unhandled exception occurred in main: {e}", exc_info=True)
         if app:
             app.shutdown()
         else:
-            pygame.quit()  # Ensure pygame quits even if app init failed
+            pygame.quit()
         exit_code = 1
     finally:
-        # Ensure logs are flushed and stdout/stderr restored *before* exiting
+        # Restore stdout/stderr (Keep)
         print("[Main Finally] Restoring stdout/stderr and closing logger...")
         if tee_logger_instance:
             try:
-                # Flush before closing and restoring
                 if isinstance(sys.stdout, TeeLogger):
                     sys.stdout.flush()
                 if isinstance(sys.stderr, TeeLogger):
                     sys.stderr.flush()
-
-                # Restore original streams
                 sys.stdout = original_stdout
                 sys.stderr = original_stderr
-
-                # Now close the file handle
                 tee_logger_instance.close()
                 print("[Main Finally] TeeLogger closed and streams restored.")
             except Exception as log_close_err:
-                # Use original stdout/stderr for this final error message
                 original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
                 traceback.print_exc(file=original_stderr)
-
         print(f"[Main Finally] Exiting with code {exit_code}.")
         sys.exit(exit_code)
 
@@ -1796,14 +1677,14 @@ from typing import TYPE_CHECKING, List, Optional, Dict, Any
 from config import (
     VisConfig,
     EnvConfig,
-    PPOConfig,
+    # Removed PPOConfig
     RNNConfig,
     ModelConfig,
     StatsConfig,
-    RewardConfig,
+    # Removed RewardConfig
     TensorBoardConfig,
     DemoConfig,
-    ObsNormConfig,
+    # Removed ObsNormConfig
     TransformerConfig,
     RANDOM_SEED,
     BASE_CHECKPOINT_DIR,
@@ -1811,21 +1692,22 @@ from config import (
     DEVICE,
 )
 from environment.game_state import GameState
-from agent.ppo_agent import PPOAgent
+
+# Removed PPOAgent import
+# from agent.ppo_agent import PPOAgent
 from stats.stats_recorder import StatsRecorderBase
 from ui.renderer import UIRenderer
 from ui.input_handler import InputHandler
-from init.rl_components_ppo import (
-    initialize_envs,
-    initialize_agent,
-    initialize_stats_recorder,
-)
+
+# Removed init.rl_components_ppo import
 from training.checkpoint_manager import CheckpointManager
-from training.rollout_collector import RolloutCollector
+
+# Removed RolloutCollector import
 from app_state import AppState
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
+    from agent.base_agent import BaseAgent  # Hypothetical base class for NN agent
 
 
 class AppInitializer:
@@ -1833,35 +1715,33 @@ class AppInitializer:
 
     def __init__(self, app: "MainApp"):
         self.app = app
-        # Config instances (can be accessed via app as well)
+        # Config instances
         self.vis_config = app.vis_config
         self.env_config = app.env_config
-        self.ppo_config = app.ppo_config
+        # Removed self.ppo_config
         self.rnn_config = RNNConfig()
-        # --- Access the stored instance from MainApp ---
         self.train_config = app.train_config_instance
-        # --- End Access ---
         self.model_config = ModelConfig()
         self.stats_config = StatsConfig()
         self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
-        self.reward_config = RewardConfig()
-        self.obs_norm_config = ObsNormConfig()
+        # Removed self.reward_config
+        # Removed self.obs_norm_config
         self.transformer_config = TransformerConfig()
 
         # Components to be initialized
-        self.envs: List[GameState] = []
-        self.agent: Optional[PPOAgent] = None
+        self.envs: List[GameState] = []  # Keep for potential multi-env display
+        self.agent: Optional["BaseAgent"] = None  # Agent is now the NN
         self.stats_recorder: Optional[StatsRecorderBase] = None
         self.demo_env: Optional[GameState] = None
         self.agent_param_count: int = 0
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.rollout_collector: Optional[RolloutCollector] = None
+        # Removed self.rollout_collector
 
     def initialize_all(self, is_reinit: bool = False):
         """Initializes all core components."""
         try:
-            # --- GPU Memory Info ---
+            # GPU Memory Info (Keep)
             if self.app.device.type == "cuda":
                 try:
                     self.app.total_gpu_memory_bytes = torch.cuda.get_device_properties(
@@ -1873,12 +1753,13 @@ class AppInitializer:
                 except Exception as e:
                     print(f"Warning: Could not get total GPU memory: {e}")
 
-            # --- Renderer and Initial Render ---
+            # Renderer and Initial Render (Keep)
             if not is_reinit:
                 self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
+                # Adapt render_all call later if needed
                 self.app.renderer.render_all(
                     app_state=self.app.app_state.value,
-                    is_process_running=self.app.is_process_running,
+                    is_process_running=False,  # No PPO process running
                     status=self.app.status,
                     stats_summary={},
                     envs=[],
@@ -1890,28 +1771,34 @@ class AppInitializer:
                     tensorboard_log_dir=None,
                     plot_data={},
                     demo_env=None,
-                    update_progress_details={},
+                    update_progress_details={},  # Keep for potential NN training progress
                     agent_param_count=0,
+                    worker_counts={},  # Remove worker counts for now
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
 
-            # --- RL Components ---
+            # Initialize "RL" components (NN, Stats, Checkpoint Manager)
             self.initialize_rl_components(
                 is_reinit=is_reinit, checkpoint_to_load=self.app.checkpoint_to_load
             )
 
-            # --- Demo Env and Input Handler ---
+            # Demo Env and Input Handler (Keep)
             if not is_reinit:
                 self.initialize_demo_env()
                 self.initialize_input_handler()
 
-            if self.agent:
-                self.agent_param_count = sum(
-                    p.numel()
-                    for p in self.agent.network.parameters()
-                    if p.requires_grad
-                )
+            # Calculate NN parameter count if agent exists
+            if self.agent and hasattr(self.agent, "network"):
+                try:
+                    self.agent_param_count = sum(
+                        p.numel()
+                        for p in self.agent.network.parameters()
+                        if p.requires_grad
+                    )
+                except Exception as e:
+                    print(f"Warning: Could not calculate agent parameters: {e}")
+                    self.agent_param_count = 0
 
         except Exception as init_err:
             print(f"FATAL ERROR during component initialization: {init_err}")
@@ -1931,75 +1818,98 @@ class AppInitializer:
     def initialize_rl_components(
         self, is_reinit: bool = False, checkpoint_to_load: Optional[str] = None
     ):
-        """Initializes RL components: Envs, Agent, Stats, Collector, CheckpointManager."""
-        print(f"Initializing RL components (PPO)... Re-init: {is_reinit}")
+        """Initializes NN Agent, Stats Recorder, Checkpoint Manager."""
+        print(f"Initializing AlphaZero components... Re-init: {is_reinit}")
         start_time = time.time()
         try:
-            self.envs = initialize_envs(self.env_config.NUM_ENVS, self.env_config)
-            self.agent = initialize_agent(
-                model_config=self.model_config,
-                ppo_config=self.ppo_config,
-                rnn_config=self.rnn_config,
-                env_config=self.env_config,
-                transformer_config=self.transformer_config,
-                device=self.app.device,
-            )
-            self.stats_recorder = initialize_stats_recorder(
-                stats_config=self.stats_config,
-                tb_config=self.tensorboard_config,
-                config_dict=self.app.config_dict,
-                agent=self.agent,
-                env_config=self.env_config,
-                rnn_config=self.rnn_config,
-                transformer_config=self.transformer_config,
-                is_reinit=is_reinit,
-            )
-            if self.stats_recorder is None:
-                raise RuntimeError("Stats Recorder init failed.")
+            # Initialize Envs (only needed for visualization now)
+            # self.envs = initialize_envs(self.env_config.NUM_ENVS, self.env_config) # Removed multi-env init
+            self.envs = []  # No parallel envs needed for core logic now
 
+            # --- Initialize Agent (Neural Network) ---
+            # Replace with AlphaZero NN initialization later
+            # For now, set agent to None or a placeholder
+            self.agent = None  # Placeholder - Initialize AlphaZero NN here later
+            print("Agent (NN) initialization SKIPPED (placeholder).")
+            # Example placeholder for future NN init:
+            # self.agent = initialize_alphazero_agent(
+            #     model_config=self.model_config,
+            #     rnn_config=self.rnn_config,
+            #     env_config=self.env_config,
+            #     transformer_config=self.transformer_config,
+            #     device=self.app.device,
+            # )
+            # --- End Agent Init ---
+
+            # --- Initialize Stats Recorder ---
+            # Adapt initialize_stats_recorder if needed (e.g., remove PPO hparams)
+            # Need to create a simplified version or adapt existing one
+            # For now, assume it's adapted or create a placeholder
+            try:
+                # Assuming init.stats_init exists and is adapted
+                from init.stats_init import initialize_stats_recorder
+
+                self.stats_recorder = initialize_stats_recorder(
+                    stats_config=self.stats_config,
+                    tb_config=self.tensorboard_config,
+                    config_dict=self.app.config_dict,
+                    # Pass agent=None if NN not ready, or pass the NN agent
+                    agent=self.agent,
+                    env_config=self.env_config,
+                    rnn_config=self.rnn_config,  # Keep for potential NN config logging
+                    transformer_config=self.transformer_config,  # Keep for potential NN config logging
+                    is_reinit=is_reinit,
+                )
+            except ImportError:
+                print(
+                    "Warning: init.stats_init.initialize_stats_recorder not found. Skipping stats recorder init."
+                )
+                self.stats_recorder = None  # Fallback
+            except Exception as stats_init_err:
+                print(f"Error initializing stats recorder: {stats_init_err}")
+                traceback.print_exc()
+                self.stats_recorder = None
+
+            if self.stats_recorder is None:
+                print("Warning: Stats Recorder initialization failed or skipped.")
+                # Decide if this is critical - maybe allow running without stats?
+                # raise RuntimeError("Stats Recorder init failed.")
+            # --- End Stats Recorder Init ---
+
+            # --- Initialize Checkpoint Manager ---
+            # Checkpoint manager now handles NN agent state and stats aggregator state
             self.checkpoint_manager = CheckpointManager(
+                # Pass the NN agent (or None if not ready)
                 agent=self.agent,
-                stats_aggregator=self.stats_recorder.aggregator,
+                # Pass stats aggregator if it exists
+                stats_aggregator=getattr(self.stats_recorder, "aggregator", None),
                 base_checkpoint_dir=BASE_CHECKPOINT_DIR,
                 run_checkpoint_dir=get_run_checkpoint_dir(),
                 load_checkpoint_path_config=checkpoint_to_load,
                 device=self.app.device,
-                obs_rms_dict=None,  # Will be set after collector init
+                # obs_rms_dict=None, # Removed Obs RMS
             )
+            # --- End Checkpoint Manager Init ---
 
-            self.rollout_collector = RolloutCollector(
-                envs=self.envs,
-                agent=self.agent,
-                stats_recorder=self.stats_recorder,
-                env_config=self.env_config,
-                ppo_config=self.ppo_config,
-                rnn_config=self.rnn_config,
-                reward_config=self.reward_config,
-                tb_config=self.tensorboard_config,
-                obs_norm_config=self.obs_norm_config,
-                device=self.app.device,
-            )
-
-            # Pass the initialized RMS dict from collector to checkpoint manager
-            self.checkpoint_manager.obs_rms_dict = (
-                self.rollout_collector.get_obs_rms_dict()
-            )
-
+            # --- Load Checkpoint ---
             if self.checkpoint_manager.get_checkpoint_path_to_load():
-                self.checkpoint_manager.load_checkpoint()
+                self.checkpoint_manager.load_checkpoint()  # Loads NN state and stats state
+                # Get initial step/episode count from loaded stats
                 loaded_global_step, initial_episode_count = (
                     self.checkpoint_manager.get_initial_state()
                 )
-                # Sync collector's episode count (global step is managed by aggregator)
-                self.rollout_collector.state.episode_count = initial_episode_count
-                # Aggregator state is loaded within checkpoint_manager.load_checkpoint()
+                # Sync episode count if needed (e.g., if MCTS tracks episodes)
+                # self.mcts_manager.state.episode_count = initial_episode_count # Example
+            # --- End Load Checkpoint ---
 
-            print(f"RL components initialized in {time.time() - start_time:.2f}s")
+            print(
+                f"AlphaZero components initialized in {time.time() - start_time:.2f}s"
+            )
 
         except Exception as e:
-            print(f"Error during RL component initialization: {e}")
+            print(f"Error during AlphaZero component initialization: {e}")
             traceback.print_exc()
-            raise e
+            raise e  # Re-raise to be caught by initialize_all
 
     def initialize_demo_env(self):
         """Initializes the separate environment for demo/debug mode."""
@@ -2022,7 +1932,7 @@ class AppInitializer:
         self.app.input_handler = InputHandler(
             screen=self.app.screen,
             renderer=self.app.renderer,
-            toggle_training_run_cb=self.app.logic.toggle_training_run,
+            # Removed toggle_training_run_cb
             request_cleanup_cb=self.app.logic.request_cleanup,
             cancel_cleanup_cb=self.app.logic.cancel_cleanup,
             confirm_cleanup_cb=self.app.logic.confirm_cleanup,
@@ -2037,7 +1947,6 @@ class AppInitializer:
         )
         if self.app.renderer and self.app.renderer.left_panel:
             self.app.renderer.left_panel.input_handler = self.app.input_handler
-            # Also set the reference in the button renderer if needed
             if hasattr(self.app.renderer.left_panel, "button_status_renderer"):
                 self.app.renderer.left_panel.button_status_renderer.input_handler_ref = (
                     self.app.input_handler
@@ -2052,7 +1961,6 @@ class AppInitializer:
             print("[AppInitializer] Stats recorder exists, attempting close...")
             try:
                 if hasattr(self.stats_recorder, "close"):
-                    # Pass the is_cleanup flag down
                     self.stats_recorder.close(is_cleanup=is_cleanup)
                     print("[AppInitializer] stats_recorder.close() executed.")
                 else:
@@ -2066,7 +1974,6 @@ class AppInitializer:
 
 
 File: app_logic.py
-# File: app_logic.py
 # File: app_logic.py
 import pygame
 import time
@@ -2088,64 +1995,34 @@ class AppLogic:
         self.app = app
 
     def check_initial_completion_status(self):
-        """Checks if training was already complete upon loading."""
-        if (
-            self.app.initializer.checkpoint_manager
-            and self.app.initializer.checkpoint_manager.training_target_step > 0
-            and self.app.initializer.checkpoint_manager.global_step
-            >= self.app.initializer.checkpoint_manager.training_target_step
-        ):
-            self.app.status = "Training Complete"
-            print(
-                f"Training already completed ({self.app.initializer.checkpoint_manager.global_step:,}/{self.app.initializer.checkpoint_manager.training_target_step:,} steps). Ready."
-            )
-            # Don't automatically pause here, let the user decide
+        """Checks if training target (e.g., games played) was met upon loading."""
+        # This needs adaptation based on how AlphaZero training progress is tracked.
+        # For now, assume completion isn't automatically checked this way.
+        # Example: Check against games played or NN training steps in aggregator
+        # if (
+        #     self.app.initializer.stats_recorder
+        #     and hasattr(self.app.initializer.stats_recorder, "aggregator")
+        # ):
+        #     aggregator = self.app.initializer.stats_recorder.aggregator
+        #     target_games = getattr(aggregator.storage, "training_target_games", 0) # Example target
+        #     current_games = getattr(aggregator.storage, "total_episodes", 0)
+        #     if target_games > 0 and current_games >= target_games:
+        #         self.app.status = "Target Reached"
+        #         print(f"Target games already reached ({current_games:,}/{target_games:,}). Ready.")
+        pass  # Keep simple for now
 
     def update_status_and_check_completion(self):
-        """Updates the status text based on worker state and checks for training completion."""
-        if (
-            not self.app.initializer.stats_recorder
-            or not hasattr(self.app.initializer.stats_recorder, "aggregator")
-            or not self.app.initializer.checkpoint_manager
-        ):
-            return
+        """Updates the status text based on application state."""
+        # Removed PPO-specific status logic (Collecting, Updating)
+        # Removed completion check based on PPO steps
 
-        current_step = getattr(
-            self.app.initializer.stats_recorder.aggregator.storage,
-            "current_global_step",
-            0,  # Access via storage
-        )
-        target_step = self.app.initializer.checkpoint_manager.training_target_step
-
-        if target_step > 0 and current_step >= target_step:
-            if not self.app.status.startswith("Training Complete"):
-                print(
-                    f"\n--- Training Complete ({current_step:,}/{target_step:,} steps) ---"
-                )
-                self.app.status = "Training Complete"
-            elif self.app.is_process_running and self.app.status == "Training Complete":
-                self.app.status = "Training Complete (Running)"
-            return
-
-        # If not complete, update status based on running state
-        if self.app.is_process_running:
-            # Check if update progress details indicate an active update
-            is_updating = (
-                hasattr(self.app, "update_progress_details")
-                and self.app.update_progress_details.get("current_epoch", 0) > 0
-            )
-            if is_updating:
-                self.app.status = "Updating Agent"
-            elif self.app.experience_queue.qsize() > 0:  # Check queue as fallback
-                self.app.status = "Updating Agent"
-            else:
-                self.app.status = "Collecting Experience"
-        elif self.app.app_state == AppState.MAIN_MENU:
+        # Update status based on AppState
+        if self.app.app_state == AppState.MAIN_MENU:
             if self.app.cleanup_confirmation_active:
                 self.app.status = "Confirm Cleanup"
-            elif not self.app.status.startswith(
-                "Training Complete"
-            ):  # Avoid overwriting completion
+            else:
+                # Check if training is "complete" based on new criteria if needed
+                # For now, just set to Ready if not confirming cleanup
                 self.app.status = "Ready"
         elif self.app.app_state == AppState.PLAYING:
             self.app.status = "Playing Demo"
@@ -2153,70 +2030,23 @@ class AppLogic:
             self.app.status = "Debugging Grid"
         elif self.app.app_state == AppState.INITIALIZING:
             self.app.status = "Initializing..."
+        elif self.app.app_state == AppState.ERROR:
+            # Status should already be set by the error handler
+            pass
 
-    def toggle_training_run(self):
-        """Starts or stops the worker threads."""
-        print(
-            f"[AppLogic] toggle_training_run called. Current state: {self.app.app_state.value}, is_process_running: {self.app.is_process_running}"
-        )
-        if self.app.app_state != AppState.MAIN_MENU:
-            print(
-                f"[AppLogic] Cannot toggle run outside MainMenu (State: {self.app.app_state.value})."
-            )
-            return
-        if (
-            not self.app.worker_manager.env_runner_thread
-            or not self.app.worker_manager.training_worker_thread
-        ):
-            print("[AppLogic] Cannot toggle run: Workers not initialized.")
-            return
-
-        if not self.app.is_process_running:
-            print("[AppLogic] Attempting to START workers...")
-            print("[AppLogic] Setting is_process_running = True")
-            self.app.is_process_running = True
-            print(
-                f"[AppLogic] Clearing pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )
-            self.app.pause_event.clear()
-            print(
-                f"[AppLogic] Pause event cleared (New is_set: {self.app.pause_event.is_set()})."
-            )
-            # Update status based on completion
-            self.update_status_and_check_completion()  # This will set status correctly
-            print("[AppLogic] Workers should start running.")
-        else:
-            print("[AppLogic] Attempting to PAUSE workers...")
-            print("[AppLogic] Setting is_process_running = False")
-            self.app.is_process_running = False
-            print(
-                f"[AppLogic] Setting pause event (Current is_set: {self.app.pause_event.is_set()})..."
-            )
-            self.app.pause_event.set()
-            print(
-                f"[AppLogic] Pause event set (New is_set: {self.app.pause_event.is_set()})."
-            )
-            self.try_save_checkpoint()
-            self.check_initial_completion_status()  # Re-check completion status on pause
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
-            self.app.app_state = AppState.MAIN_MENU
-            print("[AppLogic] Workers should pause.")
+    # Removed toggle_training_run method
 
     def request_cleanup(self):
-        if self.app.is_process_running:
-            print("Cannot request cleanup while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.app_state != AppState.MAIN_MENU:
             print("Cannot request cleanup outside MainMenu.")
             return
         self.app.cleanup_confirmation_active = True
+        self.app.status = "Confirm Cleanup"  # Update status
         print("Cleanup requested. Confirm action.")
 
     def start_demo_mode(self):
-        if self.app.is_process_running:
-            print("Cannot start demo mode while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.initializer.demo_env is None:
             print("Cannot start demo mode: Demo environment failed to initialize.")
             return
@@ -2224,15 +2054,13 @@ class AppLogic:
             print("Cannot start demo mode outside MainMenu.")
             return
         print("Entering Demo Mode...")
-        self.try_save_checkpoint()
+        self.try_save_checkpoint()  # Save NN weights before switching mode?
         self.app.app_state = AppState.PLAYING
         self.app.status = "Playing Demo"
         self.app.initializer.demo_env.reset()
 
     def start_debug_mode(self):
-        if self.app.is_process_running:
-            print("Cannot start debug mode while process is running. Pause first.")
-            return
+        # Removed check for is_process_running
         if self.app.initializer.demo_env is None:
             print("Cannot start debug mode: Demo environment failed to initialize.")
             return
@@ -2240,7 +2068,7 @@ class AppLogic:
             print("Cannot start debug mode outside MainMenu.")
             return
         print("Entering Debug Mode...")
-        self.try_save_checkpoint()
+        self.try_save_checkpoint()  # Save NN weights before switching mode?
         self.app.app_state = AppState.DEBUG
         self.app.status = "Debugging Grid"
         self.app.initializer.demo_env.reset()
@@ -2249,18 +2077,15 @@ class AppLogic:
         if self.app.app_state == AppState.DEBUG:
             print("Exiting Debug Mode...")
             self.app.app_state = AppState.MAIN_MENU
-            # --- Ensure process is marked as stopped/paused ---
-            self.app.is_process_running = False
-            self.app.pause_event.set()
-            # --- End Ensure ---
-            self.check_initial_completion_status()  # Check completion status on exit
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
+            # Removed setting is_process_running and pause_event
+            self.check_initial_completion_status()  # Re-check status
+            self.app.status = "Ready"  # Set status back to Ready
 
     def cancel_cleanup(self):
         self.app.cleanup_confirmation_active = False
         self.app.cleanup_message = "Cleanup cancelled."
         self.app.last_cleanup_message_time = time.time()
+        self.app.status = "Ready"  # Set status back
         print("Cleanup cancelled by user.")
 
     def confirm_cleanup(self):
@@ -2274,13 +2099,14 @@ class AppLogic:
             self.app.app_state = AppState.ERROR
         finally:
             self.app.cleanup_confirmation_active = False
+            # Status is set within _cleanup_data or error handling
             print(
                 f"Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
             )
 
     def exit_app(self) -> bool:
         print("Exit requested.")
-        self.app.stop_event.set()
+        self.app.stop_event.set()  # Keep stop event for main loop exit
         return False
 
     def exit_demo_mode(self):
@@ -2289,13 +2115,9 @@ class AppLogic:
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.deselect_dragged_shape()
             self.app.app_state = AppState.MAIN_MENU
-            # --- Ensure process is marked as stopped/paused ---
-            self.app.is_process_running = False
-            self.app.pause_event.set()
-            # --- End Ensure ---
-            self.check_initial_completion_status()  # Check completion status on exit
-            if not self.app.status.startswith("Training Complete"):
-                self.app.status = "Ready"
+            # Removed setting is_process_running and pause_event
+            self.check_initial_completion_status()  # Re-check status
+            self.app.status = "Ready"  # Set status back to Ready
 
     def handle_demo_mouse_motion(self, mouse_pos: Tuple[int, int]):
         if (
@@ -2363,21 +2185,21 @@ class AppLogic:
                 demo_env.toggle_triangle_debug(row, col)
 
     def _cleanup_data(self):
-        """Deletes current run's checkpoint and re-initializes."""
+        """Deletes current run's checkpoint and re-initializes components."""
         from config.general import get_run_checkpoint_dir  # Local import
 
         print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
-        self.app.pause_event.set()  # Ensure workers are paused if running
-        self.app.is_process_running = False
+        # Removed pause_event setting and is_process_running
         self.app.app_state = AppState.INITIALIZING
         self.app.status = "Cleaning"
         messages = []
 
+        # Render cleaning status
         if self.app.renderer:
             try:
                 self.app.renderer.render_all(
                     app_state=self.app.app_state.value,
-                    is_process_running=False,
+                    is_process_running=False,  # No process running now
                     status=self.app.status,
                     stats_summary={},
                     envs=[],
@@ -2393,29 +2215,27 @@ class AppLogic:
                     agent_param_count=getattr(
                         self.app.initializer, "agent_param_count", 0
                     ),
-                    worker_counts={
-                        "env_runners": 0,
-                        "trainers": 0,
-                    },  # Pass default counts
+                    worker_counts={},  # Removed worker counts
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
             except Exception as render_err:
                 print(f"Warning: Error rendering during cleanup start: {render_err}")
 
-        # --- Stop existing worker threads FIRST ---
-        print("[Cleanup] Stopping existing worker threads...")
-        self.app.worker_manager.stop_worker_threads()  # This calls join()
+        # --- Stop existing worker threads (if any) ---
+        # Keep this structure in case new workers (MCTS/NN) are added later
+        print("[Cleanup] Stopping existing worker threads (if any)...")
+        self.app.worker_manager.stop_worker_threads()
         print("[Cleanup] Existing worker threads stopped.")
         # --- End Stop Workers ---
 
-        # --- Close Stats Recorder AFTER stopping workers ---
+        # --- Close Stats Recorder ---
         print("[Cleanup] Closing stats recorder...")
-        # Pass is_cleanup=True to prevent final hparam logging during cleanup
         self.app.initializer.close_stats_recorder(is_cleanup=True)
         print("[Cleanup] Stats recorder closed.")
         # --- End Close Stats ---
 
+        # --- Delete Checkpoint Directory ---
         print("[Cleanup] Deleting agent checkpoint file/dir...")
         try:
             save_dir = get_run_checkpoint_dir()
@@ -2431,48 +2251,43 @@ class AppLogic:
             print(f"  - {msg}")
             messages.append(msg)
         print("[Cleanup] Checkpoint deletion attempt finished.")
+        # --- End Delete Checkpoint ---
 
         time.sleep(0.1)
-        print("[Cleanup] Re-initializing RL components...")
+        print("[Cleanup] Re-initializing components...")
         try:
-            # Re-initialize RL components (creates new agent, stats recorder etc.)
+            # Re-initialize components (NN, Stats, Checkpoint Manager)
             self.app.initializer.initialize_rl_components(
                 is_reinit=True, checkpoint_to_load=None
             )
-            print("[Cleanup] RL components re-initialized.")
+            print("[Cleanup] Components re-initialized.")
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
                 print("[Cleanup] Demo env reset.")
 
-            # --- Set pause event BEFORE starting new workers ---
-            print("[Cleanup] Setting pause event before starting new workers...")
-            self.app.pause_event.set()
-            # --- End Set Pause ---
-
-            # Start NEW worker threads with the re-initialized components
-            print("[Cleanup] Starting new worker threads...")
+            # --- Start new worker threads (if any) ---
+            # Keep this structure for future workers
+            print("[Cleanup] Starting new worker threads (if any)...")
             self.app.worker_manager.start_worker_threads()
             print("[Cleanup] New worker threads started.")
+            # --- End Start Workers ---
 
-            print(
-                "[Cleanup] RL components re-initialization and worker start successful."
-            )
-            messages.append("RL components re-initialized.")
+            print("[Cleanup] Component re-initialization and worker start successful.")
+            messages.append("Components re-initialized.")
 
-            # --- Ensure state is PAUSED after cleanup ---
-            self.app.is_process_running = False
-            # self.app.pause_event.set() # Moved before starting workers
+            # --- Set state after cleanup ---
+            # Removed is_process_running and pause_event
             self.app.status = "Ready"
             self.app.app_state = AppState.MAIN_MENU
-            print("[Cleanup] Application state set to MAIN_MENU (Paused).")
-            # --- End Ensure Paused State ---
+            print("[Cleanup] Application state set to MAIN_MENU.")
+            # --- End Set State ---
 
         except Exception as e:
-            print(f"FATAL ERROR during RL re-initialization after cleanup: {e}")
+            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
             traceback.print_exc()
             self.app.status = "Error: Re-init Failed"
             self.app.app_state = AppState.ERROR
-            messages.append("ERROR RE-INITIALIZING RL COMPONENTS!")
+            messages.append("ERROR RE-INITIALIZING COMPONENTS!")
             if self.app.renderer:
                 try:
                     self.app.renderer._render_error_screen(self.app.status)
@@ -2486,30 +2301,30 @@ class AppLogic:
         )
 
     def try_save_checkpoint(self):
-        """Saves checkpoint if paused and checkpoint manager exists."""
+        """Saves checkpoint (e.g., NN weights) if in main menu."""
+        # Removed check for is_process_running
         if (
             self.app.app_state == AppState.MAIN_MENU
-            and not self.app.is_process_running
             and self.app.initializer.checkpoint_manager
-            and self.app.initializer.stats_recorder  # Ensure stats recorder exists
-            and hasattr(
-                self.app.initializer.stats_recorder, "aggregator"
-            )  # Ensure aggregator exists
+            and self.app.initializer.stats_recorder  # Check if stats exist
+            and hasattr(self.app.initializer.stats_recorder, "aggregator")
         ):
-            print("Saving checkpoint on pause...")
+            print("Saving checkpoint...")
             try:
+                # Get step/episode count from aggregator
                 current_step = getattr(
-                    self.app.initializer.stats_recorder.aggregator.storage,  # Access via storage
+                    self.app.initializer.stats_recorder.aggregator.storage,
                     "current_global_step",
                     0,
-                )
-                target_step = (
-                    self.app.initializer.checkpoint_manager.training_target_step
                 )
                 episode_count = getattr(
                     self.app.initializer.stats_recorder.aggregator.storage,
                     "total_episodes",
-                    0,  # Access via storage
+                    0,
+                )
+                # Target step is now managed within aggregator/checkpoint manager
+                target_step = getattr(
+                    self.app.initializer.checkpoint_manager, "training_target_step", 0
                 )
 
                 self.app.initializer.checkpoint_manager.save_checkpoint(
@@ -2519,35 +2334,36 @@ class AppLogic:
                     is_final=False,
                 )
             except Exception as e:
-                print(f"Error saving checkpoint on pause: {e}")
-                traceback.print_exc()  # Print traceback for debugging
+                print(f"Error saving checkpoint: {e}")
+                traceback.print_exc()
 
     def save_final_checkpoint(self):
-        """Saves the final checkpoint if conditions are met."""
+        """Saves the final checkpoint (e.g., NN weights)."""
         if (
             self.app.initializer.checkpoint_manager
             and self.app.initializer.stats_recorder
             and hasattr(self.app.initializer.stats_recorder, "aggregator")
         ):
-            current_step = getattr(
-                self.app.initializer.stats_recorder.aggregator.storage,
-                "current_global_step",
-                0,  # Access via storage
-            )
-            target_step = getattr(
-                self.app.initializer.checkpoint_manager, "training_target_step", 0
-            )
-            is_complete = target_step > 0 and current_step >= target_step
             save_on_exit = (
                 self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
-            )  # Always save unless cleaning or error
+            )
 
             if save_on_exit:
                 print("Performing final checkpoint save...")
                 try:
+                    current_step = getattr(
+                        self.app.initializer.stats_recorder.aggregator.storage,
+                        "current_global_step",
+                        0,
+                    )
                     episode_count = getattr(
-                        self.app.initializer.stats_recorder.aggregator.storage,  # Access via storage
+                        self.app.initializer.stats_recorder.aggregator.storage,
                         "total_episodes",
+                        0,
+                    )
+                    target_step = getattr(
+                        self.app.initializer.checkpoint_manager,
+                        "training_target_step",
                         0,
                     )
                     self.app.initializer.checkpoint_manager.save_checkpoint(
@@ -2558,7 +2374,7 @@ class AppLogic:
                     )
                 except Exception as final_save_err:
                     print(f"Error during final checkpoint save: {final_save_err}")
-                    traceback.print_exc()  # Print traceback for debugging
+                    traceback.print_exc()
             else:
                 print("Skipping final checkpoint save.")
 
@@ -2588,7 +2404,7 @@ def initialize_pygame(
     screen = pygame.display.set_mode(
         (vis_config.SCREEN_WIDTH, vis_config.SCREEN_HEIGHT), pygame.RESIZABLE
     )
-    pygame.display.set_caption("TriCrack PPO")
+    pygame.display.set_caption("AlphaTri Trainer")  # Updated caption
     clock = pygame.time.Clock()
     print("Pygame initialized.")
     return screen, clock
@@ -2737,9 +2553,10 @@ import threading
 import queue
 import time
 import traceback
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional  # Added Optional
 
-from workers import EnvironmentRunner, TrainingWorker
+# Removed worker imports
+# from workers import EnvironmentRunner, TrainingWorker
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
@@ -2750,80 +2567,81 @@ class AppWorkerManager:
 
     def __init__(self, app: "MainApp"):
         self.app = app
-        self.env_runner_thread: Optional[EnvironmentRunner] = None
-        self.training_worker_thread: Optional[TrainingWorker] = None
+        # Remove specific worker thread attributes
+        # self.env_runner_thread: Optional[EnvironmentRunner] = None
+        # self.training_worker_thread: Optional[TrainingWorker] = None
+        # Add placeholders for future workers if needed
+        self.mcts_worker_thread: Optional[threading.Thread] = None
+        self.nn_training_worker_thread: Optional[threading.Thread] = None
+        print("[AppWorkerManager] Initialized (No workers started by default).")
 
     def start_worker_threads(self):
-        """Creates and starts the environment runner and training worker threads."""
-        if (
-            not self.app.initializer.rollout_collector
-            or not self.app.initializer.agent
-            or not self.app.initializer.stats_recorder
-            or not self.app.initializer.checkpoint_manager
-        ):
-            print("ERROR: Cannot start workers, core components not initialized.")
-            self.app.app_state = self.app.app_state.ERROR
-            self.app.status = "Worker Init Failed"
-            return
-
-        print("Starting worker threads...")
-        self.app.stop_event.clear()
-        # Keep pause_event set initially, toggle run will clear it
-
-        # Environment Runner Thread
-        self.env_runner_thread = EnvironmentRunner(
-            collector=self.app.initializer.rollout_collector,
-            experience_queue=self.app.experience_queue,
-            action_queue=None,  # Not used in this PPO setup
-            stop_event=self.app.stop_event,
-            pause_event=self.app.pause_event,
-            num_steps_per_rollout=self.app.ppo_config.NUM_STEPS_PER_ROLLOUT,
-            stats_recorder=self.app.initializer.stats_recorder,
+        """Creates and starts worker threads (MCTS, NN Training - Placeholder)."""
+        # --- This needs to be implemented based on AlphaZero architecture ---
+        print(
+            "[AppWorkerManager] start_worker_threads called (Placeholder - No workers started)."
         )
-        self.env_runner_thread.start()
-
-        # Training Worker Thread
-        self.training_worker_thread = TrainingWorker(
-            agent=self.app.initializer.agent,
-            experience_queue=self.app.experience_queue,
-            stop_event=self.app.stop_event,
-            pause_event=self.app.pause_event,
-            stats_recorder=self.app.initializer.stats_recorder,
-            ppo_config=self.app.ppo_config,
-            device=self.app.device,
-            checkpoint_manager=self.app.initializer.checkpoint_manager,
-        )
-        self.training_worker_thread.start()
-        print("Worker threads started.")
+        # Example structure:
+        # if not self.app.initializer.agent or not self.app.initializer.mcts_manager:
+        #     print("ERROR: Cannot start workers, core components not initialized.")
+        #     self.app.app_state = self.app.app_state.ERROR
+        #     self.app.status = "Worker Init Failed"
+        #     return
+        #
+        # print("Starting AlphaZero worker threads...")
+        # self.app.stop_event.clear()
+        # # self.app.pause_event.clear() # Removed pause event
+        #
+        # # MCTS Self-Play Worker(s)
+        # self.mcts_worker_thread = MCTSSelfPlayWorker(...)
+        # self.mcts_worker_thread.start()
+        #
+        # # NN Training Worker
+        # self.nn_training_worker_thread = NNTrainingWorker(...)
+        # self.nn_training_worker_thread.start()
+        #
+        # print("AlphaZero worker threads started.")
+        pass
 
     def stop_worker_threads(self):
         """Signals worker threads to stop and waits for them to join."""
         if self.app.stop_event.is_set():
+            print("[AppWorkerManager] Stop event already set.")
             return
 
-        print("Stopping worker threads...")
+        print("[AppWorkerManager] Stopping worker threads (Placeholder)...")
         self.app.stop_event.set()
-        self.app.pause_event.clear()  # Ensure threads aren't stuck paused
+        # self.app.pause_event.clear() # Removed pause event
 
         join_timeout = 5.0
-        if self.env_runner_thread and self.env_runner_thread.is_alive():
-            self.env_runner_thread.join(timeout=join_timeout)
-            if self.env_runner_thread.is_alive():
-                print("EnvRunner thread did not join cleanly.")
-        if self.training_worker_thread and self.training_worker_thread.is_alive():
-            self.training_worker_thread.join(timeout=join_timeout)
-            if self.training_worker_thread.is_alive():
-                print("TrainingWorker thread did not join cleanly.")
 
-        while not self.app.experience_queue.empty():
-            try:
-                self.app.experience_queue.get_nowait()
-            except queue.Empty:
-                break
+        # --- Join future worker threads ---
+        if self.mcts_worker_thread and self.mcts_worker_thread.is_alive():
+            print("[AppWorkerManager] Joining MCTS worker...")
+            self.mcts_worker_thread.join(timeout=join_timeout)
+            if self.mcts_worker_thread.is_alive():
+                print("[AppWorkerManager] MCTS worker thread did not join cleanly.")
+            self.mcts_worker_thread = None
 
-        self.env_runner_thread = None
-        self.training_worker_thread = None
-        print("Worker threads stopped.")
+        if self.nn_training_worker_thread and self.nn_training_worker_thread.is_alive():
+            print("[AppWorkerManager] Joining NN Training worker...")
+            self.nn_training_worker_thread.join(timeout=join_timeout)
+            if self.nn_training_worker_thread.is_alive():
+                print(
+                    "[AppWorkerManager] NN Training worker thread did not join cleanly."
+                )
+            self.nn_training_worker_thread = None
+        # --- End Join ---
+
+        # Clear queues if used by workers
+        # Example:
+        # while not self.app.experience_queue.empty():
+        #     try:
+        #         self.app.experience_queue.get_nowait()
+        #     except queue.Empty:
+        #         break
+
+        print("[AppWorkerManager] Worker threads stopped.")
 
 
 File: check_gpu.py
@@ -2913,7 +2731,6 @@ class TeeLogger:
 
 File: main_pygame.py
 # File: main_pygame.py
-# main_pygame.py
 import pygame
 import sys
 import time
@@ -2921,125 +2738,107 @@ import threading
 import logging
 import argparse
 import os
-import traceback  # Added for error handling
+import traceback
 from typing import Optional, List, Dict, Any
-import torch  # <<< ADDED IMPORT HERE
+import torch
 
-# --- Resource Monitoring Import ---
+# Resource Monitoring Import (Keep)
 try:
     import psutil
 except ImportError:
     print("Warning: psutil not found. CPU/Memory usage monitoring will be disabled.")
     print("Install it using: pip install psutil")
     psutil = None
-# --- End Resource Monitoring Import ---
 
-
-# --- Path Adjustment ---
+# Path Adjustment (Keep)
 script_dir = os.path.dirname(os.path.abspath(__file__))
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
-# --- End Path Adjustment ---
 
-# Corrected import: Import specific config classes from the 'config' package
+# Config Imports (Updated)
 try:
     from config import (
         VisConfig,
         EnvConfig,
-        PPOConfig,
-        ModelConfig,  # Changed from NetworkConfig
+        # Removed PPOConfig
+        ModelConfig,
         StatsConfig,
-        TrainConfig,  # Changed from CheckpointConfig
-        TensorBoardConfig,  # Changed from LogConfig
-        DemoConfig,  # Changed from DebugConfig
-        RNNConfig,  # Added
-        TransformerConfig,  # Added
-        ObsNormConfig,  # Added
-        RewardConfig,  # Added
-        DEVICE,  # Import directly
-        RANDOM_SEED,  # Import directly
-        TOTAL_TRAINING_STEPS,  # Import directly
-        BASE_CHECKPOINT_DIR,  # Import directly
-        BASE_LOG_DIR,  # Import directly
-        set_device,  # Import function
-        get_run_id,  # Import function
-        set_run_id,  # Import function
-        get_run_checkpoint_dir,  # Import function
-        get_run_log_dir,  # Import function
-        get_console_log_dir,  # Import function
-        print_config_info_and_validate,  # Import function
-        get_config_dict,  # Import function
+        TrainConfig,
+        TensorBoardConfig,
+        DemoConfig,
+        RNNConfig,
+        TransformerConfig,
+        # Removed ObsNormConfig
+        # Removed RewardConfig
+        DEVICE,
+        RANDOM_SEED,
+        # Removed TOTAL_TRAINING_STEPS
+        BASE_CHECKPOINT_DIR,
+        BASE_LOG_DIR,
+        set_device,
+        get_run_id,
+        set_run_id,
+        get_run_checkpoint_dir,
+        get_run_log_dir,
+        get_console_log_dir,
+        print_config_info_and_validate,
+        get_config_dict,
     )
-    from utils.helpers import (
-        get_device as get_torch_device,
-    )  # Use helper for device detection
-    from utils.helpers import set_random_seeds  # Use helper for seeds
-
-    from logger import TeeLogger  # Import TeeLogger from logger.py
-    from utils.init_checks import run_pre_checks  # Use helper for pre-checks
-    from utils.types import AgentStateDict  # Import type if needed
+    from utils.helpers import get_device as get_torch_device, set_random_seeds
+    from logger import TeeLogger
+    from utils.init_checks import run_pre_checks
+    from utils.types import AgentStateDict  # Keep for potential NN state dict type
 
 except ImportError as e:
     print(f"Error importing configuration classes or utils: {e}")
-    print(
-        "Please ensure 'config/__init__.py' is set up correctly and imports necessary classes from config.core and config.general."
-    )
-    traceback.print_exc()  # Print detailed traceback
+    traceback.print_exc()
     sys.exit(1)
 except Exception as e:
     print(f"An unexpected error occurred during config/util import: {e}")
-    traceback.print_exc()  # Print detailed traceback
+    traceback.print_exc()
     sys.exit(1)
 
-# --- Component Imports (Assuming these paths are correct relative to main_pygame.py) ---
-# Note: The original main_pygame.py had different paths (e.g., game.*, rl_components.*)
-# compared to the app_*.py files (e.g., environment.*, agent.*).
-# Using the paths from app_*.py as they seem more consistent with the provided codebase.
+# Component Imports (Updated)
 try:
     from environment.game_state import GameState
-    from ui.renderer import UIRenderer  # Assuming this is the main renderer now
-    from agent.ppo_agent import PPOAgent
-    from training.rollout_storage import RolloutStorage  # Assuming this is the buffer
-    from training.rollout_collector import RolloutCollector
-    from workers import (
-        EnvironmentRunner,
-        TrainingWorker,
-    )  # Assuming these are the workers
+    from ui.renderer import UIRenderer
 
-    # Corrected stats imports: Import from the package level
+    # Removed PPOAgent import
+    # Removed RolloutStorage, RolloutCollector imports
+    # Removed worker imports (EnvironmentRunner, TrainingWorker)
+
+    # Keep stats imports
     from stats import (
         StatsRecorderBase,
         SimpleStatsRecorder,
         TensorBoardStatsRecorder,
         StatsAggregator,
     )
+
+    # Keep CheckpointManager import (will manage NN weights now)
     from training.checkpoint_manager import (
         CheckpointManager,
         find_latest_run_and_checkpoint,
     )
-    from app_state import AppState  # Use the AppState enum
-    from app_init import AppInitializer  # Use the AppInitializer
-    from app_logic import AppLogic  # Use the AppLogic
-    from app_workers import AppWorkerManager  # Use the AppWorkerManager
+    from app_state import AppState
+    from app_init import AppInitializer
+    from app_logic import AppLogic
+    from app_workers import AppWorkerManager  # Keep manager structure
     from app_setup import (
         initialize_pygame,
         initialize_directories,
         load_and_validate_configs,
-    )  # Use app_setup helpers
-    from app_ui_utils import AppUIUtils  # Use UI utils
-    from ui.input_handler import InputHandler  # Use the InputHandler
-    import queue  # For experience queue
+    )
+    from app_ui_utils import AppUIUtils
+    from ui.input_handler import InputHandler
+    import queue  # Keep queue if needed for future workers
 
 except ImportError as e:
     print(f"Error importing application components: {e}")
-    print(
-        "Please ensure component paths (environment, agent, ui, training, workers, stats, app_*) are correct."
-    )
     traceback.print_exc()
     sys.exit(1)
 
-
-# Setup basic logging
+# Logging Setup (Keep)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
@@ -3047,100 +2846,96 @@ logger = logging.getLogger(__name__)
 
 
 class MainApp:
-    """Main application class orchestrating Pygame UI, RL components, and threads."""
+    """Main application class orchestrating Pygame UI, game logic, and potentially AlphaZero components."""
 
     def __init__(self, checkpoint_to_load: Optional[str] = None):
-        # --- Configuration ---
-        # Instantiate config classes directly
+        # --- Configuration (Updated) ---
         self.vis_config = VisConfig()
         self.env_config = EnvConfig()
-        self.ppo_config = PPOConfig()
+        # Removed self.ppo_config
         self.rnn_config = RNNConfig()
-        self.train_config_instance = TrainConfig()  # Store instance
+        self.train_config_instance = TrainConfig()
         self.model_config = ModelConfig()
         self.stats_config = StatsConfig()
         self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
-        self.reward_config = RewardConfig()
-        self.obs_norm_config = ObsNormConfig()
+        # Removed self.reward_config
+        # Removed self.obs_norm_config
         self.transformer_config = TransformerConfig()
-        self.config_dict = get_config_dict()  # Get combined dict for logging
+        self.config_dict = get_config_dict()
 
-        # --- Core Components ---
+        # --- Core Components (Keep) ---
         self.screen: Optional[pygame.Surface] = None
         self.clock: Optional[pygame.time.Clock] = None
         self.renderer: Optional[UIRenderer] = None
         self.input_handler: Optional[InputHandler] = None
 
-        # --- State ---
+        # --- State (Updated) ---
         self.app_state: AppState = AppState.INITIALIZING
-        self.is_process_running: bool = False  # Training/collection active
+        # Removed self.is_process_running
         self.status: str = "Initializing..."
-        self.running: bool = True  # Main loop flag
-        self.update_progress_details: Dict[str, Any] = {}  # Added attribute
+        self.running: bool = True
+        self.update_progress_details: Dict[str, Any] = (
+            {}
+        )  # Keep for potential NN training progress
 
-        # --- Threading & Communication ---
-        self.stop_event = threading.Event()
-        self.pause_event = threading.Event()
-        self.pause_event.set()  # Start paused
-        self.experience_queue = queue.Queue(maxsize=10)  # Experience buffer queue
+        # --- Threading & Communication (Updated) ---
+        self.stop_event = threading.Event()  # Keep for main loop exit signal
+        # Removed self.pause_event (was tied to PPO workers)
+        # Removed self.experience_queue
 
-        # --- RL Components (Managed by Initializer) ---
-        # Placeholders, will be populated by AppInitializer
-        self.envs: List[GameState] = []
-        self.agent: Optional[PPOAgent] = None
+        # --- RL Components (Managed by Initializer - Updated) ---
+        # Placeholders for NN agent, stats, checkpoint manager
+        self.envs: List[GameState] = []  # Only for visualization now
+        self.agent: Optional[Any] = None  # Placeholder for AlphaZero NN Agent
         self.stats_recorder: Optional[StatsRecorderBase] = None
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.rollout_collector: Optional[RolloutCollector] = None
-        self.demo_env: Optional[GameState] = None  # For demo/debug mode
+        # Removed self.rollout_collector
+        self.demo_env: Optional[GameState] = None
 
-        # --- Helper Classes ---
+        # --- Helper Classes (Keep) ---
         self.device = get_torch_device()
-        set_device(self.device)  # Set global device variable
-        self.checkpoint_to_load = checkpoint_to_load  # Store path from args
+        set_device(self.device)
+        self.checkpoint_to_load = checkpoint_to_load
         self.initializer = AppInitializer(self)
         self.logic = AppLogic(self)
-        self.worker_manager = AppWorkerManager(self)
+        self.worker_manager = AppWorkerManager(self)  # Manages future workers
         self.ui_utils = AppUIUtils(self)
 
-        # --- UI State ---
+        # --- UI State (Keep) ---
         self.cleanup_confirmation_active: bool = False
         self.cleanup_message: str = ""
         self.last_cleanup_message_time: float = 0.0
         self.total_gpu_memory_bytes: Optional[int] = None
 
-        # --- Resource Monitoring ---
+        # --- Resource Monitoring (Keep) ---
         self.last_resource_update_time: float = 0.0
-        self.resource_update_interval: float = 1.0  # Update every second
+        self.resource_update_interval: float = 1.0
 
     def initialize(self):
         """Initializes Pygame, directories, configs, and core components."""
         logger.info("--- Application Initialization ---")
         self.screen, self.clock = initialize_pygame(self.vis_config)
-        initialize_directories()  # Creates checkpoint/log dirs for current run
-        # Configs are already instantiated in __init__
-        # print_config_info_and_validate() # Validate the instantiated configs
+        initialize_directories()
+        # Configs are instantiated in __init__
 
         set_random_seeds(RANDOM_SEED)
-        run_pre_checks()  # Basic GameState checks
+        run_pre_checks()
 
-        # Initialize core RL and UI components via AppInitializer
+        # Initialize core components via AppInitializer (now initializes NN, Stats, etc.)
         self.app_state = AppState.INITIALIZING
         self.initializer.initialize_all()
 
-        # Set input handler reference in renderer after init
+        # Set input handler reference in renderer (Keep)
         if self.renderer and self.initializer.app.input_handler:
             self.renderer.set_input_handler(self.initializer.app.input_handler)
 
-        # Start worker threads (will wait for pause_event to clear)
+        # Start worker threads (Placeholder - will start MCTS/NN workers later)
         self.worker_manager.start_worker_threads()
 
-        # Check initial completion status after loading checkpoint
+        # Check initial completion status (Adapt later if needed)
         self.logic.check_initial_completion_status()
-        if not self.status.startswith(
-            "Training Complete"
-        ):  # Avoid overwriting completion status
-            self.status = "Ready"
+        self.status = "Ready"  # Default status after init
         self.app_state = AppState.MAIN_MENU
 
         logger.info("--- Initialization Complete ---")
@@ -3157,6 +2952,7 @@ class MainApp:
         ):
             return
 
+        # Check if stats recorder and aggregator exist
         if not self.initializer.stats_recorder or not hasattr(
             self.initializer.stats_recorder, "aggregator"
         ):
@@ -3165,9 +2961,7 @@ class MainApp:
         aggregator = self.initializer.stats_recorder.aggregator
         storage = aggregator.storage
 
-        cpu_percent = 0.0
-        mem_percent = 0.0
-        gpu_mem_percent = 0.0
+        cpu_percent, mem_percent, gpu_mem_percent = 0.0, 0.0, 0.0
 
         if psutil:
             try:
@@ -3178,22 +2972,24 @@ class MainApp:
 
         if self.device.type == "cuda" and self.total_gpu_memory_bytes:
             try:
-                # Use torch here, which is now imported at the top
                 allocated = torch.cuda.memory_allocated(self.device)
-                # reserved = torch.cuda.memory_reserved(self.device) # Alternative
                 gpu_mem_percent = (allocated / self.total_gpu_memory_bytes) * 100.0
             except Exception as e:
                 logger.warning(f"Error getting GPU memory usage: {e}")
-                gpu_mem_percent = 0.0  # Reset if error occurs
+                gpu_mem_percent = 0.0
 
-        # Update aggregator storage directly (requires lock)
+        # Update aggregator storage directly (thread-safe via lock)
         with aggregator._lock:
             storage.current_cpu_usage = cpu_percent
             storage.current_memory_usage = mem_percent
             storage.current_gpu_memory_usage_percent = gpu_mem_percent
-            storage.cpu_usage.append(cpu_percent)
-            storage.memory_usage.append(mem_percent)
-            storage.gpu_memory_usage_percent.append(gpu_mem_percent)
+            # Append to deques if they exist (check needed after refactor)
+            if hasattr(storage, "cpu_usage"):
+                storage.cpu_usage.append(cpu_percent)
+            if hasattr(storage, "memory_usage"):
+                storage.memory_usage.append(mem_percent)
+            if hasattr(storage, "gpu_memory_usage_percent"):
+                storage.gpu_memory_usage_percent.append(gpu_mem_percent)
 
         self.last_resource_update_time = current_time
 
@@ -3201,17 +2997,17 @@ class MainApp:
         """The main application loop."""
         logger.info("Starting main application loop...")
         while self.running:
-            dt = self.clock.tick(self.vis_config.FPS) / 1000.0  # Delta time in seconds
+            dt = self.clock.tick(self.vis_config.FPS) / 1000.0
 
-            # Handle Input
+            # Handle Input (Keep)
             if self.input_handler:
                 self.running = self.input_handler.handle_input(
                     self.app_state.value, self.cleanup_confirmation_active
                 )
-                if not self.running:  # Exit requested via input handler
+                if not self.running:
                     self.stop_event.set()
                     break
-            else:  # Fallback exit if input handler fails
+            else:  # Fallback exit
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         self.running = False
@@ -3220,54 +3016,47 @@ class MainApp:
                 if not self.running:
                     break
 
-            # --- Fetch Update Progress Details ---
-            # Fetch details *before* updating status logic
-            if (
-                self.worker_manager.training_worker_thread
-                and self.worker_manager.training_worker_thread.is_alive()
-            ):
-                try:
-                    self.update_progress_details = (
-                        self.worker_manager.training_worker_thread.get_update_progress_details()
-                    )
-                except Exception as e:
-                    logger.warning(f"Could not get update progress details: {e}")
-                    self.update_progress_details = {}  # Reset on error
-            else:
-                self.update_progress_details = {}  # Clear if worker not running
+            # --- Fetch Update Progress Details (Keep for potential NN training) ---
+            # This needs to be adapted to get progress from the NN training worker if implemented
+            self.update_progress_details = {}  # Placeholder
+            # Example:
+            # if self.worker_manager.nn_training_worker_thread and self.worker_manager.nn_training_worker_thread.is_alive():
+            #     try:
+            #         self.update_progress_details = self.worker_manager.nn_training_worker_thread.get_update_progress_details()
+            #     except Exception as e:
+            #         logger.warning(f"Could not get update progress details: {e}")
+            #         self.update_progress_details = {}
+            # else:
+            #     self.update_progress_details = {}
             # --- End Fetch Update Progress Details ---
 
-            # Update Logic & State (uses self.update_progress_details)
+            # Update Logic & State (Simplified)
             self.logic.update_status_and_check_completion()
 
-            # --- Update Resource Stats ---
+            # Update Resource Stats (Keep)
             self._update_resource_stats()
-            # --- End Resource Stats ---
 
-            # --- Update Demo Env Timers ---
-            # Ensure demo env timers decrement even when paused or in demo/debug mode
+            # Update Demo Env Timers (Keep)
             if self.initializer.demo_env:
                 try:
-                    self.initializer.demo_env._update_timers()
+                    # Timers are updated internally by demo_env.step or manually if needed
+                    # self.initializer.demo_env._update_timers() # Call if step isn't called automatically
+                    pass  # Assume timers update within demo logic or step
                 except Exception as timer_err:
-                    # Log error but don't crash the main loop
                     logger.error(
                         f"Error updating demo env timers: {timer_err}", exc_info=False
                     )
-            # --- End Timer Update ---
 
-            # Render UI
+            # Render UI (Adapted)
             if self.renderer:
                 plot_data = {}
                 stats_summary = {}
                 tb_log_dir = None
-                # update_details = {} # Use self.update_progress_details now
                 agent_params = 0
-                worker_counts = {"env_runners": 0, "trainers": 0}
+                # Removed worker_counts
 
                 if self.initializer.stats_recorder:
                     plot_data = self.initializer.stats_recorder.get_plot_data()
-                    # --- Get latest global step directly from aggregator ---
                     current_step = 0
                     if hasattr(self.initializer.stats_recorder, "aggregator"):
                         current_step = getattr(
@@ -3275,38 +3064,25 @@ class MainApp:
                             "current_global_step",
                             0,
                         )
-                    # --- End get latest global step ---
                     stats_summary = self.initializer.stats_recorder.get_summary(
-                        current_step  # Pass the latest step to get_summary
+                        current_step
                     )
                     if isinstance(
                         self.initializer.stats_recorder, TensorBoardStatsRecorder
                     ):
                         tb_log_dir = self.initializer.stats_recorder.log_dir
 
-                # --- Get Worker Counts ---
-                if (
-                    self.worker_manager.env_runner_thread
-                    and self.worker_manager.env_runner_thread.is_alive()
-                ):
-                    worker_counts["env_runners"] = 1
-                if (
-                    self.worker_manager.training_worker_thread
-                    and self.worker_manager.training_worker_thread.is_alive()
-                ):
-                    worker_counts["trainers"] = 1
-                # --- End Worker Counts ---
-
                 if self.initializer.agent:
                     agent_params = self.initializer.agent_param_count
 
+                # Adapt render_all call
                 self.renderer.render_all(
                     app_state=self.app_state.value,
-                    is_process_running=self.is_process_running,
+                    is_process_running=False,  # No PPO process running
                     status=self.status,
-                    stats_summary=stats_summary,  # Pass the summary with latest step
-                    envs=self.initializer.envs,  # Use initialized envs
-                    num_envs=self.env_config.NUM_ENVS,
+                    stats_summary=stats_summary,
+                    envs=self.initializer.envs,  # Pass empty list or visualized envs
+                    num_envs=self.env_config.NUM_ENVS,  # Pass total configured (for layout)
                     env_config=self.env_config,
                     cleanup_confirmation_active=self.cleanup_confirmation_active,
                     cleanup_message=self.cleanup_message,
@@ -3314,12 +3090,11 @@ class MainApp:
                     tensorboard_log_dir=tb_log_dir,
                     plot_data=plot_data,
                     demo_env=self.initializer.demo_env,
-                    update_progress_details=self.update_progress_details,  # Pass stored details
+                    update_progress_details=self.update_progress_details,  # Pass NN progress later
                     agent_param_count=agent_params,
-                    worker_counts=worker_counts,  # Pass worker counts
+                    worker_counts={},  # Removed worker counts
                 )
-            else:
-                # Basic render if main renderer failed
+            else:  # Fallback render
                 self.screen.fill((20, 0, 0))
                 font = pygame.font.Font(None, 30)
                 text_surf = font.render("Renderer Error", True, (255, 50, 50))
@@ -3329,50 +3104,51 @@ class MainApp:
                 pygame.display.flip()
 
         logger.info("Main application loop exited.")
-        # Shutdown is now called explicitly after the loop or in exception handlers
 
     def shutdown(self):
         """Cleans up resources and exits."""
         logger.info("Initiating shutdown sequence...")
 
-        # Signal threads to stop
-        logger.info("Setting stop event for worker threads.")
+        # Signal threads to stop (Keep stop_event)
+        logger.info("Setting stop event for worker threads (if any).")
         self.stop_event.set()
-        self.pause_event.clear()  # Ensure threads aren't stuck paused
+        # Removed pause_event clearing
 
-        # Stop and join worker threads
-        logger.info("Stopping worker threads...")
+        # Stop and join worker threads (Placeholder)
+        logger.info("Stopping worker threads (if any)...")
         self.worker_manager.stop_worker_threads()
         logger.info("Worker threads stopped.")
 
-        # Save final checkpoint (if applicable)
+        # Save final checkpoint (NN weights, stats)
         logger.info("Attempting final checkpoint save...")
         self.logic.save_final_checkpoint()
         logger.info("Final checkpoint save attempt finished.")
 
-        # Close stats recorder (handles TensorBoard writer)
+        # Close stats recorder (Keep)
         logger.info("Closing stats recorder (before pygame.quit)...")
         self.initializer.close_stats_recorder()
         logger.info("Stats recorder closed.")
 
-        # Quit Pygame
+        # Quit Pygame (Keep)
         logger.info("Quitting Pygame...")
         pygame.quit()
         logger.info("Pygame quit.")
         logger.info("Shutdown complete.")
-        # sys.exit(0) # Exit is handled in the main block's finally clause
 
 
-# --- Global variable for TeeLogger instance ---
+# Global variable for TeeLogger instance (Keep)
 tee_logger_instance: Optional[TeeLogger] = None
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="TriCrack PPO Trainer")
+    parser = argparse.ArgumentParser(
+        description="AlphaTri Trainer"
+    )  # Updated description
     parser.add_argument(
         "--load-checkpoint",
         type=str,
         default=None,
-        help="Path to a specific checkpoint file to load (e.g., checkpoints/run_xyz/step_1000_agent_state.pth). Overrides auto-resume.",
+        # Updated help text
+        help="Path to a specific checkpoint file to load (e.g., NN weights). Overrides auto-resume.",
     )
     parser.add_argument(
         "--log-level",
@@ -3383,46 +3159,39 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    # --- Setup Logging ---
-    # Determine run ID early (needed for log file path)
-    # CheckpointManager will handle resuming the correct ID later if loading
+    # Setup Logging (Keep, checkpoint finding logic might adapt)
     if args.load_checkpoint:
-        # Try to extract run_id from path, otherwise generate new one
         try:
             run_id_from_path = os.path.basename(os.path.dirname(args.load_checkpoint))
             if run_id_from_path.startswith("run_"):
                 set_run_id(run_id_from_path)
                 print(f"Using Run ID from checkpoint path: {get_run_id()}")
             else:
-                get_run_id()  # Generate new one
+                get_run_id()
         except Exception:
-            get_run_id()  # Generate new one if path parsing fails
+            get_run_id()
     else:
-        # Search for latest run to potentially resume ID, otherwise generate new
         latest_run_id, _ = find_latest_run_and_checkpoint(BASE_CHECKPOINT_DIR)
         if latest_run_id:
             set_run_id(latest_run_id)
             print(f"Resuming Run ID: {get_run_id()}")
         else:
-            get_run_id()  # Generate new one
+            get_run_id()
 
-    # Setup TeeLogger
+    # Setup TeeLogger (Keep)
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     try:
-        log_file_dir = (
-            get_console_log_dir()
-        )  # Use function from config.general via __init__
+        log_file_dir = get_console_log_dir()
         os.makedirs(log_file_dir, exist_ok=True)
         log_file_path = os.path.join(log_file_dir, "console_output.log")
-        tee_logger_instance = TeeLogger(log_file_path, sys.stdout)  # Redirect stdout
+        tee_logger_instance = TeeLogger(log_file_path, sys.stdout)
         sys.stdout = tee_logger_instance
-        sys.stderr = tee_logger_instance  # Redirect stderr as well
+        sys.stderr = tee_logger_instance
     except Exception as e:
         logger.error(f"Error setting up TeeLogger: {e}", exc_info=True)
-        # Continue without TeeLogger if setup fails
 
-    # Set logging level
+    # Set logging level (Keep)
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
     logger.info(f"Logging level set to: {args.log_level.upper()}")
@@ -3430,51 +3199,44 @@ if __name__ == "__main__":
     if args.load_checkpoint:
         logger.info(f"Attempting to load checkpoint: {args.load_checkpoint}")
 
-    # --- Create and Run Application ---
+    # Create and Run Application (Keep structure)
     app = None
     exit_code = 0
     try:
         app = MainApp(checkpoint_to_load=args.load_checkpoint)
         app.initialize()
-        app.run_main_loop()  # This loop now exits cleanly via self.running = False
-        app.shutdown()  # Call shutdown explicitly after loop finishes normally
+        app.run_main_loop()
+        app.shutdown()
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received. Shutting down.")
         if app:
             app.shutdown()
         else:
-            pygame.quit()  # Ensure pygame quits even if app init failed
-        exit_code = 130  # Standard exit code for Ctrl+C
+            pygame.quit()
+        exit_code = 130
     except Exception as e:
         logger.critical(f"An unhandled exception occurred in main: {e}", exc_info=True)
         if app:
             app.shutdown()
         else:
-            pygame.quit()  # Ensure pygame quits even if app init failed
+            pygame.quit()
         exit_code = 1
     finally:
-        # Ensure logs are flushed and stdout/stderr restored *before* exiting
+        # Restore stdout/stderr (Keep)
         print("[Main Finally] Restoring stdout/stderr and closing logger...")
         if tee_logger_instance:
             try:
-                # Flush before closing and restoring
                 if isinstance(sys.stdout, TeeLogger):
                     sys.stdout.flush()
                 if isinstance(sys.stderr, TeeLogger):
                     sys.stderr.flush()
-
-                # Restore original streams
                 sys.stdout = original_stdout
                 sys.stderr = original_stderr
-
-                # Now close the file handle
                 tee_logger_instance.close()
                 print("[Main Finally] TeeLogger closed and streams restored.")
             except Exception as log_close_err:
-                # Use original stdout/stderr for this final error message
                 original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
                 traceback.print_exc(file=original_stderr)
-
         print(f"[Main Finally] Exiting with code {exit_code}.")
         sys.exit(exit_code)
 
@@ -3506,1487 +3268,132 @@ cloudpickle
 matplotlib
 psutil
 
-File: workers.py
-# File: workers.py
-# File: workers.py
-import threading
-import queue
-import time
-import traceback
-from typing import Optional, Dict, Any, Tuple  # Added Tuple
-from collections import defaultdict
-
-import torch
-import numpy as np
-
-from config import PPOConfig
-from agent.ppo_agent import PPOAgent
-from training.rollout_collector import RolloutCollector
-from stats.stats_recorder import StatsRecorderBase
-from training.checkpoint_manager import CheckpointManager
-
-
-class EnvironmentRunner(threading.Thread):
-    """Worker thread for collecting experience from environments."""
-
-    def __init__(
-        self,
-        collector: RolloutCollector,
-        experience_queue: queue.Queue,
-        action_queue: Optional[queue.Queue],  # Keep optional for flexibility
-        stop_event: threading.Event,
-        pause_event: threading.Event,
-        num_steps_per_rollout: int,  # Keep for reference, but loop uses storage size
-        stats_recorder: StatsRecorderBase,
-        name="EnvRunner",
-    ):
-        super().__init__(name=name, daemon=True)
-        self.collector = collector
-        self.experience_queue = experience_queue
-        self.action_queue = action_queue
-        self.stop_event = stop_event
-        self.pause_event = pause_event
-        # self.num_steps_per_rollout = num_steps_per_rollout # Use storage size directly
-        self.stats_recorder = stats_recorder
-        # Global step is now managed within the collector/aggregator
-        print(f"[{self.name}] Initialized.")
-
-    def run(self):
-        print(f"[{self.name}] Starting environment runner loop.")
-        rollout_count = 0
-        loop_iter = 0
-        try:
-            while not self.stop_event.is_set():
-                loop_iter += 1
-                # --- Pause Handling ---
-                pause_check_iter = 0
-                while self.pause_event.is_set():
-                    if self.stop_event.is_set():
-                        break
-                    # if pause_check_iter % 50 == 0:  # Log pause less frequently
-                    #     print(f"[{self.name} Loop {loop_iter}] Paused (is_set={self.pause_event.is_set()})...")
-                    time.sleep(0.1)  # Wait a bit before re-checking pause_event
-                    pause_check_iter += 1
-                if self.stop_event.is_set():  # Check stop event after pause loop
-                    break
-                # --- End Pause Handling ---
-
-                steps_collected_in_rollout = 0
-                rollout_start_time = time.time()
-                current_global_step = 0
-                if hasattr(self.collector.stats_recorder, "aggregator"):
-                    current_global_step = getattr(
-                        self.collector.stats_recorder.aggregator.storage,
-                        "current_global_step",
-                        0,
-                    )
-
-                # --- Modified Loop Condition ---
-                # Loop while the storage is not full
-                while (
-                    self.collector.rollout_storage.step
-                    < self.collector.rollout_storage.num_steps
-                ):
-                    # Check for pause/stop *before* collecting the step
-                    if self.stop_event.is_set() or self.pause_event.is_set():
-                        break  # Exit inner loop, will re-check pause at outer loop start
-
-                    # Pass the *current* global step to collect_one_step for potential use
-                    steps_this_iter = self.collector.collect_one_step(
-                        current_global_step
-                    )
-                    steps_collected_in_rollout += steps_this_iter
-                    time.sleep(
-                        0.0001
-                    )  # Small sleep to prevent tight loop if collection is very fast
-                # --- End Modified Loop Condition ---
-
-                # Check if the loop was broken by pause/stop before processing rollout
-                if self.stop_event.is_set() or self.pause_event.is_set():
-                    continue  # Go back to outer loop to handle pause/stop
-
-                # --- Check if storage is actually full after loop ---
-                # This ensures we only process complete rollouts
-                if (
-                    self.collector.rollout_storage.step
-                    == self.collector.rollout_storage.num_steps
-                ):
-                    if steps_collected_in_rollout > 0:
-                        rollout_duration = time.time() - rollout_start_time
-                        sps = steps_collected_in_rollout / max(1e-6, rollout_duration)
-
-                        self.collector.compute_advantages_for_storage()
-                        rollout_data_cpu = (
-                            self.collector.rollout_storage.get_data_for_update()
-                        )
-
-                        if rollout_data_cpu:
-                            # --- Check stop event before blocking put ---
-                            if self.stop_event.is_set():
-                                break
-                            # --- End check ---
-                            try:
-                                # Reduced timeout
-                                self.experience_queue.put(
-                                    rollout_data_cpu, block=True, timeout=1.0
-                                )
-                            except queue.Full:
-                                print(
-                                    f"[{self.name}] WARNING: Experience queue full after 1s timeout. Discarding rollout."
-                                )
-                            except Exception as q_err:
-                                print(
-                                    f"[{self.name}] ERROR putting data onto queue: {q_err}"
-                                )
-                                traceback.print_exc()
-                        else:
-                            print(
-                                f"[{self.name}] No rollout data generated, skipping queue put."
-                            )
-
-                        self.collector.rollout_storage.after_update()
-                        rollout_count += 1
-                    else:
-                        print(
-                            f"[{self.name}] Warning: Storage full but no steps collected in rollout?"
-                        )
-                # else: # DEBUG REMOVED
-                # print(f"[{self.name}] Rollout loop finished prematurely (step={self.collector.rollout_storage.step}/{self.collector.rollout_storage.num_steps}). Likely paused/stopped.")
-
-                time.sleep(0.001)  # Small sleep between rollouts
-
-        except Exception as e:
-            print(f"[{self.name}] CRITICAL ERROR in environment runner loop: {e}")
-            traceback.print_exc()
-            self.stop_event.set()
-        finally:
-            print(f"[{self.name}] Environment runner loop finished.")
-
-
-class TrainingWorker(threading.Thread):
-    """Worker thread for performing agent updates."""
-
-    def __init__(
-        self,
-        agent: PPOAgent,
-        experience_queue: queue.Queue,
-        stop_event: threading.Event,
-        pause_event: threading.Event,
-        stats_recorder: StatsRecorderBase,
-        ppo_config: PPOConfig,
-        device: torch.device,
-        checkpoint_manager: CheckpointManager,
-        name="Trainer",
-    ):
-        super().__init__(name=name, daemon=True)
-        self.agent = agent
-        self.experience_queue = experience_queue
-        self.stop_event = stop_event
-        self.pause_event = pause_event
-        self.stats_recorder = stats_recorder
-        self.ppo_config = ppo_config
-        self.device = device
-        self.checkpoint_manager = checkpoint_manager
-        # Global step is managed by aggregator, worker just reads/uses it
-        self.rollouts_processed = 0
-
-        # --- State for Update Progress Tracking ---
-        self._progress_lock = threading.Lock()
-        self.current_update_epoch = 0
-        self.total_update_epochs = self.ppo_config.PPO_EPOCHS
-        self.current_minibatch_in_epoch = 0
-        self.total_minibatches_in_epoch = 0
-        self.update_start_time = 0.0
-        # --- End Update Progress State ---
-
-        print(f"[{self.name}] Initialized.")
-
-    def get_update_progress_details(self) -> Dict[str, Any]:
-        """Returns detailed progress information for the current update phase (thread-safe)."""
-        with self._progress_lock:
-            overall_progress = 0.0
-            epoch_progress = 0.0
-            if self.total_update_epochs > 0 and self.total_minibatches_in_epoch > 0:
-                total_minibatches_overall = (
-                    self.total_update_epochs * self.total_minibatches_in_epoch
-                )
-                minibatches_done_overall = max(
-                    0,
-                    (self.current_update_epoch - 1) * self.total_minibatches_in_epoch
-                    + self.current_minibatch_in_epoch,
-                )
-                overall_progress = min(
-                    1.0, minibatches_done_overall / max(1, total_minibatches_overall)
-                )
-                epoch_progress = min(
-                    1.0,
-                    self.current_minibatch_in_epoch
-                    / max(1, self.total_minibatches_in_epoch),
-                )
-
-            return {
-                "overall_progress": overall_progress,
-                "epoch_progress": epoch_progress,
-                "current_epoch": self.current_update_epoch,
-                "total_epochs": self.total_update_epochs,
-                "phase": "Updating Agent",  # Assume this is only called when updating
-                "update_start_time": self.update_start_time,
-                "num_minibatches_per_epoch": self.total_minibatches_in_epoch,
-                "current_minibatch_index": self.current_minibatch_in_epoch,
-            }
-
-    def run(self):
-        print(f"[{self.name}] Starting training worker loop.")
-        update_count = 0
-        loop_iter = 0
-        try:
-            while not self.stop_event.is_set():
-                loop_iter += 1
-                # --- Pause Handling ---
-                pause_check_iter = 0
-                while self.pause_event.is_set():
-                    if self.stop_event.is_set():
-                        break
-                    # if pause_check_iter % 50 == 0:  # Log pause less frequently
-                    #     print(f"[{self.name} Loop {loop_iter}] Paused (is_set={self.pause_event.is_set()})...")
-                    time.sleep(0.1)  # Wait a bit before re-checking pause_event
-                    pause_check_iter += 1
-                if self.stop_event.is_set():  # Check stop event after pause loop
-                    break
-                # --- End Pause Handling ---
-
-                try:
-                    # Use a timeout to allow checking stop/pause events periodically
-                    rollout_data_cpu = self.experience_queue.get(
-                        block=True, timeout=0.1
-                    )
-                except queue.Empty:
-                    continue  # Go back to check stop/pause events
-                except Exception as q_err:
-                    print(f"[{self.name}] ERROR getting data from queue: {q_err}")
-                    traceback.print_exc()
-                    time.sleep(0.1)
-                    continue
-
-                # --- Check stop event after getting data ---
-                if self.stop_event.is_set():
-                    break
-                # --- End check ---
-
-                # --- Reset Progress Tracking for New Update ---
-                with self._progress_lock:
-                    self.update_start_time = time.time()
-                    self.current_update_epoch = 0
-                    self.current_minibatch_in_epoch = 0
-                    self.total_minibatches_in_epoch = 0  # Will be calculated below
-                # --- End Reset Progress ---
-
-                update_count += 1
-                print(f"\n[{self.name}] Starting Update #{update_count}...")
-
-                # Check if 'actions' key exists and has data
-                if (
-                    "actions" not in rollout_data_cpu
-                    or rollout_data_cpu["actions"] is None
-                ):
-                    print(
-                        f"[{self.name}] Warning: Received rollout data missing 'actions'. Skipping update."
-                    )
-                    continue
-                num_samples = rollout_data_cpu["actions"].shape[0]
-                if num_samples == 0:
-                    print(
-                        f"[{self.name}] Warning: Received empty rollout data. Skipping update."
-                    )
-                    continue
-
-                # --- PPO Update Loop ---
-                update_error_occurred = False  # Flag to track errors within update
-                all_minibatch_metrics = defaultdict(list)  # Accumulate metrics
-
-                # Normalize advantages (should already be done, but can be done here too)
-                advantages = rollout_data_cpu["advantages"]
-                if advantages is not None and advantages.numel() > 0:
-                    rollout_data_cpu["advantages"] = (
-                        advantages - advantages.mean()
-                    ) / (advantages.std() + 1e-8)
-                else:
-                    print(
-                        f"[{self.name}] Warning: Advantages are None or empty. Skipping normalization and update."
-                    )
-                    continue
-
-                # Move data to device (handle potential errors)
-                rollout_data_device = None
-                try:
-                    rollout_data_device = {
-                        k: v.to(self.device, non_blocking=True)
-                        for k, v in rollout_data_cpu.items()
-                        if isinstance(v, torch.Tensor)
-                    }
-                    # Handle non-tensor data (like initial_lstm_state)
-                    if (
-                        "initial_lstm_state" in rollout_data_cpu
-                        and rollout_data_cpu["initial_lstm_state"] is not None
-                    ):
-                        h, c = rollout_data_cpu["initial_lstm_state"]
-                        rollout_data_device["initial_lstm_state"] = (
-                            h.to(self.device, non_blocking=True),
-                            c.to(self.device, non_blocking=True),
-                        )
-                except Exception as move_err:
-                    print(
-                        f"[{self.name}] Error moving rollout data to device {self.device}: {move_err}"
-                    )
-                    traceback.print_exc()
-                    update_error_occurred = True  # Mark error occurred
-
-                if not update_error_occurred:
-                    for epoch in range(self.ppo_config.PPO_EPOCHS):
-                        with self._progress_lock:
-                            self.current_update_epoch = epoch + 1
-                            self.current_minibatch_in_epoch = 0
-                            # Calculate total minibatches for this epoch (can vary slightly if num_samples not divisible)
-                            self.total_minibatches_in_epoch = (
-                                num_samples + self.ppo_config.MINIBATCH_SIZE - 1
-                            ) // self.ppo_config.MINIBATCH_SIZE
-
-                        # --- Epoch Start Log ---
-                        print(
-                            f"  [{self.name}] Starting Epoch {epoch+1}/{self.ppo_config.PPO_EPOCHS}..."
-                        )
-                        # --- End Epoch Start Log ---
-
-                        # Check pause/stop before starting epoch
-                        if self.stop_event.is_set() or self.pause_event.is_set():
-                            update_error_occurred = (
-                                True  # Treat pause as needing to stop the update cycle
-                            )
-                            break
-                        if (
-                            update_error_occurred
-                        ):  # Check if error occurred in previous epoch
-                            break
-
-                        indices = np.arange(num_samples)
-                        np.random.shuffle(indices)
-                        num_minibatches_this_epoch = 0
-
-                        for start_idx in range(
-                            0, num_samples, self.ppo_config.MINIBATCH_SIZE
-                        ):
-                            with self._progress_lock:
-                                self.current_minibatch_in_epoch = (
-                                    num_minibatches_this_epoch + 1
-                                )
-
-                            # Check pause/stop before processing minibatch
-                            if self.stop_event.is_set() or self.pause_event.is_set():
-                                update_error_occurred = True  # Treat pause as needing to stop the update cycle
-                                break
-                            if (
-                                update_error_occurred
-                            ):  # Check if error occurred in previous minibatch
-                                break
-
-                            end_idx = start_idx + self.ppo_config.MINIBATCH_SIZE
-                            minibatch_indices = indices[start_idx:end_idx]
-                            minibatch_size = len(minibatch_indices)
-
-                            if minibatch_size < 2:  # Avoid tiny batches
-                                continue
-
-                            try:
-                                # --- Time the minibatch update ---
-                                mb_start_time = time.time()
-
-                                # Select minibatch data (already on device)
-                                minibatch_device = {
-                                    key: rollout_data_device[key][minibatch_indices]
-                                    for key in [
-                                        "obs_grid",
-                                        "obs_shapes",
-                                        "obs_availability",
-                                        "obs_explicit_features",
-                                        "actions",
-                                        "log_probs",
-                                        "returns",
-                                        "advantages",
-                                    ]
-                                    if key in rollout_data_device  # Check key exists
-                                }
-
-                                # Perform update using agent's method (which includes lock)
-                                minibatch_metrics = self.agent.update_minibatch(
-                                    minibatch_device
-                                )
-
-                                # --- Calculate and log minibatch SPS ---
-                                mb_duration = time.time() - mb_start_time
-                                minibatch_sps = minibatch_size / max(1e-9, mb_duration)
-                                minibatch_metrics["minibatch_update_sps"] = (
-                                    minibatch_sps
-                                )
-                                # --- End minibatch SPS calculation ---
-
-                                # --- Accumulate minibatch metrics ---
-                                for k, v in minibatch_metrics.items():
-                                    all_minibatch_metrics[k].append(v)
-                                # --- End accumulate ---
-
-                                num_minibatches_this_epoch += 1
-
-                                # --- Minibatch Progress Log (less frequent) ---
-                                if (
-                                    num_minibatches_this_epoch
-                                    % max(1, self.total_minibatches_in_epoch // 4)
-                                    == 0
-                                ):
-                                    print(
-                                        f"    [{self.name}] Epoch {epoch+1}: Minibatch {num_minibatches_this_epoch}/{self.total_minibatches_in_epoch} done."
-                                    )
-                                # --- End Minibatch Progress Log ---
-
-                            except KeyError as ke:
-                                print(
-                                    f"[{self.name}] ERROR: Missing key in minibatch data: {ke}"
-                                )
-                                update_error_occurred = True
-                            except Exception as update_err:
-                                print(
-                                    f"[{self.name}] CRITICAL ERROR during agent.update_minibatch: {update_err}"
-                                )
-                                traceback.print_exc()
-                                update_error_occurred = True
-                            finally:
-                                # Clean up minibatch tensors if needed (though data is sliced from larger tensor)
-                                del minibatch_device
-                                if self.device.type == "cuda":
-                                    torch.cuda.empty_cache()  # Maybe call less often?
-                        # End minibatch loop
-                        if update_error_occurred:  # Break epoch loop if error occurred
-                            break
-                        # --- Epoch End Log ---
-                        print(
-                            f"  [{self.name}] Epoch {epoch+1} finished ({num_minibatches_this_epoch} minibatches)."
-                        )
-                        # --- End Epoch End Log ---
-                    # End epoch loop
-
-                # --- End PPO Update Loop ---
-
-                del rollout_data_device
-                if self.device.type == "cuda":
-                    torch.cuda.empty_cache()
-
-                # --- Log overall update stats AFTER the update cycle ---
-                if not update_error_occurred:
-                    update_duration = (
-                        time.time() - self.update_start_time
-                    )  # Use tracked start time
-
-                    # --- Update Global Step in Aggregator ---
-                    steps_this_update = num_samples
-                    new_global_step = 0
-                    if hasattr(self.stats_recorder, "aggregator"):
-                        with self.stats_recorder.aggregator._lock:
-                            self.stats_recorder.aggregator.storage.current_global_step += (
-                                steps_this_update
-                            )
-                            new_global_step = (
-                                self.stats_recorder.aggregator.storage.current_global_step
-                            )
-                    # --- End Update Global Step ---
-
-                    # Calculate Overall Update SPS
-                    overall_update_sps = num_samples / max(1e-6, update_duration)
-
-                    # --- Prepare aggregated metrics for logging ---
-                    step_record_data = {
-                        "update_time": update_duration,
-                        "lr": self.agent.optimizer.param_groups[0]["lr"],
-                        "global_step": new_global_step,  # Log against the NEW step
-                        "training_target_step": self.checkpoint_manager.training_target_step,
-                        "update_steps_per_second": overall_update_sps,  # Log the overall SPS here
-                    }
-                    # Add mean of accumulated minibatch metrics
-                    for k, v_list in all_minibatch_metrics.items():
-                        if v_list:
-                            step_record_data[k] = np.mean(v_list)
-                    # --- End prepare aggregated metrics ---
-
-                    # --- Log aggregated step metrics ---
-                    self.stats_recorder.record_step(step_record_data)
-                    # --- End log aggregated step metrics ---
-
-                    # Increment rollout counter for histogram/image logging frequency checks
-                    if (
-                        hasattr(self.stats_recorder, "histogram_logger")
-                        and self.stats_recorder.histogram_logger
-                    ):
-                        self.stats_recorder.histogram_logger.increment_rollout_counter()
-                        # Reset counter only if logging actually happened (checked internally by logger)
-                        if self.stats_recorder.histogram_logger.should_log(
-                            new_global_step
-                        ):
-                            self.stats_recorder.histogram_logger.reset_rollout_counter()
-                    if (
-                        hasattr(self.stats_recorder, "image_logger")
-                        and self.stats_recorder.image_logger
-                    ):
-                        self.stats_recorder.image_logger.increment_rollout_counter()
-                        # Reset counter only if logging actually happened
-                        if self.stats_recorder.image_logger.should_log(new_global_step):
-                            self.stats_recorder.image_logger.reset_rollout_counter()
-
-                    self.rollouts_processed += 1
-                    print(
-                        f"[{self.name}] Update #{update_count} finished in {update_duration:.2f}s (Overall SPS: {overall_update_sps:.0f})."
-                    )
-
-                elif update_error_occurred:
-                    print(
-                        f"[{self.name}] Update #{update_count} skipped or interrupted due to error/pause/stop."
-                    )
-                else:
-                    print(
-                        f"[{self.name}] Update #{update_count} skipped (no minibatches processed)."
-                    )
-
-                # Reset progress tracking after update finishes or errors out
-                with self._progress_lock:
-                    self.current_update_epoch = 0
-                    self.current_minibatch_in_epoch = 0
-                    self.total_minibatches_in_epoch = 0
-                    self.update_start_time = 0.0
-
-                time.sleep(0.001)  # Small sleep between updates
-
-        except Exception as e:
-            print(f"[{self.name}] CRITICAL ERROR in training worker loop: {e}")
-            traceback.print_exc()
-            self.stop_event.set()
-        finally:
-            print(f"[{self.name}] Training worker loop finished.")
-
-
-File: agent\model_factory.py
-import torch
-import torch.nn as nn
-
-from config import ModelConfig, EnvConfig, RNNConfig, TransformerConfig
-from agent.networks.agent_network import ActorCriticNetwork
-
-
-def create_network(
-    env_config: EnvConfig,
-    action_dim: int,
-    model_config: ModelConfig,
-    rnn_config: RNNConfig,
-    transformer_config: TransformerConfig,
-    device: torch.device,
-) -> nn.Module:
-    """Creates the ActorCriticNetwork based on configuration."""
-    print(
-        f"[ModelFactory] Creating ActorCriticNetwork (RNN: {rnn_config.USE_RNN}, Transformer: {transformer_config.USE_TRANSFORMER})"
-    )
-    return ActorCriticNetwork(
-        env_config=env_config,
-        action_dim=action_dim,
-        model_config=model_config.Network,
-        rnn_config=rnn_config,
-        transformer_config=transformer_config,
-        device=device,
-    )
-
-
-File: agent\ppo_agent.py
-# File: agent/ppo_agent.py
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-from torch.distributions import Categorical
-import numpy as np
-import traceback
-import threading
-from typing import Tuple, List, Dict, Any, Optional, Union
-
-from config import (
-    ModelConfig,
-    EnvConfig,
-    PPOConfig,
-    RNNConfig,
-    TransformerConfig,
-    TensorBoardConfig,
-)
-from environment.game_state import StateType  # Keep StateType for single action method
-from utils.types import ActionType, AgentStateDict
-from agent.model_factory import create_network
-
-
-class PPOAgent:
-    """
-    PPO Agent orchestrating network, action selection, and updates.
-    Assumes observations received are ALREADY NORMALIZED if ObsNorm is enabled.
-    Includes locks for thread safety.
-    """
-
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        ppo_config: PPOConfig,
-        rnn_config: RNNConfig,
-        env_config: EnvConfig,
-        transformer_config: TransformerConfig,
-        device: torch.device,
-    ):
-        self.device = device
-        self.env_config = env_config
-        self.ppo_config = ppo_config
-        self.rnn_config = rnn_config
-        self.transformer_config = transformer_config
-        self.tb_config = TensorBoardConfig()
-        self.action_dim = env_config.ACTION_DIM
-        self._lock = threading.Lock()
-
-        self.network = create_network(
-            env_config=self.env_config,
-            action_dim=self.action_dim,
-            model_config=model_config,
-            rnn_config=self.rnn_config,
-            transformer_config=self.transformer_config,
-            device=self.device,
-        ).to(self.device)
-
-        self.optimizer = optim.AdamW(
-            self.network.parameters(),
-            lr=ppo_config.LEARNING_RATE,
-            eps=ppo_config.ADAM_EPS,
-        )
-        self._print_init_info()
-
-    def _print_init_info(self):
-        """Logs basic agent configuration on initialization."""
-        print(f"[PPOAgent] Using Device: {self.device}")
-        print(f"[PPOAgent] Network: {type(self.network).__name__}")
-        print(f"[PPOAgent] Using RNN: {self.rnn_config.USE_RNN}")
-        print(
-            f"[PPOAgent] Using Transformer: {self.transformer_config.USE_TRANSFORMER}"
-        )
-        total_params = sum(
-            p.numel() for p in self.network.parameters() if p.requires_grad
-        )
-        print(f"[PPOAgent] Trainable Parameters: {total_params / 1e6:.2f} M")
-
-    @torch.no_grad()
-    def select_action(
-        self,
-        state: StateType,
-        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        deterministic: bool = False,
-        valid_actions_indices: Optional[List[ActionType]] = None,
-    ) -> Tuple[ActionType, float, float, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
-        """Selects an action based on the (potentially normalized) state. (Less used now)"""
-        with self._lock:
-            self.network.eval()
-            grid_t = (
-                torch.from_numpy(state["grid"]).float().unsqueeze(0).to(self.device)
-            )
-            shapes_t = (
-                torch.from_numpy(state["shapes"]).float().unsqueeze(0).to(self.device)
-            )
-            availability_t = (
-                torch.from_numpy(state["shape_availability"])
-                .float()
-                .unsqueeze(0)
-                .to(self.device)
-            )
-            explicit_features_t = (
-                torch.from_numpy(state["explicit_features"])
-                .float()
-                .unsqueeze(0)
-                .to(self.device)
-            )
-
-            needs_sequence_dim = (
-                self.rnn_config.USE_RNN or self.transformer_config.USE_TRANSFORMER
-            )
-            if needs_sequence_dim:
-                grid_t, shapes_t, availability_t, explicit_features_t = (
-                    t.unsqueeze(1)
-                    for t in [grid_t, shapes_t, availability_t, explicit_features_t]
-                )
-                if hidden_state:
-                    hidden_state = (
-                        hidden_state[0][:, 0:1, :].contiguous(),
-                        hidden_state[1][:, 0:1, :].contiguous(),
-                    )
-
-            policy_logits, value, next_hidden_state = self.network(
-                grid_t,
-                shapes_t,
-                availability_t,
-                explicit_features_t,
-                hidden_state,
-                padding_mask=None,
-            )
-
-            if needs_sequence_dim:
-                policy_logits, value = policy_logits.squeeze(1), value.squeeze(1)
-            policy_logits = torch.nan_to_num(policy_logits.squeeze(0), nan=-1e9)
-
-            if valid_actions_indices is not None:
-                mask = torch.full_like(policy_logits, -float("inf"))
-                valid_indices_in_bounds = [
-                    idx
-                    for idx in valid_actions_indices
-                    if 0 <= idx < policy_logits.shape[0]
-                ]
-                if valid_indices_in_bounds:
-                    mask[valid_indices_in_bounds] = 0
-                    policy_logits += mask
-
-            if torch.all(policy_logits == -float("inf")):
-                action, action_log_prob = 0, torch.tensor(-1e9, device=self.device)
-            else:
-                distribution = Categorical(logits=policy_logits)
-                action_tensor = (
-                    distribution.mode if deterministic else distribution.sample()
-                )
-                action_log_prob = distribution.log_prob(action_tensor)
-                action = action_tensor.item()
-                if (
-                    valid_actions_indices is not None
-                    and action not in valid_actions_indices
-                ):
-                    if valid_indices_in_bounds:
-                        action = np.random.choice(valid_indices_in_bounds)
-                        action_log_prob = distribution.log_prob(
-                            torch.tensor(action, device=self.device)
-                        )
-                    else:
-                        action, action_log_prob = 0, torch.tensor(
-                            -1e9, device=self.device
-                        )
-
-            return (
-                action,
-                action_log_prob.item(),
-                value.squeeze().item(),
-                next_hidden_state,
-            )
-
-    @torch.no_grad()
-    def select_action_batch(
-        self,
-        grid_batch: torch.Tensor,
-        shape_batch: torch.Tensor,
-        availability_batch: torch.Tensor,
-        explicit_features_batch: torch.Tensor,
-        hidden_state_batch: Optional[Tuple[torch.Tensor, torch.Tensor]],
-        valid_actions_lists: List[Optional[List[ActionType]]],
-    ) -> Tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        Optional[Tuple[torch.Tensor, torch.Tensor]],
-    ]:
-        """Selects actions for a batch of (potentially normalized) states. Thread-safe."""
-        with self._lock:
-            self.network.eval()
-            batch_size = grid_batch.shape[0]
-
-            needs_sequence_dim = (
-                self.rnn_config.USE_RNN or self.transformer_config.USE_TRANSFORMER
-            )
-            if needs_sequence_dim:
-                grid_batch, shape_batch, availability_batch, explicit_features_batch = (
-                    t.unsqueeze(1)
-                    for t in [
-                        grid_batch,
-                        shape_batch,
-                        availability_batch,
-                        explicit_features_batch,
-                    ]
-                )
-
-            policy_logits, value, next_hidden_batch = self.network(
-                grid_batch,
-                shape_batch,
-                availability_batch,
-                explicit_features_batch,
-                hidden_state_batch,
-                padding_mask=None,
-            )
-
-            if needs_sequence_dim:
-                policy_logits, value = policy_logits.squeeze(1), value.squeeze(1)
-            policy_logits = torch.nan_to_num(policy_logits, nan=-1e9)
-
-            mask = torch.full_like(policy_logits, -float("inf"))
-            any_valid = False
-            for i in range(batch_size):
-                valid_actions = valid_actions_lists[i]
-                if valid_actions:
-                    valid_indices_in_bounds = [
-                        idx for idx in valid_actions if 0 <= idx < self.action_dim
-                    ]
-                    if valid_indices_in_bounds:
-                        mask[i, valid_indices_in_bounds] = 0
-                        any_valid = True
-
-            if any_valid:
-                policy_logits += mask
-            all_masked_rows = torch.all(policy_logits == -float("inf"), dim=1)
-            policy_logits[all_masked_rows] = 0.0
-
-            distribution = Categorical(logits=policy_logits)
-            actions_tensor = distribution.sample()
-            action_log_probs = distribution.log_prob(actions_tensor)
-            actions_tensor[all_masked_rows] = 0
-            action_log_probs[all_masked_rows] = -1e9
-            value = value.squeeze(-1) if value.ndim > 1 else value
-
-            return actions_tensor, action_log_probs, value, next_hidden_batch
-
-    def evaluate_actions(
-        self,
-        grid_tensor: torch.Tensor,
-        shape_feature_tensor: torch.Tensor,
-        shape_availability_tensor: torch.Tensor,
-        explicit_features_tensor: torch.Tensor,
-        actions: torch.Tensor,
-        initial_lstm_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        dones_tensor: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Evaluates actions for loss calculation. Assumes called within update lock."""
-        self.network.train()
-        padding_mask = None
-        policy_logits, value, _ = self.network(
-            grid_tensor,
-            shape_feature_tensor,
-            shape_availability_tensor,
-            explicit_features_tensor,
-            initial_lstm_state,
-            padding_mask=padding_mask,
-        )
-        policy_logits = torch.nan_to_num(policy_logits, nan=-1e9)
-        distribution = Categorical(logits=policy_logits)
-        action_log_probs = distribution.log_prob(actions)
-        entropy = distribution.entropy()
-        value = value.squeeze(-1)
-        return action_log_probs, value, entropy
-
-    def update_minibatch(
-        self, minibatch_data: Dict[str, torch.Tensor]
-    ) -> Dict[str, float]:
-        """Performs a PPO update step on a SINGLE minibatch. Thread-safe."""
-        with self._lock:
-            self.network.train()
-            mb_obs_grid = minibatch_data["obs_grid"]
-            mb_obs_shapes = minibatch_data["obs_shapes"]
-            mb_obs_availability = minibatch_data["obs_availability"]
-            mb_obs_explicit_features = minibatch_data["obs_explicit_features"]
-            mb_actions = minibatch_data["actions"]
-            mb_old_log_probs = minibatch_data["log_probs"]
-            mb_returns = minibatch_data["returns"]
-            mb_advantages = minibatch_data["advantages"]
-
-            new_log_probs, predicted_values, entropy = self.evaluate_actions(
-                mb_obs_grid,
-                mb_obs_shapes,
-                mb_obs_availability,
-                mb_obs_explicit_features,
-                mb_actions,
-                None,
-                None,
-            )
-
-            logratio = new_log_probs - mb_old_log_probs
-            ratio = torch.exp(logratio)
-            surr1 = ratio * mb_advantages
-            surr2 = (
-                torch.clamp(
-                    ratio,
-                    1.0 - self.ppo_config.CLIP_PARAM,
-                    1.0 + self.ppo_config.CLIP_PARAM,
-                )
-                * mb_advantages
-            )
-            policy_loss = -torch.min(surr1, surr2).mean()
-            value_loss = F.mse_loss(predicted_values, mb_returns)
-            entropy_loss = -entropy.mean()
-
-            loss = (
-                policy_loss
-                + self.ppo_config.VALUE_LOSS_COEF * value_loss
-                + self.ppo_config.ENTROPY_COEF * entropy_loss
-            )
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            grad_norm_val = None
-            if self.ppo_config.MAX_GRAD_NORM > 0:
-                grad_norm = nn.utils.clip_grad_norm_(
-                    self.network.parameters(), self.ppo_config.MAX_GRAD_NORM
-                )
-                grad_norm_val = grad_norm.item()
-            self.optimizer.step()
-
-            metrics = {
-                "policy_loss": policy_loss.item(),
-                "value_loss": value_loss.item(),
-                "entropy": -entropy_loss.item(),
-            }
-            if grad_norm_val is not None:
-                metrics["grad_norm"] = grad_norm_val
-            return metrics
-
-    def get_state_dict(self) -> AgentStateDict:
-        """Returns the agent's state dictionary for checkpointing. Thread-safe."""
-        with self._lock:
-            original_device = next(self.network.parameters()).device
-            self.network.cpu()
-            state = {
-                "network_state_dict": self.network.state_dict(),
-                "optimizer_state_dict": self.optimizer.state_dict(),
-            }
-            self.network.to(original_device)
-            return state
-
-    def load_state_dict(self, state_dict: AgentStateDict):
-        """Loads the agent's state from a dictionary. Thread-safe."""
-        with self._lock:
-            print(f"[PPOAgent] Loading state dict. Target device: {self.device}")
-            network_loaded_successfully = False
-            try:
-                # Attempt to load network state with strict=False first
-                try:
-                    self.network.load_state_dict(
-                        state_dict["network_state_dict"], strict=False
-                    )
-                    print(
-                        "[PPOAgent] Network state loaded (strict=False). Mismatched/missing keys ignored."
-                    )
-                    network_loaded_successfully = True
-                except RuntimeError as e:
-                    # If strict=False still fails, it's likely a more fundamental issue
-                    print(
-                        f"Warning: Network load failed even with strict=False: {e}. Network will remain initialized."
-                    )
-                    # Optionally, re-initialize the network completely here if desired
-                    # self.network = create_network(...)
-                except KeyError:
-                    print(
-                        "Warning: 'network_state_dict' key missing in checkpoint. Network will remain initialized."
-                    )
-                except Exception as e:
-                    print(
-                        f"Warning: Unexpected error loading network state: {e}. Network will remain initialized."
-                    )
-                    traceback.print_exc()
-
-                self.network.to(self.device)
-
-                # Always try to load optimizer state, but re-initialize if it fails or network load failed
-                if "optimizer_state_dict" in state_dict and network_loaded_successfully:
-                    try:
-                        # Re-create optimizer linked to the potentially partially loaded network
-                        self.optimizer = optim.AdamW(
-                            self.network.parameters(),
-                            lr=self.ppo_config.LEARNING_RATE,
-                            eps=self.ppo_config.ADAM_EPS,
-                        )
-                        self.optimizer.load_state_dict(
-                            state_dict["optimizer_state_dict"]
-                        )
-                        # Move optimizer state to the correct device
-                        for state in self.optimizer.state.values():
-                            for k, v in state.items():
-                                if isinstance(v, torch.Tensor):
-                                    state[k] = v.to(self.device)
-                        print("[PPOAgent] Optimizer state loaded and moved to device.")
-                    except Exception as e:
-                        print(
-                            f"Warning: Could not load optimizer state ({e}). Re-initializing optimizer."
-                        )
-                        self.optimizer = optim.AdamW(
-                            self.network.parameters(),
-                            lr=self.ppo_config.LEARNING_RATE,
-                            eps=self.ppo_config.ADAM_EPS,
-                        )
-                else:
-                    if not network_loaded_successfully:
-                        print(
-                            "[PPOAgent] Network load failed or incomplete, re-initializing optimizer."
-                        )
-                    else:
-                        print(
-                            "[PPOAgent] Optimizer state not found in checkpoint. Re-initializing optimizer."
-                        )
-                    self.optimizer = optim.AdamW(
-                        self.network.parameters(),
-                        lr=self.ppo_config.LEARNING_RATE,
-                        eps=self.ppo_config.ADAM_EPS,
-                    )
-                print("[PPOAgent] load_state_dict finished.")
-            except Exception as e:
-                print(f"CRITICAL ERROR during PPOAgent.load_state_dict: {e}")
-                traceback.print_exc()
-                # Ensure optimizer is re-initialized on critical failure
-                print(
-                    "[PPOAgent] Re-initializing optimizer due to critical load error."
-                )
-                self.optimizer = optim.AdamW(
-                    self.network.parameters(),
-                    lr=self.ppo_config.LEARNING_RATE,
-                    eps=self.ppo_config.ADAM_EPS,
-                )
-
-    def get_initial_hidden_state(
-        self, num_envs: int
-    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
-        """Gets the initial hidden state for the LSTM, if used. Thread-safe."""
-        if not self.rnn_config.USE_RNN:
-            return None
-        # Ensure network is on the correct device before calling its method
-        # self.network.to(self.device) # <<< REMOVED THIS LINE
-        # Call the network's method directly (network should already be on self.device)
-        return self.network.get_initial_hidden_state(num_envs)
-
-
-File: agent\__init__.py
-from .ppo_agent import PPOAgent
-from .model_factory import create_network
-from agent.networks.agent_network import ActorCriticNetwork
-
-__all__ = [
-    "PPOAgent",
-    "create_network",
-    "ActorCriticNetwork",
-]
-
-
-File: agent\networks\agent_network.py
-# File: agent/networks/agent_network.py
-import torch
-import torch.nn as nn
-import numpy as np
-from typing import Tuple, List, Optional
-
-from config import (
-    ModelConfig,
-    EnvConfig,
-    RNNConfig,
-    TransformerConfig,
-)
-
-
-class ActorCriticNetwork(nn.Module):
-    """
-    Actor-Critic Network: CNN -> Spatial Transformer -> Fusion MLP -> Optional LSTM -> Actor/Critic Heads.
-    Handles both single step (eval) and sequence (RNN/Transformer training) inputs.
-    Includes shape availability and explicit features.
-    Uses SiLU activation by default based on ModelConfig.
-    Applies Transformer attention directly to spatial CNN features.
-    """
-
-    def __init__(
-        self,
-        env_config: EnvConfig,
-        action_dim: int,
-        model_config: ModelConfig.Network,
-        rnn_config: RNNConfig,
-        transformer_config: TransformerConfig,
-        device: torch.device,
-    ):
-        super().__init__()
-        self.action_dim = action_dim
-        self.env_config = env_config
-        self.config = model_config
-        self.rnn_config = rnn_config
-        self.transformer_config = transformer_config
-        self.device = device
-
-        print(f"[ActorCriticNetwork] Target device set to: {self.device}")
-        print(f"[ActorCriticNetwork] Using RNN: {self.rnn_config.USE_RNN}")
-        print(
-            f"[ActorCriticNetwork] Using Transformer: {self.transformer_config.USE_TRANSFORMER}"
-        )
-        print(
-            f"[ActorCriticNetwork] Using Activation: {self.config.CONV_ACTIVATION.__name__}"
-        )
-
-        self.grid_c, self.grid_h, self.grid_w = self.env_config.GRID_STATE_SHAPE
-        self.shape_feat_dim = self.env_config.SHAPE_STATE_DIM
-        self.shape_availability_dim = self.env_config.SHAPE_AVAILABILITY_DIM
-        self.explicit_features_dim = self.env_config.EXPLICIT_FEATURES_DIM
-
-        # --- Feature Extractors ---
-        self.conv_base, self.conv_out_h, self.conv_out_w, self.conv_out_c = (
-            self._build_cnn_branch()
-        )
-        # self.conv_out_size = self._get_conv_out_size( # No longer needed as we don't flatten immediately
-        #     (self.grid_c, self.grid_h, self.grid_w)
-        # )
-        print(
-            f"  CNN Output Dim (HxWxC): ({self.conv_out_h}x{self.conv_out_w}x{self.conv_out_c})"
-        )
-
-        self.shape_mlp, self.shape_mlp_out_dim = self._build_shape_mlp_branch()
-        print(f"  Shape Feature MLP Output Dim: {self.shape_mlp_out_dim}")
-
-        # --- Optional Transformer Layer (Applied to Spatial CNN Features) ---
-        self.transformer_encoder = None
-        self.pos_embedding = None
-        self.patch_projection = None
-        transformer_output_dim = 0  # Will be set if transformer is used
-
-        if self.transformer_config.USE_TRANSFORMER:
-            if (
-                self.transformer_config.TRANSFORMER_D_MODEL
-                % self.transformer_config.TRANSFORMER_NHEAD
-                != 0
-            ):
-                raise ValueError(
-                    f"TRANSFORMER_D_MODEL ({self.transformer_config.TRANSFORMER_D_MODEL}) must be divisible by TRANSFORMER_NHEAD ({self.transformer_config.TRANSFORMER_NHEAD})"
-                )
-
-            # Linear projection from CNN output channels to Transformer dimension
-            self.patch_projection = nn.Linear(
-                self.conv_out_c, self.transformer_config.TRANSFORMER_D_MODEL
-            ).to(self.device)
-
-            encoder_layer = nn.TransformerEncoderLayer(
-                d_model=self.transformer_config.TRANSFORMER_D_MODEL,
-                nhead=self.transformer_config.TRANSFORMER_NHEAD,
-                dim_feedforward=self.transformer_config.TRANSFORMER_DIM_FEEDFORWARD,
-                dropout=self.transformer_config.TRANSFORMER_DROPOUT,
-                activation=self.transformer_config.TRANSFORMER_ACTIVATION,
-                batch_first=True,  # Input shape (Batch, Seq, Feature)
-                device=self.device,
-            )
-            self.transformer_encoder = nn.TransformerEncoder(
-                encoder_layer, num_layers=self.transformer_config.TRANSFORMER_NUM_LAYERS
-            ).to(self.device)
-
-            # Positional embedding for the flattened spatial features
-            self.num_patches = self.conv_out_h * self.conv_out_w
-            self.pos_embedding = nn.Parameter(
-                torch.randn(
-                    1, self.num_patches, self.transformer_config.TRANSFORMER_D_MODEL
-                )
-            ).to(self.device)
-
-            transformer_output_dim = (
-                self.transformer_config.TRANSFORMER_D_MODEL
-            )  # Output dim after pooling/CLS
-            print(
-                f"  Spatial Transformer Added (Input Patches: {self.num_patches}, Proj: {self.conv_out_c}->{transformer_output_dim}, d_model={transformer_output_dim}, nhead={self.transformer_config.TRANSFORMER_NHEAD}, layers={self.transformer_config.TRANSFORMER_NUM_LAYERS})"
-            )
-        else:
-            # If no transformer, the input to fusion is the flattened CNN output
-            transformer_output_dim = self.conv_out_h * self.conv_out_w * self.conv_out_c
-            print(
-                f"  Spatial Transformer DISABLED. Using flattened CNN output ({transformer_output_dim})."
-            )
-
-        # --- Fusion MLP ---
-        # Input dim depends on whether Transformer was used
-        combined_features_dim = (
-            transformer_output_dim  # Output of Transformer (pooled) or flattened CNN
-            + self.shape_mlp_out_dim
-            + self.shape_availability_dim
-            + self.explicit_features_dim
-        )
-        print(
-            f"  Combined Features Dim (Spatial Features + Shape MLP + Avail + Explicit): {combined_features_dim}"
-        )
-
-        self.fusion_mlp, self.fusion_output_dim = self._build_fusion_mlp_branch(
-            combined_features_dim
-        )
-        print(f"  Fusion MLP Output Dim: {self.fusion_output_dim}")
-
-        # --- Optional LSTM Layer ---
-        self.lstm_layer = None
-        self.lstm_hidden_size = 0
-        # Input to LSTM is output of Fusion MLP
-        lstm_input_dim = self.fusion_output_dim
-        # Input to heads is output of LSTM (or Fusion MLP if no LSTM)
-        head_input_dim = lstm_input_dim
-
-        if self.rnn_config.USE_RNN:
-            self.lstm_hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
-            self.lstm_layer = nn.LSTM(
-                input_size=lstm_input_dim,
-                hidden_size=self.lstm_hidden_size,
-                num_layers=self.rnn_config.LSTM_NUM_LAYERS,
-                batch_first=True,
-            ).to(self.device)
-            print(
-                f"  LSTM Layer Added (Input: {lstm_input_dim}, Hidden: {self.lstm_hidden_size}, Layers: {self.rnn_config.LSTM_NUM_LAYERS})"
-            )
-            head_input_dim = self.lstm_hidden_size  # Heads take LSTM output
-
-        # --- Actor/Critic Heads ---
-        self.actor_head = nn.Linear(head_input_dim, self.action_dim).to(self.device)
-        self.critic_head = nn.Linear(head_input_dim, 1).to(self.device)
-        print(f"  Head Input Dim: {head_input_dim}")
-        print(f"  Actor Head Output Dim: {self.action_dim}")
-        print(f"  Critic Head Output Dim: 1")
-
-        self._init_head_weights()
-
-    def _init_head_weights(self):
-        """Initializes Actor/Critic head weights."""
-        print("  Initializing Actor/Critic heads using Xavier Uniform.")
-        # Small gain for actor output layer
-        nn.init.xavier_uniform_(self.actor_head.weight, gain=0.01)
-        nn.init.constant_(self.actor_head.bias, 0)
-        # Standard gain for critic output layer
-        nn.init.xavier_uniform_(self.critic_head.weight, gain=1.0)
-        nn.init.constant_(self.critic_head.bias, 0)
-
-    def _build_cnn_branch(self) -> Tuple[nn.Sequential, int, int, int]:
-        """Builds the CNN feature extractor for the grid."""
-        conv_layers: List[nn.Module] = []
-        current_channels = self.grid_c
-        h, w = self.grid_h, self.grid_w
-        cfg = self.config
-        for i, out_channels in enumerate(cfg.CONV_CHANNELS):
-            conv_layer = nn.Conv2d(
-                current_channels,
-                out_channels,
-                kernel_size=cfg.CONV_KERNEL_SIZE,
-                stride=cfg.CONV_STRIDE,
-                padding=cfg.CONV_PADDING,
-                bias=not cfg.USE_BATCHNORM_CONV,  # No bias if using BatchNorm
-            ).to(self.device)
-            conv_layers.append(conv_layer)
-            if cfg.USE_BATCHNORM_CONV:
-                conv_layers.append(nn.BatchNorm2d(out_channels).to(self.device))
-            conv_layers.append(
-                cfg.CONV_ACTIVATION()
-            )  # Use activation from config (e.g., SiLU)
-            current_channels = out_channels
-            # Calculate output dimensions after conv
-            h = (h + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
-            w = (w + 2 * cfg.CONV_PADDING - cfg.CONV_KERNEL_SIZE) // cfg.CONV_STRIDE + 1
-        return nn.Sequential(*conv_layers), h, w, current_channels
-
-    def _get_conv_out_size(self, shape: Tuple[int, int, int]) -> int:
-        """Calculates the flattened output size of the CNN."""
-        # This might still be useful for validation or if Transformer is disabled
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, *shape, device=self.device)
-            output = self.conv_base(dummy_input)
-            return int(np.prod(output.size()[1:]))
-
-    def _build_shape_mlp_branch(self) -> Tuple[nn.Sequential, int]:
-        """Builds the MLP for processing shape features."""
-        shape_mlp_layers: List[nn.Module] = []
-        current_dim = self.env_config.SHAPE_STATE_DIM
-        cfg = self.config
-        for hidden_dim in cfg.SHAPE_FEATURE_MLP_DIMS:
-            lin_layer = nn.Linear(current_dim, hidden_dim).to(self.device)
-            shape_mlp_layers.append(lin_layer)
-            shape_mlp_layers.append(
-                cfg.SHAPE_MLP_ACTIVATION()
-            )  # Use activation from config
-            current_dim = hidden_dim
-        if not cfg.SHAPE_FEATURE_MLP_DIMS:
-            return (
-                nn.Identity(),
-                current_dim,
-            )  # Return Identity if no MLP layers defined
-        return nn.Sequential(*shape_mlp_layers), current_dim
-
-    def _build_fusion_mlp_branch(self, input_dim: int) -> Tuple[nn.Sequential, int]:
-        """Builds the MLP that fuses all features before RNN/Transformer/Heads."""
-        fusion_layers: List[nn.Module] = []
-        current_fusion_dim = input_dim
-        cfg = self.config
-        for i, hidden_dim in enumerate(cfg.COMBINED_FC_DIMS):
-            linear_layer = nn.Linear(
-                current_fusion_dim, hidden_dim, bias=not cfg.USE_BATCHNORM_FC
-            ).to(self.device)
-            fusion_layers.append(linear_layer)
-            if cfg.USE_BATCHNORM_FC:
-                # Use BatchNorm1d for MLP layers
-                fusion_layers.append(nn.BatchNorm1d(hidden_dim).to(self.device))
-            fusion_layers.append(
-                cfg.COMBINED_ACTIVATION()
-            )  # Use activation from config
-            if cfg.DROPOUT_FC > 0:
-                fusion_layers.append(nn.Dropout(cfg.DROPOUT_FC).to(self.device))
-            current_fusion_dim = hidden_dim
-        return nn.Sequential(*fusion_layers), current_fusion_dim
-
-    def forward(
-        self,
-        grid_tensor: torch.Tensor,
-        shape_feature_tensor: torch.Tensor,
-        shape_availability_tensor: torch.Tensor,
-        explicit_features_tensor: torch.Tensor,
-        hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        padding_mask: Optional[
-            torch.Tensor
-        ] = None,  # Shape: (batch_size, seq_len) - Not used with spatial transformer
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
-        """
-        Forward pass through the network. Handles single step and sequence inputs.
-        Applies Transformer to spatial CNN features if enabled.
-        """
-        # --- Ensure inputs are on the correct device ---
-        model_device = self.device
-        grid_tensor = grid_tensor.to(model_device)
-        shape_feature_tensor = shape_feature_tensor.to(model_device)
-        shape_availability_tensor = shape_availability_tensor.to(model_device)
-        explicit_features_tensor = explicit_features_tensor.to(model_device)
-        if hidden_state is not None:
-            hidden_state = (
-                hidden_state[0].to(model_device),
-                hidden_state[1].to(model_device),
-            )
-        # padding_mask is not used in this spatial transformer setup
-
-        # --- Determine input shape and flatten if necessary ---
-        is_sequence_input = grid_tensor.ndim == 5
-        initial_batch_size = grid_tensor.shape[0]
-        seq_len = grid_tensor.shape[1] if is_sequence_input else 1
-        num_samples = initial_batch_size * seq_len  # Total samples to process
-
-        # Reshape inputs to (N, Features) where N = B*T for processing by CNN/MLP
-        grid_input_flat = grid_tensor.reshape(
-            num_samples, *self.env_config.GRID_STATE_SHAPE
-        )
-        shape_feature_input_flat = shape_feature_tensor.reshape(
-            num_samples, self.env_config.SHAPE_STATE_DIM
-        )
-        shape_availability_input_flat = shape_availability_tensor.reshape(
-            num_samples, self.env_config.SHAPE_AVAILABILITY_DIM
-        )
-        explicit_features_input_flat = explicit_features_tensor.reshape(
-            num_samples, self.env_config.EXPLICIT_FEATURES_DIM
-        )
-
-        # --- Feature Extraction ---
-        # CNN processing
-        conv_features_spatial = self.conv_base(grid_input_flat)  # Shape: (N, C, H', W')
-
-        # Shape MLP processing
-        shape_features_flat = self.shape_mlp(
-            shape_feature_input_flat
-        )  # Shape: (N, ShapeMLPDim)
-
-        # --- Optional Spatial Transformer ---
-        spatial_features_processed = None
-        if (
-            self.transformer_config.USE_TRANSFORMER
-            and self.transformer_encoder is not None
-            and self.patch_projection is not None
-            and self.pos_embedding is not None
-        ):
-            # Reshape spatial features for Transformer: (N, C, H', W') -> (N, H'*W', C)
-            n_samples, c_out, h_out, w_out = conv_features_spatial.shape
-            spatial_flat_patches = conv_features_spatial.flatten(2).permute(
-                0, 2, 1
-            )  # Shape: (N, H'*W', C)
-
-            # Project patches to Transformer dimension
-            projected_patches = self.patch_projection(
-                spatial_flat_patches
-            )  # Shape: (N, NumPatches, D_model)
-
-            # Add positional embedding
-            transformer_input = (
-                projected_patches + self.pos_embedding
-            )  # Broadcasting (1, NumPatches, D_model)
-
-            # Apply Transformer encoder
-            # Note: padding_mask is not typically used with spatial features like this
-            transformer_output = self.transformer_encoder(
-                transformer_input
-            )  # Shape: (N, NumPatches, D_model)
-
-            # Pool the transformer output (e.g., mean pooling)
-            spatial_features_processed = transformer_output.mean(
-                dim=1
-            )  # Shape: (N, D_model)
-
-        else:
-            # If no transformer, flatten the CNN output
-            spatial_features_processed = conv_features_spatial.view(
-                num_samples, -1
-            )  # Shape: (N, C*H'*W')
-
-        # --- Feature Fusion ---
-        combined_features_flat = torch.cat(
-            (
-                spatial_features_processed,  # Output from Transformer or flattened CNN
-                shape_features_flat,
-                shape_availability_input_flat,
-                explicit_features_input_flat,
-            ),
-            dim=1,
-        )
-        fused_features_flat = self.fusion_mlp(
-            combined_features_flat
-        )  # Shape: (N, FusionDim)
-
-        # --- Optional LSTM ---
-        next_hidden_state = hidden_state  # Pass incoming state through
-        head_input_features = (
-            fused_features_flat  # Input to heads starts as output of Fusion MLP
-        )
-
-        if self.rnn_config.USE_RNN and self.lstm_layer is not None:
-            # Reshape to (B, T, Dim) for LSTM
-            lstm_input = fused_features_flat.view(initial_batch_size, seq_len, -1)
-            # Apply LSTM
-            lstm_output_seq, next_hidden_state_tuple = self.lstm_layer(
-                lstm_input, hidden_state
-            )
-            # Flatten output for heads
-            head_input_features = lstm_output_seq.reshape(
-                num_samples, -1
-            )  # Shape: (N, LSTMDim)
-            # Update the hidden state to be returned
-            next_hidden_state = next_hidden_state_tuple
-
-        # --- Actor/Critic Heads ---
-        policy_logits_flat = self.actor_head(head_input_features)
-        value_flat = self.critic_head(head_input_features)
-
-        # --- Reshape outputs back to sequence if necessary ---
-        if is_sequence_input:
-            policy_logits = policy_logits_flat.view(initial_batch_size, seq_len, -1)
-            value = value_flat.view(initial_batch_size, seq_len, -1)
-        else:
-            policy_logits = policy_logits_flat
-            value = value_flat
-
-        return policy_logits, value, next_hidden_state
-
-    def get_initial_hidden_state(
-        self, batch_size: int
-    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
-        """Returns the initial hidden state for the LSTM layer."""
-        if not self.rnn_config.USE_RNN or self.lstm_layer is None:
-            return None
-        model_device = self.device
-        num_layers = self.rnn_config.LSTM_NUM_LAYERS
-        hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
-        # Shape: (num_layers, batch_size, hidden_size)
-        h_0 = torch.zeros(num_layers, batch_size, hidden_size, device=model_device)
-        c_0 = torch.zeros(num_layers, batch_size, hidden_size, device=model_device)
-        return (h_0, c_0)
-
-
-File: agent\networks\__init__.py
-
+File: wish.md
+**AlphaZero Core Concepts Explained**
+
+AlphaZero learns by combining a powerful Neural Network (NN) with Monte Carlo Tree Search (MCTS) through self-play.
+
+1.  **Neural Network (NN):**
+    *   **Input:** The current game state (`GameState.get_state()`).
+    *   **Output:** Two heads:
+        *   **Policy Head (π):** Predicts a probability distribution over all possible *next moves* from the current state. This acts as a prior, guiding the MCTS search towards promising moves.
+        *   **Value Head (v):** Predicts the expected *outcome* of the game from the current state (e.g., a value between -1 for loss, 0 for draw, +1 for win).
+    *   **Architecture:** Often uses convolutional layers (like ResNet blocks) to process the board state, followed by fully connected layers leading to the policy and value heads. Your `ModelConfig` provides a good starting point.
+
+2.  **Monte Carlo Tree Search (MCTS):**
+    *   **Purpose:** For a given game state, MCTS explores the possible future game trajectories to determine the *best* move to make *right now*. It builds a search tree where nodes are game states and edges are actions.
+    *   **Process (for each move decision):**
+        *   **Selection:** Start at the root node (current state). Traverse down the tree by repeatedly selecting the child node with the highest score according to a formula (like UCB1: `ValueEstimate + ExplorationBonus * sqrt(log(ParentVisits) / ChildVisits)`). The NN's policy output (π) influences the ExplorationBonus, biasing the search towards moves the NN thinks are good. The NN's value output (v) can be used as the initial ValueEstimate for new nodes.
+        *   **Expansion:** When a leaf node (a state not yet fully explored or added to the tree) is reached, expand it by adding one or more children representing possible next states after taking valid actions. Get the policy (π) and value (v) for this leaf state from the NN. Use π to initialize child node priors and v as the initial value estimate for this node.
+        *   **Simulation (Rollout):** *Crucially, the original AlphaZero often doesn't perform full random rollouts.* Instead, the **NN's value prediction (v)** for the expanded leaf node is directly used as the estimated outcome of the game from that point. This makes the search much more efficient than random simulations.
+        *   **Backpropagation:** Update the statistics (visit count `N`, total action value `W` or `Q`) of all nodes along the path from the expanded leaf node back up to the root, using the value (v) obtained during expansion/simulation. The value estimate for a node becomes `Q = W / N`.
+    *   **Output:** After running many simulations (e.g., 100, 800, 1600), MCTS provides an *improved* policy distribution for the root state (current state). This distribution is usually based on the visit counts (`N`) of the children nodes of the root (often normalized: `probs = N^(1/temperature)`). This improved policy is the target the NN learns to predict.
+
+**Self-Play:**
+    *   The agent plays games against itself.
+    *   For each move in a game:
+        *   Run MCTS from the current state using the *current* NN.
+        *   Select the actual move to play based on the MCTS result (e.g., sample proportionally to visit counts, especially early in the game to encourage exploration; later, deterministically pick the most visited move).
+        *   Update the game state.
+    *   At the end of the game, record the final outcome (Win=+1, Loss=-1, Draw=0).
+    *   Store the collected data for each step: `(state, mcts_policy_target, final_outcome)`.
+
+**Training:**
+    *   Periodically (or continuously), sample batches of `(state, mcts_policy_target, final_outcome)` data collected from self-play games.
+    *   Train the NN:
+        *   **Policy Loss:** Minimize the difference (e.g., cross-entropy) between the NN's policy output (π) for the `state` and the `mcts_policy_target`.
+        *   **Value Loss:** Minimize the difference (e.g., mean squared error) between the NN's value output (v) for the `state` and the actual `final_outcome` (z).
+        *   Combine these losses (often with regularization) and update the NN weights using an optimizer (e.g., Adam).
+
+**Analogy:** The NN is like an improving intuition about the game. MCTS is like focused thinking/planning using that intuition to find the best immediate move. Self-play generates the experience (games) needed for the intuition (NN) to learn from the thinking (MCTS) and the results (game outcomes).
+
+**Does MCTS need huge amounts of random data?** Not exactly. MCTS *itself* is the search process. The *self-play* phase generates the data *using* MCTS guided by the NN. The quality of this data improves as the NN gets better. You need many self-play games, but the moves within those games are intelligently selected by MCTS, not purely random (except maybe in the simulation phase if you choose to implement it that way, but using the NN value is standard).
+
+**Step-by-Step Implementation Plan**
+
+Here's a high-level, detailed plan to refactor towards AlphaZero:
+
+**Phase 1: Implement AlphaZero Components**
+
+3.  **Define Neural Network (`AlphaZeroNet`):**
+    *   Create a new file (e.g., `agent/alphazero_net.py`).
+    *   Define a class `AlphaZeroNet(torch.nn.Module)`.
+    *   Use `ModelConfig` to define the architecture (e.g., CNN backbone similar to existing, potentially ResNet blocks).
+    *   Implement the `forward` method:
+        *   Input: State dictionary from `GameState.get_state()`. Process grid, shapes, features appropriately.
+        *   Output: `policy_logits` (raw scores before softmax, shape `[batch_size, action_dim]`) and `value` (scalar estimate, shape `[batch_size, 1]`).
+    *   Implement `get_state_dict` and `load_state_dict` (standard PyTorch).
+4.  **Implement MCTS:**
+    *   Create new files (e.g., `mcts/node.py`, `mcts/search.py`).
+    *   **`MCTSNode` Class:** Represents a node in the search tree. Stores:
+        *   `state`: The game state this node represents (can be lightweight if needed).
+        *   `parent`: Reference to the parent node.
+        *   `children`: Dictionary mapping action -> child `MCTSNode`.
+        *   `visit_count (N)`: How many times this node was visited during backpropagation.
+        *   `total_action_value (W)` or `mean_action_value (Q)`: Sum or average of values backpropagated through this node.
+        *   `prior_probability (P)`: Policy prior from the NN for the action leading to this node (stored in the child).
+        *   `action_taken`: The action that led from the parent to this node.
+        *   `is_expanded`: Boolean flag.
+    *   **`MCTS` Class:** Orchestrates the search.
+        *   `__init__(self, nn_agent: AlphaZeroNet, env_config: EnvConfig, mcts_config)`: Takes the NN and configs.
+        *   `run_simulations(self, root_state: GameState, num_simulations: int)`: Main MCTS loop.
+            *   Creates the `root_node`.
+            *   Repeatedly calls `_select`, `_expand`, `_simulate` (using NN value), `_backpropagate`.
+        *   `_select(self, node: MCTSNode)`: Traverses the tree using UCB1 or PUCT formula, returning the leaf node to expand.
+        *   `_expand(self, node: MCTSNode)`: If node isn't terminal, get valid actions, get policy/value from NN for the node's state, create child nodes, initialize their priors (P).
+        *   `_simulate(self, node: MCTSNode)`: **Crucially, just return the value (v) predicted by the NN during the `_expand` step for this node.** No random rollout needed typically.
+        *   `_backpropagate(self, node: MCTSNode, value: float)`: Update `N` and `W` (or `Q`) for the node and its ancestors up to the root.
+        *   `get_policy_target(self, root_node: MCTSNode, temperature: float)`: After simulations, calculate the improved policy target based on child visit counts (`N^(1/temperature)`), normalized. Returns a probability distribution over actions.
+
+**Phase 2: Implement Workers and Integration**
+
+5.  **Implement Self-Play Worker:**
+    *   Create a class (e.g., `workers/self_play_worker.py`).
+    *   Takes the NN, `EnvConfig`, MCTS instance (or creates one), a shared data buffer (e.g., `queue.Queue` or custom buffer), stop/pause events.
+    *   `run()` method:
+        *   Loops indefinitely (until `stop_event`).
+        *   Plays a full game:
+            *   `game = GameState()`, `game.reset()`.
+            *   `game_data = []` (to store `(state, policy_target, player)` tuples for this game).
+            *   While `not game.is_over()`:
+                *   `policy_target = mcts.run_simulations(game.get_state(), num_simulations)`
+                *   `current_state_features = game.get_state()` # Get state *before* the move
+                *   `game_data.append((current_state_features, policy_target, game.current_player))` # Store state and MCTS target
+                *   `action = choose_action(policy_target, temperature)` # Choose actual move (probabilistic early, deterministic later)
+                *   `_, done = game.step(action)`
+            *   `final_outcome = determine_outcome(game)` # Get win/loss/draw (+1/-1/0)
+            *   Assign the `final_outcome` to all stored tuples in `game_data`.
+            *   Put `game_data` into the shared buffer.
+            *   Log episode stats via `StatsAggregator`.
+6.  **Implement Training Worker:**
+    *   Create a class (e.g., `workers/training_worker.py`).
+    *   Takes the NN, optimizer, shared data buffer, `StatsAggregator`, stop event.
+    *   `run()` method:
+        *   Loops indefinitely (until `stop_event`).
+        *   Samples a batch of `(state, policy_target, outcome)` from the buffer.
+        *   Performs NN forward pass: `policy_logits, value = nn(batch_states)`.
+        *   Calculates policy loss (e.g., `CrossEntropyLoss(policy_logits, batch_policy_targets)`).
+        *   Calculates value loss (e.g., `MSELoss(value, batch_outcomes)`).
+        *   Calculates total loss (+ regularization).
+        *   Performs `optimizer.zero_grad()`, `loss.backward()`, `optimizer.step()`.
+        *   Logs losses and other training metrics (LR, etc.) via `StatsAggregator.record_step()`.
+7.  **Integrate Components:**
+    *   **`AppInitializer`:** Instantiate `AlphaZeroNet`, `MCTS`, `SelfPlayWorker`, `TrainingWorker`, shared buffer, optimizer. Pass references correctly.
+    *   **`AppWorkerManager`:** Modify `start_worker_threads` and `stop_worker_threads` to manage the new `SelfPlayWorker` and `TrainingWorker` threads.
+    *   **`CheckpointManager`:** Update `save_checkpoint` to include `nn.state_dict()`, `optimizer.state_dict()`, and the updated `stats_aggregator.state_dict()`. Update `load_checkpoint` accordingly.
+    *   **`StatsAggregator` / Loggers:** Ensure they track and log `policy_loss`, `value_loss`, and potentially MCTS statistics passed via `record_step` or `record_episode`.
+    *   **`main_pygame.py`:** Ensure the main loop correctly starts/stops workers, fetches stats from the aggregator for rendering, and handles shutdown gracefully.
+    *   **UI (`LeftPanelRenderer`, `Plotter`):** Update to display new stats (NN losses) and remove obsolete PPO stats.
+
+**Phase 3: Refinement and Tuning**
+
+8.  **Debugging:** Thoroughly test interactions between MCTS, NN, self-play, and training.
+9.  **Tuning:** Adjust hyperparameters:
+    *   MCTS: `num_simulations`, UCB1/PUCT exploration constant (`c_puct`).
+    *   Self-Play: Temperature parameter for action selection.
+    *   NN: Architecture (`ModelConfig`), learning rate, optimizer parameters, regularization strength.
+    *   Training: Batch size, buffer size, training frequency vs. self-play generation speed.
+10. **Profiling:** Use `analyze_profile.py` to identify bottlenecks (MCTS or NN inference are common).
 
 File: config\constants.py
 
@@ -5039,15 +3446,14 @@ from .constants import (
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 16  # Updated
-    FPS = 0
-    SCREEN_WIDTH = 1600  # Initial width, but resizable
-    SCREEN_HEIGHT = 900  # Initial height, but resizable
+    NUM_ENVS_TO_RENDER = 16
+    FPS = 60
+    SCREEN_WIDTH = 1600
+    SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
-    # Changed LEFT_PANEL_WIDTH to LEFT_PANEL_RATIO
     LEFT_PANEL_RATIO = 0.7
-    ENV_SPACING = 0
-    ENV_GRID_PADDING = 0
+    ENV_SPACING = 2
+    ENV_GRID_PADDING = 2
 
     WHITE = WHITE
     BLACK = BLACK
@@ -5064,14 +3470,14 @@ class VisConfig:
 
 
 class EnvConfig:
-    NUM_ENVS = 128
+    NUM_ENVS = 1  # Set to 1, as we removed multi-env collection logic
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2
     SHAPE_FEATURES_PER_SHAPE = 5
     NUM_SHAPE_SLOTS = 3
     EXPLICIT_FEATURES_DIM = 10
-    CALCULATE_POTENTIAL_OUTCOMES_IN_STATE = False
+    CALCULATE_POTENTIAL_OUTCOMES_IN_STATE = False  # Keep False for now
 
     @property
     def GRID_STATE_SHAPE(self) -> Tuple[int, int, int]:
@@ -5087,158 +3493,79 @@ class EnvConfig:
 
     @property
     def ACTION_DIM(self) -> int:
+        # Action space might change for MCTS (e.g., just placement coords)
+        # Keep original for now, but likely needs refactoring later.
         return self.NUM_SHAPE_SLOTS * (self.ROWS * self.COLS)
 
 
-class RewardConfig:
-    REWARD_PLACE_PER_TRI = 0.0
-    REWARD_PER_CLEARED_TRIANGLE = 0.2
-    REWARD_ALIVE_STEP = 0.01
-    PENALTY_INVALID_MOVE = -0.1
-    PENALTY_GAME_OVER = -2
-
-    PENALTY_MAX_HEIGHT_FACTOR = -0.005
-    PENALTY_BUMPINESS_FACTOR = -0.01
-    PENALTY_HOLE_PER_HOLE = -0.07
-    PENALTY_NEW_HOLE = -0.15
-    ENABLE_PBRS = True
-
-    PBRS_HEIGHT_COEF = -0.05
-    PBRS_HOLE_COEF = -0.20
-    PBRS_BUMPINESS_COEF = -0.02
+# Removed RewardConfig
 
 
-class PPOConfig:
-    LEARNING_RATE = 2.5e-4
-    ADAM_EPS = 1e-5
-    # --- Increased Params ---
-    NUM_STEPS_PER_ROLLOUT = 256  # Increased from 128
-    PPO_EPOCHS = 4  # Increased from 2
-    NUM_MINIBATCHES = 16  # Increased from 8
-    # --- End Increased Params ---
-    CLIP_PARAM = 0.2
-    GAMMA = 0.995
-    GAE_LAMBDA = 0.95
-    VALUE_LOSS_COEF = 0.5
-    ENTROPY_COEF = 0.01
-    MAX_GRAD_NORM = 0.5
-
-    USE_LR_SCHEDULER = True
-    LR_SCHEDULE_TYPE = "cosine"
-    LR_LINEAR_END_FRACTION = 0.0
-    LR_COSINE_MIN_FACTOR = 0.01
-
-    @property
-    def MINIBATCH_SIZE(self) -> int:
-        env_config_instance = EnvConfig()
-        total_data_per_update = (
-            env_config_instance.NUM_ENVS * self.NUM_STEPS_PER_ROLLOUT
-        )
-        del env_config_instance
-        if self.NUM_MINIBATCHES <= 0:
-            num_minibatches = 1
-        else:
-            num_minibatches = self.NUM_MINIBATCHES
-        batch_size = total_data_per_update // num_minibatches
-        min_recommended_size = 4  # Keep low for testing flexibility
-        if batch_size < min_recommended_size and batch_size > 0:
-            pass
-        elif batch_size <= 0:
-            local_env_config = EnvConfig()
-            print(
-                f"ERROR: Calculated minibatch size is <= 0 ({batch_size}). Check NUM_ENVS({local_env_config.NUM_ENVS}), NUM_STEPS_PER_ROLLOUT({self.NUM_STEPS_PER_ROLLOUT}), NUM_MINIBATCHES({self.NUM_MINIBATCHES}). Defaulting to 1."
-            )
-            del local_env_config
-            return 1
-        return max(1, batch_size)
+# Removed PPOConfig
 
 
-class RNNConfig:
-    USE_RNN = True
-    LSTM_HIDDEN_SIZE = 256  # Updated
-    LSTM_NUM_LAYERS = 2  # Updated
+class RNNConfig:  # Keep for potential future NN architectures
+    USE_RNN = False  # Default to False
+    LSTM_HIDDEN_SIZE = 256
+    LSTM_NUM_LAYERS = 2
 
 
-class ObsNormConfig:
-    ENABLE_OBS_NORMALIZATION = True
-    NORMALIZE_GRID = True
-    NORMALIZE_SHAPES = True
-    NORMALIZE_AVAILABILITY = False
-    NORMALIZE_EXPLICIT_FEATURES = True
-    OBS_CLIP = 10.0
-    EPSILON = 1e-8
-
-
-class TransformerConfig:
-    USE_TRANSFORMER = True
-    TRANSFORMER_D_MODEL = 256  # Updated
-    TRANSFORMER_NHEAD = 8  # Updated
-    TRANSFORMER_DIM_FEEDFORWARD = 512  # Updated
-    TRANSFORMER_NUM_LAYERS = 3  # Updated
+class TransformerConfig:  # Keep for potential future NN architectures
+    USE_TRANSFORMER = False  # Default to False
+    TRANSFORMER_D_MODEL = 256
+    TRANSFORMER_NHEAD = 8
+    TRANSFORMER_DIM_FEEDFORWARD = 512
+    TRANSFORMER_NUM_LAYERS = 3
     TRANSFORMER_DROPOUT = 0.1
     TRANSFORMER_ACTIVATION = "relu"
 
 
-class TrainConfig:
-    CHECKPOINT_SAVE_FREQ = 50  # Increased from 10 (interpreted as rollouts)
+class TrainConfig:  # Simplified for general training/checkpointing
+    # Checkpointing might be handled differently (e.g., saving NN weights + MCTS stats)
+    CHECKPOINT_SAVE_FREQ = (
+        50  # Frequency might mean something else now (e.g., training steps, games)
+    )
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
-class ModelConfig:
+class ModelConfig:  # Keep structure for the AlphaZero NN
     class Network:
         _env_cfg_instance = EnvConfig()
         HEIGHT = _env_cfg_instance.ROWS
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [64, 128, 256]  # Updated
+        CONV_CHANNELS = [64, 128, 256]
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
 
-        SHAPE_FEATURE_MLP_DIMS = [128, 128]  # Updated
+        SHAPE_FEATURE_MLP_DIMS = [128, 128]
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
 
-        _transformer_cfg = TransformerConfig()
-        _rnn_cfg = RNNConfig()
-        _last_fc_dim = 256  # Updated
-        if _transformer_cfg.USE_TRANSFORMER:
-            _last_fc_dim = _transformer_cfg.TRANSFORMER_D_MODEL  # Should be 256
-        elif _rnn_cfg.USE_RNN:
-            _last_fc_dim = _rnn_cfg.LSTM_HIDDEN_SIZE  # Should be 256
-
-        COMBINED_FC_DIMS = [
-            1024,  # Updated
-            _last_fc_dim,  # Should be 256 based on Transformer/LSTM
-        ]
-        del _transformer_cfg, _rnn_cfg  # Clean up temp instances
+        COMBINED_FC_DIMS = [1024, 256]
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
         DROPOUT_FC = 0.0
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [
-        25,
-        50,
-        100,
-    ]
-    CONSOLE_LOG_FREQ = 5
-    PLOT_DATA_WINDOW = 100_000  # Increased from 20_000
+    STATS_AVG_WINDOW: List[int] = [25, 50, 100]
+    CONSOLE_LOG_FREQ = 1
+    PLOT_DATA_WINDOW = 100_000
 
 
 class TensorBoardConfig:
     LOG_HISTOGRAMS = False
-    HISTOGRAM_LOG_FREQ = 20
-    LOG_IMAGES = False
-    IMAGE_LOG_FREQ = 20
+    HISTOGRAM_LOG_FREQ = 20  # Frequency might mean training steps/games
+    LOG_IMAGES = False  # Keep ability to log images (e.g., board states)
+    IMAGE_LOG_FREQ = 20  # Frequency might mean training steps/games
     LOG_DIR: Optional[str] = None
-    LOG_SHAPE_PLACEMENT_Q_VALUES = False
 
 
-class DemoConfig:
+class DemoConfig:  # Keep as is
     BACKGROUND_COLOR = (10, 10, 20)
     SELECTED_SHAPE_HIGHLIGHT_COLOR = BLUE
     HUD_FONT_SIZE = 24
@@ -5246,9 +3573,7 @@ class DemoConfig:
     HELP_TEXT = "[Arrows]=Move | [Q/E]=Cycle Shape | [Space]=Place | [ESC]=Exit"
     DEBUG_HELP_TEXT = "[Click]=Toggle Triangle | [R]=Reset Grid | [ESC]=Exit"
 
-
 File: config\general.py
-# File: config/general.py
 import torch
 import os
 import time
@@ -5299,6 +3624,7 @@ def set_run_id(run_id: str):
 
 def get_run_checkpoint_dir() -> str:
     """Gets the checkpoint directory for the current run."""
+    # Checkpoints will now likely store NN weights, maybe MCTS stats
     return os.path.join(BASE_CHECKPOINT_DIR, get_run_id())
 
 
@@ -5316,36 +3642,26 @@ def get_console_log_dir() -> str:
 
 
 def get_model_save_path() -> str:
-    """Gets the base model save path for the current run."""
-    return os.path.join(get_run_checkpoint_dir(), "ppo_agent_state.pth")
-
-
-# --- Training Goal ---
-# --- Increased training steps ---
-TOTAL_TRAINING_STEPS = 10_000_000  # Increased from 200_000
-# --- End Increased training steps ---
+    """Gets the base model save path for the current run (adapt name later)."""
+    # Rename from ppo_agent_state to something more generic like 'alphatri_nn.pth'
+    return os.path.join(get_run_checkpoint_dir(), "alphatri_nn.pth")
 
 
 File: config\utils.py
-# File: config/utils.py
 import torch
 from typing import Dict, Any
 from .core import (
     VisConfig,
     EnvConfig,
-    RewardConfig,
-    PPOConfig,
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
     DemoConfig,
-    ObsNormConfig,  # Added
-    TransformerConfig,  # Added
+    TransformerConfig,
 )
 
-# Import DEVICE and RANDOM_SEED directly, use get_run_id() for the run ID
 from .general import DEVICE, RANDOM_SEED, get_run_id
 
 
@@ -5386,16 +3702,13 @@ def get_config_dict() -> Dict[str, Any]:
     # Flatten core config classes
     all_configs.update(flatten_class(VisConfig, "Vis."))
     all_configs.update(flatten_class(EnvConfig, "Env."))
-    all_configs.update(flatten_class(RewardConfig, "Reward."))
-    all_configs.update(flatten_class(PPOConfig, "PPO."))
     all_configs.update(flatten_class(RNNConfig, "RNN."))
     all_configs.update(flatten_class(TrainConfig, "Train."))
     all_configs.update(flatten_class(ModelConfig.Network, "Model.Net."))
     all_configs.update(flatten_class(StatsConfig, "Stats."))
     all_configs.update(flatten_class(TensorBoardConfig, "TB."))
     all_configs.update(flatten_class(DemoConfig, "Demo."))
-    all_configs.update(flatten_class(ObsNormConfig, "ObsNorm."))  # Added
-    all_configs.update(flatten_class(TransformerConfig, "Transformer."))  # Added
+    all_configs.update(flatten_class(TransformerConfig, "Transformer."))
 
     # Add general config values
     all_configs["General.DEVICE"] = str(DEVICE) if DEVICE else "None"
@@ -5427,94 +3740,60 @@ File: config\validation.py
 # File: config/validation.py
 from .core import (
     EnvConfig,
-    PPOConfig,
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
     VisConfig,
-    ObsNormConfig,
     TransformerConfig,
 )
 from .general import (
     DEVICE,
-    TOTAL_TRAINING_STEPS,
-    # Import getters instead of direct constants
+    # Removed TOTAL_TRAINING_STEPS
     get_run_id,
     get_run_log_dir,
     get_run_checkpoint_dir,
-    get_model_save_path,  # Keep if needed, or remove if only used in trainer
+    get_model_save_path,
 )
 
 
 def print_config_info_and_validate():
     env_config_instance = EnvConfig()
-    ppo_config_instance = PPOConfig()
     rnn_config_instance = RNNConfig()
     transformer_config_instance = TransformerConfig()
-    obs_norm_config_instance = ObsNormConfig()
     vis_config_instance = VisConfig()
-    train_config_instance = TrainConfig()  # Instantiate to access LOAD_CHECKPOINT_PATH
+    train_config_instance = TrainConfig()
 
-    # Use getter functions for dynamic paths
     run_id = get_run_id()
     run_log_dir = get_run_log_dir()
     run_checkpoint_dir = get_run_checkpoint_dir()
 
     print("-" * 70)
-    print(f"RUN ID: {run_id}")  # Use variable
-    print(f"Log Directory: {run_log_dir}")  # Use variable
-    print(f"Checkpoint Directory: {run_checkpoint_dir}")  # Use variable
+    print(f"RUN ID: {run_id}")
+    print(f"Log Directory: {run_log_dir}")
+    print(f"Checkpoint Directory: {run_checkpoint_dir}")
     print(f"Device: {DEVICE}")
     print(
         f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
         f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
     )
 
-    # Use the instance to check the config value
     if train_config_instance.LOAD_CHECKPOINT_PATH:
         print(
             "*" * 70
             + f"\n*** Warning: LOAD CHECKPOINT specified: {train_config_instance.LOAD_CHECKPOINT_PATH} ***\n"
-            "*** CheckpointManager will attempt to load this path. ***\n" + "*" * 70
+            "*** CheckpointManager will attempt to load this path (e.g., NN weights). ***\n"
+            + "*" * 70
         )
     else:
         print(
-            "--- No explicit checkpoint path. CheckpointManager will attempt auto-resume. ---"
+            "--- No explicit checkpoint path. CheckpointManager will attempt auto-resume if applicable. ---"
         )
 
-    print("--- Pre-training DISABLED ---")
+    print("--- Training Algorithm: AlphaZero (MCTS + NN) ---")  # Updated description
 
-    print(f"--- Using PPO Algorithm ---")
-    print(f"    Rollout Steps: {ppo_config_instance.NUM_STEPS_PER_ROLLOUT}")
-    print(f"    PPO Epochs: {ppo_config_instance.PPO_EPOCHS}")
-    print(
-        f"    Minibatches: {ppo_config_instance.NUM_MINIBATCHES} (Size: {ppo_config_instance.MINIBATCH_SIZE})"
-    )
-    print(f"    Clip Param: {ppo_config_instance.CLIP_PARAM}")
-    print(f"    GAE Lambda: {ppo_config_instance.GAE_LAMBDA}")
-    print(
-        f"    Value Coef: {ppo_config_instance.VALUE_LOSS_COEF}, Entropy Coef: {ppo_config_instance.ENTROPY_COEF}"
-    )
-
-    lr_schedule_str = ""
-    if ppo_config_instance.USE_LR_SCHEDULER:
-        schedule_type = getattr(ppo_config_instance, "LR_SCHEDULE_TYPE", "linear")
-        if schedule_type == "linear":
-            end_fraction = getattr(ppo_config_instance, "LR_LINEAR_END_FRACTION", 0.0)
-            lr_schedule_str = f" (Linear Decay to {end_fraction * 100}%)"
-        elif schedule_type == "cosine":
-            min_factor = getattr(ppo_config_instance, "LR_COSINE_MIN_FACTOR", 0.01)
-            lr_schedule_str = f" (Cosine Decay to {min_factor * 100}%)"
-        else:
-            lr_schedule_str = f" (Unknown Schedule: {schedule_type})"
-
-    print(
-        f"--- Using LR Scheduler: {ppo_config_instance.USE_LR_SCHEDULER}"
-        + lr_schedule_str
-        + " ---"
-    )
+    # Removed PPO specific prints
 
     print(
         f"--- Using RNN: {rnn_config_instance.USE_RNN}"
@@ -5534,15 +3813,7 @@ def print_config_info_and_validate():
         )
         + " ---"
     )
-    print(
-        f"--- Using Obs Normalization: {obs_norm_config_instance.ENABLE_OBS_NORMALIZATION}"
-        + (
-            f" (Grid:{obs_norm_config_instance.NORMALIZE_GRID}, Shapes:{obs_norm_config_instance.NORMALIZE_SHAPES}, Avail:{obs_norm_config_instance.NORMALIZE_AVAILABILITY}, Explicit:{obs_norm_config_instance.NORMALIZE_EXPLICIT_FEATURES}, Clip:{obs_norm_config_instance.OBS_CLIP})"
-            if obs_norm_config_instance.ENABLE_OBS_NORMALIZATION
-            else ""
-        )
-        + " ---"
-    )
+    # Removed ObsNorm print
 
     print(
         f"Config: Env=(R={env_config_instance.ROWS}, C={env_config_instance.COLS}), "
@@ -5553,16 +3824,16 @@ def print_config_info_and_validate():
     cnn_str = str(ModelConfig.Network.CONV_CHANNELS).replace(" ", "")
     mlp_str = str(ModelConfig.Network.COMBINED_FC_DIMS).replace(" ", "")
     shape_mlp_cfg_str = str(ModelConfig.Network.SHAPE_FEATURE_MLP_DIMS).replace(" ", "")
-    print(f"Network: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}")
-
     print(
-        f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}, TOTAL_STEPS={TOTAL_TRAINING_STEPS/1e6:.1f}M"
-    )
+        f"Network Base: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}"
+    )  # Adapted description
+
+    print(f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}")  # Removed total steps
     print(
-        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (rollouts)"
+        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (episodes/updates)"  # Adapted freq description
     )
 
-    if env_config_instance.NUM_ENVS >= 1024:
+    if env_config_instance.NUM_ENVS >= 1024:  # Keep warning, though NUM_ENVS is now 1
         device_type = DEVICE.type if DEVICE else "UNKNOWN"
         print(
             "*" * 70
@@ -5589,15 +3860,15 @@ File: config\__init__.py
 from .core import (
     VisConfig,
     EnvConfig,
-    RewardConfig,
-    PPOConfig,
+    # Removed RewardConfig
+    # Removed PPOConfig
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
     DemoConfig,
-    ObsNormConfig,
+    # Removed ObsNormConfig
     TransformerConfig,
 )
 
@@ -5605,7 +3876,7 @@ from .core import (
 from .general import (
     DEVICE,
     RANDOM_SEED,
-    TOTAL_TRAINING_STEPS,
+    # Removed TOTAL_TRAINING_STEPS
     BASE_CHECKPOINT_DIR,
     BASE_LOG_DIR,
     set_device,
@@ -5645,20 +3916,20 @@ __all__ = [
     # Core Configs
     "VisConfig",
     "EnvConfig",
-    "RewardConfig",
-    "PPOConfig",
+    # Removed RewardConfig
+    # Removed PPOConfig
     "RNNConfig",
     "TrainConfig",
     "ModelConfig",
     "StatsConfig",
     "TensorBoardConfig",
     "DemoConfig",
-    "ObsNormConfig",
+    # Removed ObsNormConfig
     "TransformerConfig",
     # General Configs
     "DEVICE",
     "RANDOM_SEED",
-    "TOTAL_TRAINING_STEPS",
+    # Removed TOTAL_TRAINING_STEPS
     "BASE_CHECKPOINT_DIR",
     "BASE_LOG_DIR",
     "set_device",
@@ -6917,470 +5188,6 @@ class Triangle:
 File: environment\__init__.py
 
 
-File: init\rl_components_ppo.py
-# File: init/rl_components_ppo.py
-import traceback
-import numpy as np
-import torch
-from typing import List, Optional, Dict, Any
-
-from config import (
-    EnvConfig,
-    PPOConfig,
-    RNNConfig,
-    TrainConfig,
-    ModelConfig,
-    StatsConfig,
-    TensorBoardConfig,
-    ObsNormConfig,
-    TransformerConfig,
-    get_run_log_dir,
-)
-from environment.game_state import GameState, StateType
-from agent.ppo_agent import PPOAgent
-
-# Removed Trainer import
-from stats.stats_recorder import StatsRecorderBase
-from stats.aggregator import StatsAggregator
-from stats.simple_stats_recorder import SimpleStatsRecorder
-from stats.tensorboard_logger import TensorBoardStatsRecorder
-from utils.running_mean_std import RunningMeanStd
-
-
-def initialize_envs(num_envs: int, env_config: EnvConfig) -> List[GameState]:
-    """Initializes parallel game environments and performs basic state checks."""
-    print(f"Initializing {num_envs} game environments...")
-    try:
-        envs = [GameState() for _ in range(num_envs)]
-        # State checks remain the same
-        s_test_dict = envs[0].reset()
-        if not isinstance(s_test_dict, dict):
-            raise TypeError("Env reset did not return a dict.")
-        if "grid" not in s_test_dict:
-            raise KeyError("State dict missing 'grid'")
-        grid_state = s_test_dict["grid"]
-        expected_grid_shape = env_config.GRID_STATE_SHAPE
-        if (
-            not isinstance(grid_state, np.ndarray)
-            or grid_state.shape != expected_grid_shape
-        ):
-            raise ValueError(
-                f"Grid shape mismatch! Env:{grid_state.shape}, Cfg:{expected_grid_shape}"
-            )
-        if "shapes" not in s_test_dict:
-            raise KeyError("State dict missing 'shapes'")
-        shape_state = s_test_dict["shapes"]
-        expected_shape_feature_shape = (env_config.SHAPE_STATE_DIM,)
-        if (
-            not isinstance(shape_state, np.ndarray)
-            or shape_state.shape != expected_shape_feature_shape
-        ):
-            raise ValueError(
-                f"Shape feature shape mismatch! Env:{shape_state.shape}, Cfg:{expected_shape_feature_shape}"
-            )
-        if "shape_availability" not in s_test_dict:
-            raise KeyError("State dict missing 'shape_availability'")
-        availability_state = s_test_dict["shape_availability"]
-        expected_availability_shape = (env_config.SHAPE_AVAILABILITY_DIM,)
-        if (
-            not isinstance(availability_state, np.ndarray)
-            or availability_state.shape != expected_availability_shape
-        ):
-            raise ValueError(
-                f"Shape availability shape mismatch! Env:{availability_state.shape}, Cfg:{expected_availability_shape}"
-            )
-        if "explicit_features" not in s_test_dict:
-            raise KeyError("State dict missing 'explicit_features'")
-        explicit_features_state = s_test_dict["explicit_features"]
-        expected_explicit_features_shape = (env_config.EXPLICIT_FEATURES_DIM,)
-        if (
-            not isinstance(explicit_features_state, np.ndarray)
-            or explicit_features_state.shape != expected_explicit_features_shape
-        ):
-            raise ValueError(
-                f"Explicit features shape mismatch! Env:{explicit_features_state.shape}, Cfg:{expected_explicit_features_shape}"
-            )
-        print("Initial state shape checks PASSED.")
-        print(f"Successfully initialized {num_envs} environments.")
-        return envs
-    except Exception as e:
-        print(f"FATAL ERROR during env init: {e}")
-        traceback.print_exc()
-        raise e
-
-
-def initialize_agent(
-    model_config: ModelConfig,
-    ppo_config: PPOConfig,
-    rnn_config: RNNConfig,
-    env_config: EnvConfig,
-    transformer_config: TransformerConfig,
-    device: torch.device,
-) -> PPOAgent:
-    """Initializes the PPO agent."""
-    print("Initializing PPO Agent...")
-    agent = PPOAgent(
-        model_config=model_config,
-        ppo_config=ppo_config,
-        rnn_config=rnn_config,
-        env_config=env_config,
-        transformer_config=transformer_config,
-        device=device,
-    )
-    print("PPO Agent initialized.")
-    return agent
-
-
-def initialize_stats_recorder(
-    stats_config: StatsConfig,
-    tb_config: TensorBoardConfig,
-    config_dict: Dict[str, Any],
-    agent: Optional[PPOAgent],
-    env_config: EnvConfig,
-    rnn_config: RNNConfig,
-    transformer_config: TransformerConfig,
-    is_reinit: bool = False,
-) -> StatsRecorderBase:
-    """Initializes the statistics recording components."""
-    print(f"Initializing Statistics Components... Re-init: {is_reinit}")
-    stats_aggregator = StatsAggregator(
-        avg_windows=stats_config.STATS_AVG_WINDOW,
-        plot_window=stats_config.PLOT_DATA_WINDOW,
-    )
-    console_recorder = SimpleStatsRecorder(
-        aggregator=stats_aggregator,
-        console_log_interval=stats_config.CONSOLE_LOG_FREQ,
-    )
-    model_for_graph_cpu = None
-    dummy_input_tuple = None
-    print("[Stats Init] Model graph logging DISABLED.")
-    current_run_log_dir = get_run_log_dir()
-    print(f"Using TensorBoard Logger (Log Dir: {current_run_log_dir})")
-    try:
-        tb_recorder = TensorBoardStatsRecorder(
-            aggregator=stats_aggregator,
-            console_recorder=console_recorder,
-            log_dir=current_run_log_dir,
-            hparam_dict=(config_dict if not is_reinit else None),
-            model_for_graph=model_for_graph_cpu,
-            dummy_input_for_graph=dummy_input_tuple,
-            histogram_log_interval=(
-                tb_config.HISTOGRAM_LOG_FREQ if tb_config.LOG_HISTOGRAMS else -1
-            ),
-            image_log_interval=(
-                tb_config.IMAGE_LOG_FREQ if tb_config.LOG_IMAGES else -1
-            ),
-            env_config=env_config,
-            rnn_config=rnn_config,
-        )
-        print("Statistics Components initialized successfully.")
-        return tb_recorder
-    except Exception as e:
-        print(f"FATAL: Error initializing TensorBoardStatsRecorder: {e}. Exiting.")
-        traceback.print_exc()
-        raise e
-
-
-
-
-File: init\__init__.py
-from .rl_components_ppo import (
-    initialize_envs,
-    initialize_agent,
-    initialize_stats_recorder,
-)
-
-__all__ = [
-    "initialize_envs",
-    "initialize_agent",
-    "initialize_stats_recorder",
-]
-
-
-File: rl_components\env_runner.py
-# rl_components/env_runner.py
-import time
-import logging
-import threading
-from config import Config
-from rl_components.rollout_collector import RolloutCollector
-
-logger = logging.getLogger(__name__)
-
-
-class EnvRunner:
-    """
-    Runs the environment interaction loop in a separate thread.
-    Collects rollouts using the RolloutCollector.
-    """
-
-    def __init__(
-        self,
-        collector: RolloutCollector,
-        stop_event: threading.Event,
-        pause_event: threading.Event,
-        config: Config,
-    ):
-        self.collector = collector
-        self.stop_event = stop_event
-        self.pause_event = pause_event
-        self.config = config
-        self.num_steps = config.ppo_config.NUM_STEPS
-        self.num_envs = config.ppo_config.NUM_ENVS
-        self.total_steps_collected = 0
-        self._was_paused = True  # Assume starts paused as per main_pygame logic
-
-    def run(self):
-        """The main loop for the environment runner thread."""
-        logger.info(f"[{self.__class__.__name__}] Starting environment runner loop.")
-        loop_count = 0
-        try:
-            while not self.stop_event.is_set():
-                # --- Pause Handling ---
-                if self.pause_event.is_set():
-                    if not self._was_paused:
-                        logger.info(f"[{self.__class__.__name__}] Paused.")
-                        self._was_paused = True
-                    # Wait efficiently without busy-looping, checking stop_event periodically
-                    self.pause_event.wait(timeout=0.1)
-                    continue  # Re-check stop_event and pause_event
-
-                # --- Resume Logging ---
-                if self._was_paused:
-                    logger.info(f"[{self.__class__.__name__}] Resumed.")
-                    self._was_paused = False
-
-                # --- Active Work ---
-                logger.debug(
-                    f"[{self.__class__.__name__} Loop {loop_count}] Running rollout collection step."
-                )
-                start_time = time.time()
-
-                # Collect one step across all environments
-                step_data = self.collector.collect_step()
-                self.total_steps_collected += self.num_envs
-
-                # Optional: Add a small sleep to prevent high CPU usage if collection is too fast
-                # time.sleep(0.001)
-
-                end_time = time.time()
-                logger.debug(
-                    f"[{self.__class__.__name__} Loop {loop_count}] Rollout step finished in {end_time - start_time:.4f}s."
-                )
-                loop_count += 1
-
-        except Exception as e:
-            logger.critical(
-                f"[{self.__class__.__name__}] Exception in run loop: {e}", exc_info=True
-            )
-            self.stop_event.set()  # Signal other threads to stop on critical error
-        finally:
-            logger.info(
-                f"[{self.__class__.__name__}] Exiting run loop. Total steps collected by this runner: {self.total_steps_collected}"
-            )
-
-
-File: rl_components\trainer.py
-# rl_components/trainer.py
-import time
-import logging
-import threading
-import torch
-from config import Config
-from rl_components.ppo_agent import PPOAgent
-from rl_components.rollout_buffer import RolloutStorage
-from rl_components.stats_recorder import StatsAggregator
-from rl_components.checkpoint_manager import CheckpointManager
-
-logger = logging.getLogger(__name__)
-
-
-class Trainer:
-    """
-    Handles the PPO training process in a separate thread.
-    """
-
-    def __init__(
-        self,
-        agent: PPOAgent,
-        storage: RolloutStorage,
-        stats_aggregator: StatsAggregator,
-        checkpoint_manager: CheckpointManager,
-        stop_event: threading.Event,
-        pause_event: threading.Event,
-        config: Config,
-        device: torch.device,
-    ):
-        self.agent = agent
-        self.storage = storage
-        self.stats_aggregator = stats_aggregator
-        self.checkpoint_manager = checkpoint_manager
-        self.stop_event = stop_event
-        self.pause_event = pause_event  # Event to pause training
-        self.config = config
-        self.device = device
-
-        self.ppo_config = config.ppo_config
-        self.run_config = config.run_config
-        self.checkpoint_config = config.checkpoint_config
-        self.log_config = config.log_config
-
-        self.total_timesteps = config.ppo_config.TOTAL_TIMESTEPS
-        self.num_steps = config.ppo_config.NUM_STEPS
-        self.num_envs = config.ppo_config.NUM_ENVS
-        self.ppo_epochs = config.ppo_config.PPO_EPOCHS
-        self.num_minibatches = config.ppo_config.NUM_MINIBATCHES
-        self.batch_size = self.num_steps * self.num_envs
-        self.minibatch_size = self.batch_size // self.num_minibatches
-
-        self.current_step = (
-            self.stats_aggregator.global_step
-        )  # Start from loaded step if checkpoint was loaded
-        self.current_rollout = (
-            self.stats_aggregator.completed_rollouts
-        )  # Start from loaded rollout count
-
-        self._was_paused = True  # Assume starts paused as per main_pygame logic
-        self._rollout_ready_logged = (
-            False  # Track if "waiting for rollout" has been logged
-        )
-
-        logger.info(
-            f"[{self.__class__.__name__}] Initialized. Starting at Step: {self.current_step}, Rollout: {self.current_rollout}"
-        )
-        logger.info(
-            f"[{self.__class__.__name__}] Training Target: {self.total_timesteps} steps."
-        )
-        logger.info(
-            f"[{self.__class__.__name__}] Batch Size: {self.batch_size}, Minibatch Size: {self.minibatch_size} ({self.num_minibatches} minibatches)"
-        )
-
-    def run(self):
-        """The main loop for the trainer thread."""
-        logger.info(f"[{self.__class__.__name__}] Starting training worker loop.")
-        loop_count = 0
-        try:
-            while (
-                self.current_step < self.total_timesteps
-                and not self.stop_event.is_set()
-            ):
-                loop_start_time = time.time()
-                # --- Pause Handling ---
-                if self.pause_event.is_set():
-                    if not self._was_paused:
-                        logger.info(f"[{self.__class__.__name__}] Paused.")
-                        self._was_paused = True
-                    # Wait efficiently, checking stop_event periodically
-                    self.pause_event.wait(timeout=0.1)
-                    continue  # Re-check stop/pause events
-
-                # --- Resume Logging ---
-                if self._was_paused:
-                    logger.info(f"[{self.__class__.__name__}] Resumed.")
-                    self._was_paused = False
-                    self._rollout_ready_logged = False  # Reset log flag on resume
-
-                # --- Active Work ---
-                logger.debug(
-                    f"[{self.__class__.__name__} Loop {loop_count}] Checking for completed rollout..."
-                )
-
-                # Wait for the storage to be ready (filled by EnvRunner)
-                if not self.storage.ready_for_update():
-                    if not self._rollout_ready_logged:
-                        logger.debug(
-                            f"[{self.__class__.__name__} Loop {loop_count}] Waiting for rollout data (Current: {self.storage.step}/{self.num_steps})..."
-                        )
-                        self._rollout_ready_logged = True
-                    time.sleep(0.01)  # Avoid busy-waiting
-                    continue
-
-                # --- Rollout Ready ---
-                logger.debug(
-                    f"[{self.__class__.__name__} Loop {loop_count}] Rollout data ready. Starting training update."
-                )
-                self._rollout_ready_logged = False  # Reset log flag
-                train_start_time = time.time()
-
-                # Perform PPO update
-                update_metrics = self.agent.update(self.storage)
-
-                train_end_time = time.time()
-                logger.debug(
-                    f"[{self.__class__.__name__} Loop {loop_count}] PPO update finished in {train_end_time - train_start_time:.4f}s."
-                )
-
-                # Update global step count and rollout count
-                steps_in_rollout = self.num_steps * self.num_envs
-                self.current_step += steps_in_rollout
-                self.current_rollout += 1
-
-                # Log metrics via StatsAggregator
-                self.stats_aggregator.record_training_metrics(
-                    update_metrics, self.current_step, self.current_rollout
-                )
-
-                # Checkpointing
-                if (
-                    self.current_rollout % self.checkpoint_config.SAVE_FREQ_ROLLOUTS
-                    == 0
-                ):
-                    logger.info(
-                        f"[{self.__class__.__name__}] Reached checkpoint interval (Rollout {self.current_rollout}). Saving checkpoint..."
-                    )
-                    save_start_time = time.time()
-                    self.checkpoint_manager.save_checkpoint(
-                        global_step=self.current_step,
-                        completed_rollouts=self.current_rollout,
-                    )
-                    save_end_time = time.time()
-                    logger.info(
-                        f"[{self.__class__.__name__}] Checkpoint saved in {save_end_time - save_start_time:.3f}s."
-                    )
-
-                # Prepare storage for the next rollout
-                self.storage.after_update()
-                logger.debug(
-                    f"[{self.__class__.__name__} Loop {loop_count}] Storage reset for next rollout."
-                )
-
-                loop_end_time = time.time()
-                logger.debug(
-                    f"[{self.__class__.__name__} Loop {loop_count}] Full training loop iteration took {loop_end_time - loop_start_time:.4f}s."
-                )
-                loop_count += 1
-
-        except Exception as e:
-            logger.critical(
-                f"[{self.__class__.__name__}] Exception in run loop: {e}", exc_info=True
-            )
-            self.stop_event.set()  # Signal other threads to stop
-        finally:
-            if self.current_step >= self.total_timesteps:
-                logger.info(
-                    f"[{self.__class__.__name__}] Reached target timesteps ({self.total_timesteps})."
-                )
-            if self.stop_event.is_set():
-                logger.info(f"[{self.__class__.__name__}] Stop event received.")
-
-            # Attempt a final save if configured and stopping normally
-            if (
-                self.checkpoint_config.SAVE_ON_EXIT and not self.pause_event.is_set()
-            ):  # Don't save if just paused
-                logger.info(
-                    f"[{self.__class__.__name__}] Attempting final checkpoint save on exit..."
-                )
-                self.checkpoint_manager.save_checkpoint(
-                    global_step=self.current_step,
-                    completed_rollouts=self.current_rollout,
-                    is_final=True,
-                )
-
-            logger.info(
-                f"[{self.__class__.__name__}] Exiting run loop. Final Step: {self.current_step}, Final Rollout: {self.current_rollout}"
-            )
-
-
 File: stats\aggregator.py
 # File: stats/aggregator.py
 import time
@@ -7453,6 +5260,7 @@ class StatsAggregator:
             return update_info
 
     def record_step(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Records step data, now likely related to NN training steps."""
         with self._lock:
             update_info = self.logic.update_step_stats(step_data)
             return update_info
@@ -7501,6 +5309,7 @@ class StatsAggregator:
 
 
 File: stats\aggregator_logic.py
+# File: stats/aggregator_logic.py
 from collections import deque
 from typing import Deque, Dict, Any, Optional, List
 import numpy as np
@@ -7567,18 +5376,31 @@ class AggregatorLogic:
         if "training_target_step" in step_data:
             self.storage.training_target_step = step_data["training_target_step"]
 
-        update_info = {"new_best_loss": False}
+        update_info = {
+            "new_best_loss": False,
+            "new_best_policy_loss": False,
+        }  # Added policy loss flag
 
         # Append to deques
+        # --- NN Policy Loss ---
         if "policy_loss" in step_data and step_data["policy_loss"] is not None:
-            loss_val = step_data["policy_loss"]
-            if np.isfinite(loss_val):
-                self.storage.policy_losses.append(loss_val)
+            current_policy_loss = step_data["policy_loss"]
+            if np.isfinite(current_policy_loss):
+                self.storage.policy_losses.append(current_policy_loss)
+                if current_policy_loss < self.storage.best_policy_loss and g_step > 0:
+                    self.storage.previous_best_policy_loss = (
+                        self.storage.best_policy_loss
+                    )
+                    self.storage.best_policy_loss = current_policy_loss
+                    self.storage.best_policy_loss_step = g_step
+                    update_info["new_best_policy_loss"] = True
             else:
                 print(
-                    f"[Aggregator Warning] Received non-finite Policy Loss: {loss_val}"
+                    f"[Aggregator Warning] Received non-finite Policy Loss: {current_policy_loss}"
                 )
+        # --- End NN Policy Loss ---
 
+        # --- NN Value Loss ---
         if "value_loss" in step_data and step_data["value_loss"] is not None:
             current_value_loss = step_data["value_loss"]
             if np.isfinite(current_value_loss):
@@ -7587,24 +5409,20 @@ class AggregatorLogic:
                     self.storage.previous_best_value_loss = self.storage.best_value_loss
                     self.storage.best_value_loss = current_value_loss
                     self.storage.best_value_loss_step = g_step
-                    update_info["new_best_loss"] = True
+                    update_info["new_best_loss"] = (
+                        True  # Keep original flag name for value loss
+                    )
             else:
                 print(
                     f"[Aggregator Warning] Received non-finite Value Loss: {current_value_loss}"
                 )
+        # --- End NN Value Loss ---
 
-        if "entropy" in step_data and step_data["entropy"] is not None:
-            entropy_val = step_data["entropy"]
-            if np.isfinite(entropy_val):
-                self.storage.entropies.append(entropy_val)
-            else:
-                print(
-                    f"[Aggregator Warning] Received non-finite Entropy: {entropy_val}"
-                )
+        # Removed Entropy
 
         # Append other optional metrics
         optional_metrics = [
-            ("grad_norm", "grad_norms"),
+            # Removed grad_norm, update_steps_per_second, minibatch_update_sps
             ("avg_max_q", "avg_max_qs"),
             ("beta", "beta_values"),
             ("buffer_size", "buffer_sizes"),
@@ -7613,25 +5431,24 @@ class AggregatorLogic:
             ("cpu_usage", "cpu_usage"),
             ("memory_usage", "memory_usage"),
             ("gpu_memory_usage_percent", "gpu_memory_usage_percent"),
-            (
-                "update_steps_per_second",
-                "update_steps_per_second_values",
-            ),  # Overall SPS
-            (
-                "minibatch_update_sps",
-                "minibatch_update_sps_values",
-            ),  # NEW: Minibatch SPS
         ]
         for data_key, deque_name in optional_metrics:
             if data_key in step_data and step_data[data_key] is not None:
                 val = step_data[data_key]
                 if np.isfinite(val):
-                    getattr(self.storage, deque_name).append(val)
+                    # Ensure deque exists before appending
+                    if hasattr(self.storage, deque_name):
+                        getattr(self.storage, deque_name).append(val)
+                    else:
+                        print(
+                            f"[Aggregator Warning] Deque '{deque_name}' not found in storage."
+                        )
                 else:
                     print(f"[Aggregator Warning] Received non-finite {data_key}: {val}")
 
         # Update scalar values
         scalar_updates = {
+            # Removed SPS scalars
             "beta": "current_beta",
             "buffer_size": "current_buffer_size",
             "lr": "current_lr",
@@ -7639,8 +5456,6 @@ class AggregatorLogic:
             "cpu_usage": "current_cpu_usage",
             "memory_usage": "current_memory_usage",
             "gpu_memory_usage_percent": "current_gpu_memory_usage_percent",
-            "update_steps_per_second": "current_update_steps_per_second",  # Overall SPS
-            "minibatch_update_sps": "current_minibatch_update_sps",  # NEW: Minibatch SPS
         }
         for data_key, storage_key in scalar_updates.items():
             if data_key in step_data and step_data[data_key] is not None:
@@ -7658,6 +5473,9 @@ class AggregatorLogic:
         """Calculates the summary dictionary based on stored data."""
 
         def safe_mean(q_name: str, default=0.0) -> float:
+            # Check if deque exists before accessing
+            if not hasattr(self.storage, q_name):
+                return default
             deque_instance = self.storage.get_deque(q_name)
             window_data = list(deque_instance)[-summary_avg_window:]
             finite_data = [x for x in window_data if np.isfinite(x)]
@@ -7666,20 +5484,12 @@ class AggregatorLogic:
         summary = {
             "avg_score_window": safe_mean("episode_scores"),
             "avg_length_window": safe_mean("episode_lengths"),
-            "policy_loss": safe_mean("policy_losses"),
+            "policy_loss": safe_mean("policy_losses"),  # Added policy loss
             "value_loss": safe_mean("value_losses"),
-            "entropy": safe_mean("entropies"),
+            # Removed entropy, avg_update_sps, avg_minibatch_sps
             "avg_max_q_window": safe_mean("avg_max_qs"),
             "avg_game_score_window": safe_mean("game_scores"),
             "avg_triangles_cleared_window": safe_mean("episode_triangles_cleared"),
-            "avg_update_sps_window": safe_mean(
-                "update_steps_per_second_values",  # Overall SPS
-                default=self.storage.current_update_steps_per_second,
-            ),
-            "avg_minibatch_sps_window": safe_mean(
-                "minibatch_update_sps_values",  # NEW: Minibatch SPS
-                default=self.storage.current_minibatch_update_sps,
-            ),
             "avg_lr_window": safe_mean("lr_values", default=self.storage.current_lr),
             "avg_cpu_window": safe_mean("cpu_usage"),
             "avg_memory_window": safe_mean("memory_usage"),
@@ -7687,8 +5497,7 @@ class AggregatorLogic:
             "total_episodes": self.storage.total_episodes,
             "beta": self.storage.current_beta,
             "buffer_size": self.storage.current_buffer_size,
-            "update_steps_per_second": self.storage.current_update_steps_per_second,  # Overall SPS
-            "minibatch_update_sps": self.storage.current_minibatch_update_sps,  # NEW: Minibatch SPS
+            # Removed SPS scalars
             "global_step": current_global_step,
             "current_lr": self.storage.current_lr,
             "best_score": self.storage.best_score,
@@ -7697,14 +5506,19 @@ class AggregatorLogic:
             "best_game_score": self.storage.best_game_score,
             "previous_best_game_score": self.storage.previous_best_game_score,
             "best_game_score_step": self.storage.best_game_score_step,
-            "best_loss": self.storage.best_value_loss,
+            "best_loss": self.storage.best_value_loss,  # Keep as value loss best
             "previous_best_loss": self.storage.previous_best_value_loss,
             "best_loss_step": self.storage.best_value_loss_step,
+            "best_policy_loss": self.storage.best_policy_loss,  # Added policy loss best
+            "previous_best_policy_loss": self.storage.previous_best_policy_loss,
+            "best_policy_loss_step": self.storage.best_policy_loss_step,
             "num_ep_scores": len(self.storage.episode_scores),
-            "num_losses": len(self.storage.value_losses),
+            "num_losses": len(
+                self.storage.value_losses
+            ),  # Maybe rename to num_value_losses?
             "summary_avg_window_size": summary_avg_window,
             "start_time": self.storage.start_time,
-            "training_target_step": self.storage.training_target_step,  # Ensure target step is in summary
+            "training_target_step": self.storage.training_target_step,
             "current_cpu_usage": self.storage.current_cpu_usage,
             "current_memory_usage": self.storage.current_memory_usage,
             "current_gpu_memory_usage_percent": self.storage.current_gpu_memory_usage_percent,
@@ -7714,9 +5528,8 @@ class AggregatorLogic:
 
 File: stats\aggregator_storage.py
 from collections import deque
-from typing import Deque, Dict, Any, List
+from typing import Deque, Dict, Any,
 import time
-import numpy as np
 
 
 class AggregatorStorage:
@@ -7726,30 +5539,38 @@ class AggregatorStorage:
         self.plot_window = plot_window
 
         # --- Deques for Plotting ---
-        self.policy_losses: Deque[float] = deque(maxlen=plot_window)
-        self.value_losses: Deque[float] = deque(maxlen=plot_window)
-        self.entropies: Deque[float] = deque(maxlen=plot_window)
-        self.grad_norms: Deque[float] = deque(maxlen=plot_window)
-        self.avg_max_qs: Deque[float] = deque(maxlen=plot_window)
-        self.episode_scores: Deque[float] = deque(maxlen=plot_window)
+        # Removed: self.policy_losses
+        # Removed: self.value_losses
+        # Removed: self.entropies
+        # Removed: self.grad_norms
+        self.avg_max_qs: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Keep if Q-values are estimated by NN
+        self.episode_scores: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Keep RL score if used, or repurpose
         self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
         self.game_scores: Deque[int] = deque(maxlen=plot_window)
         self.episode_triangles_cleared: Deque[int] = deque(maxlen=plot_window)
-        self.sps_values: Deque[float] = deque(
+        # Removed: self.sps_values
+        # Removed: self.update_steps_per_second_values
+        # Removed: self.minibatch_update_sps_values
+        self.buffer_sizes: Deque[int] = deque(
             maxlen=plot_window
-        )  # Deprecated, keep for loading old checkpoints?
-        self.update_steps_per_second_values: Deque[float] = deque(
+        )  # Might be useful for MCTS buffer/NN training data
+        self.beta_values: Deque[float] = deque(
             maxlen=plot_window
-        )  # Overall SPS
-        self.minibatch_update_sps_values: Deque[float] = deque(
+        )  # Keep if used (e.g., PER)
+        self.best_rl_score_history: Deque[float] = deque(
             maxlen=plot_window
-        )  # NEW: SPS per minibatch
-        self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
-        self.beta_values: Deque[float] = deque(maxlen=plot_window)
-        self.best_rl_score_history: Deque[float] = deque(maxlen=plot_window)
+        )  # Keep RL score if used
         self.best_game_score_history: Deque[int] = deque(maxlen=plot_window)
-        self.lr_values: Deque[float] = deque(maxlen=plot_window)
-        self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
+        self.lr_values: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Keep for NN training LR
+        self.epsilon_values: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Keep if epsilon-greedy is used in MCTS/NN
         self.cpu_usage: Deque[float] = deque(maxlen=plot_window)
         self.memory_usage: Deque[float] = deque(maxlen=plot_window)
         self.gpu_memory_usage_percent: Deque[float] = deque(maxlen=plot_window)
@@ -7760,27 +5581,31 @@ class AggregatorStorage:
         self.current_epsilon: float = 0.0
         self.current_beta: float = 0.0
         self.current_buffer_size: int = 0
-        self.current_global_step: int = 0
-        self.current_sps: float = 0.0  # Deprecated
-        self.current_update_steps_per_second: float = 0.0  # Overall SPS
-        self.current_minibatch_update_sps: float = 0.0  # NEW: SPS per minibatch
-        self.current_lr: float = 0.0
+        self.current_global_step: int = (
+            0  # Might represent training steps or games played now
+        )
+
+        self.current_lr: float = 0.0  # Keep for NN
         self.start_time: float = time.time()
-        self.training_target_step: int = 0  # Initialized to 0, set by CheckpointManager
+        self.training_target_step: int = 0  # Target might be games played or NN steps
         self.current_cpu_usage: float = 0.0
         self.current_memory_usage: float = 0.0
         self.current_gpu_memory_usage_percent: float = 0.0
 
         # --- Best Value Tracking ---
-        self.best_score: float = -float("inf")
+        self.best_score: float = -float("inf")  # Keep RL score if used
         self.previous_best_score: float = -float("inf")
         self.best_score_step: int = 0
         self.best_game_score: float = -float("inf")
         self.previous_best_game_score: float = -float("inf")
         self.best_game_score_step: int = 0
-        self.best_value_loss: float = float("inf")
+        self.best_value_loss: float = float("inf")  # Keep for NN value head loss
         self.previous_best_value_loss: float = float("inf")
         self.best_value_loss_step: int = 0
+        # Add best policy loss?
+        self.best_policy_loss: float = float("inf")
+        self.previous_best_policy_loss: float = float("inf")
+        self.best_policy_loss_step: int = 0
 
     def get_deque(self, name: str) -> Deque:
         """Safely gets a deque attribute."""
@@ -7789,17 +5614,11 @@ class AggregatorStorage:
     def get_all_plot_deques(self) -> Dict[str, Deque]:
         """Returns copies of all deques intended for plotting."""
         deque_names = [
-            "policy_losses",
-            "value_losses",
-            "entropies",
-            "grad_norms",
             "avg_max_qs",
             "episode_scores",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
-            "update_steps_per_second_values",  # Overall SPS
-            "minibatch_update_sps_values",  # NEW: Minibatch SPS
             "buffer_sizes",
             "beta_values",
             "best_rl_score_history",
@@ -7809,26 +5628,27 @@ class AggregatorStorage:
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
+            # Add NN losses if tracked
+            "policy_losses",  # Added back for NN policy head
+            "value_losses",  # Kept for NN value head
         ]
-        return {name: self.get_deque(name).copy() for name in deque_names}
+        # Filter out names that might not exist if loaded from old state
+        return {
+            name: self.get_deque(name).copy()
+            for name in deque_names
+            if hasattr(self, name)
+        }
 
     def state_dict(self) -> Dict[str, Any]:
         """Returns the state of the storage for saving."""
         state = {}
         # Deques
         deque_names = [
-            "policy_losses",
-            "value_losses",
-            "entropies",
-            "grad_norms",
             "avg_max_qs",
             "episode_scores",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
-            "sps_values",  # Keep for loading old checkpoints
-            "update_steps_per_second_values",  # Overall SPS
-            "minibatch_update_sps_values",  # NEW: Minibatch SPS
             "buffer_sizes",
             "beta_values",
             "best_rl_score_history",
@@ -7838,9 +5658,13 @@ class AggregatorStorage:
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
+            # Add NN losses if tracked
+            "policy_losses",  # Added back for NN policy head
+            "value_losses",  # Kept for NN value head
         ]
         for name in deque_names:
-            state[name] = list(self.get_deque(name))
+            if hasattr(self, name):  # Check if deque exists before saving
+                state[name] = list(self.get_deque(name))
 
         # Scalar State Variables
         scalar_keys = [
@@ -7850,18 +5674,16 @@ class AggregatorStorage:
             "current_beta",
             "current_buffer_size",
             "current_global_step",
-            "current_sps",  # Keep for loading old checkpoints
-            "current_update_steps_per_second",  # Overall SPS
-            "current_minibatch_update_sps",  # NEW: Minibatch SPS
+            # Removed SPS scalars
             "current_lr",
             "start_time",
-            "training_target_step",  # Add target step
+            "training_target_step",
             "current_cpu_usage",
             "current_memory_usage",
             "current_gpu_memory_usage_percent",
         ]
         for key in scalar_keys:
-            state[key] = getattr(self, key, 0)  # Default to 0 if missing
+            state[key] = getattr(self, key, 0)
 
         # Best Value Tracking
         best_value_keys = [
@@ -7874,30 +5696,25 @@ class AggregatorStorage:
             "best_value_loss",
             "previous_best_value_loss",
             "best_value_loss_step",
+            "best_policy_loss",  # Added policy loss tracking
+            "previous_best_policy_loss",
+            "best_policy_loss_step",
         ]
         for key in best_value_keys:
-            state[key] = getattr(self, key, 0)  # Default to 0 if missing
+            state[key] = getattr(self, key, 0)
 
         return state
 
     def load_state_dict(self, state_dict: Dict[str, Any], plot_window: int):
         """Loads the state from a dictionary."""
-        self.plot_window = plot_window  # Update plot window size first
+        self.plot_window = plot_window
 
-        # Deques
         deque_names = [
-            "policy_losses",
-            "value_losses",
-            "entropies",
-            "grad_norms",
             "avg_max_qs",
             "episode_scores",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
-            "sps_values",  # Keep for loading old checkpoints
-            "update_steps_per_second_values",  # Overall SPS
-            "minibatch_update_sps_values",  # NEW: Minibatch SPS
             "buffer_sizes",
             "beta_values",
             "best_rl_score_history",
@@ -7907,27 +5724,11 @@ class AggregatorStorage:
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
+            "policy_losses",
+            "value_losses",
         ]
         for key in deque_names:
-            # Handle potential renaming from old checkpoints
-            data_to_load = None
-            if key == "update_steps_per_second_values" and key not in state_dict:
-                # Try loading from old key "update_sps_values" or "sps_values" if new key missing
-                old_key_1 = "update_sps_values"
-                old_key_2 = "sps_values"
-                if old_key_1 in state_dict:
-                    data_to_load = state_dict[old_key_1]
-                    print(
-                        f"  -> Info: Loading deque '{key}' from old key '{old_key_1}'."
-                    )
-                elif old_key_2 in state_dict:
-                    data_to_load = state_dict[old_key_2]
-                    print(
-                        f"  -> Info: Loading deque '{key}' from old key '{old_key_2}'."
-                    )
-            elif key in state_dict:
-                data_to_load = state_dict[key]
-
+            data_to_load = state_dict.get(key)
             if data_to_load is not None:
                 try:
                     if isinstance(data_to_load, (list, tuple)):
@@ -7944,7 +5745,6 @@ class AggregatorStorage:
                 # Ensure deque exists even if not in state_dict
                 setattr(self, key, deque(maxlen=self.plot_window))
 
-        # Scalar State Variables
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
@@ -7952,45 +5752,20 @@ class AggregatorStorage:
             "current_beta",
             "current_buffer_size",
             "current_global_step",
-            "current_sps",  # Keep for loading old checkpoints
-            "current_update_steps_per_second",  # Overall SPS
-            "current_minibatch_update_sps",  # NEW: Minibatch SPS
             "current_lr",
             "start_time",
-            "training_target_step",  # Add target step
+            "training_target_step",
             "current_cpu_usage",
             "current_memory_usage",
             "current_gpu_memory_usage_percent",
         ]
         default_values = {
             "start_time": time.time(),
-            "training_target_step": 0,  # Default target step if not found
+            "training_target_step": 0,
             "current_global_step": 0,
         }
         for key in scalar_keys:
-            # Handle potential renaming from old checkpoints
-            value_to_load = None
-            if key == "current_update_steps_per_second" and key not in state_dict:
-                # Try loading from old key "current_update_sps" or "current_sps"
-                old_key_1 = "current_update_sps"
-                old_key_2 = "current_sps"
-                if old_key_1 in state_dict:
-                    value_to_load = state_dict[old_key_1]
-                    print(
-                        f"  -> Info: Loading scalar '{key}' from old key '{old_key_1}'."
-                    )
-                elif old_key_2 in state_dict:
-                    value_to_load = state_dict[old_key_2]
-                    print(
-                        f"  -> Info: Loading scalar '{key}' from old key '{old_key_2}'."
-                    )
-                else:
-                    value_to_load = default_values.get(key, 0)
-            # Handle new minibatch SPS scalar
-            elif key == "current_minibatch_update_sps" and key not in state_dict:
-                value_to_load = default_values.get(key, 0)
-            else:
-                value_to_load = state_dict.get(key, default_values.get(key, 0))
+            value_to_load = state_dict.get(key, default_values.get(key, 0))
             setattr(self, key, value_to_load)
 
         # Best Value Tracking
@@ -8004,6 +5779,9 @@ class AggregatorStorage:
             "best_value_loss",
             "previous_best_value_loss",
             "best_value_loss_step",
+            "best_policy_loss",
+            "previous_best_policy_loss",
+            "best_policy_loss_step",
         ]
         default_best = {
             "best_score": -float("inf"),
@@ -8012,6 +5790,8 @@ class AggregatorStorage:
             "previous_best_game_score": -float("inf"),
             "best_value_loss": float("inf"),
             "previous_best_value_loss": float("inf"),
+            "best_policy_loss": float("inf"),  # Added policy loss tracking
+            "previous_best_policy_loss": float("inf"),
         }
         for key in best_value_keys:
             setattr(self, key, state_dict.get(key, default_best.get(key, 0)))
@@ -8022,9 +5802,13 @@ class AggregatorStorage:
         # Ensure training_target_step exists after loading
         if not hasattr(self, "training_target_step"):
             self.training_target_step = 0
-        # Ensure new scalar exists after loading
-        if not hasattr(self, "current_minibatch_update_sps"):
-            self.current_minibatch_update_sps = 0.0
+        # Ensure policy loss tracking exists
+        if not hasattr(self, "best_policy_loss"):
+            self.best_policy_loss = float("inf")
+        if not hasattr(self, "previous_best_policy_loss"):
+            self.previous_best_policy_loss = float("inf")
+        if not hasattr(self, "best_policy_loss_step"):
+            self.best_policy_loss_step = 0
 
 
 File: stats\simple_stats_recorder.py
@@ -8034,7 +5818,7 @@ from collections import deque
 from typing import Deque, Dict, Any, Optional, Union, List
 import numpy as np
 import torch
-import threading  # Added for Lock
+import threading
 
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
@@ -8054,19 +5838,20 @@ class SimpleStatsRecorder(StatsRecorderBase):
         console_log_interval: int = StatsConfig.CONSOLE_LOG_FREQ,
     ):
         self.aggregator = aggregator
+        # Console log interval might now represent episodes or training steps
         self.console_log_interval = (
             max(1, console_log_interval) if console_log_interval > 0 else -1
         )
         self.last_log_time: float = time.time()
-        self.start_time: float = time.time()  # Use aggregator's start time?
+        self.start_time: float = time.time()
         self.summary_avg_window = self.aggregator.summary_avg_window
-        self.rollouts_since_last_log = 0
+        # Counter might track episodes or training steps now
+        self.updates_since_last_log = 0  # Renamed from rollouts_since_last_log
 
-        # Lock for protecting internal state like rollout counter
         self._lock = threading.Lock()
 
         print(
-            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} rollouts"
+            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} updates/episodes"
         )
         print(
             f"[SimpleStatsRecorder] Console logs will use Avg Window: {self.summary_avg_window}"
@@ -8082,7 +5867,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
         triangles_cleared: Optional[int] = None,
     ):
         """Records episode stats and prints new bests to console. Thread-safe."""
-        # Aggregator call is thread-safe due to its internal lock
         update_info = self.aggregator.record_episode(
             episode_score,
             episode_length,
@@ -8091,80 +5875,108 @@ class SimpleStatsRecorder(StatsRecorderBase):
             game_score,
             triangles_cleared,
         )
-        # Reading aggregator state is thread-safe due to its internal lock
         current_step = (
             global_step
             if global_step is not None
-            else self.aggregator.storage.current_global_step  # Corrected access
+            else self.aggregator.storage.current_global_step
         )
-        step_info = f"at Step ~{current_step/1e6:.1f}M"
+        step_info = f"at Step ~{current_step/1e6:.1f}M"  # Step might mean NN steps now
 
-        # Print new bests immediately (print is thread-safe in Python 3)
+        # Print new bests immediately
         if update_info.get("new_best_rl"):
             prev_str = (
-                f"{self.aggregator.storage.previous_best_score:.2f}"  # Corrected access
-                if self.aggregator.storage.previous_best_score
-                > -float("inf")  # Corrected access
+                f"{self.aggregator.storage.previous_best_score:.2f}"
+                if self.aggregator.storage.previous_best_score > -float("inf")
                 else "N/A"
             )
             print(
-                f"\n--- 🏆 New Best RL: {self.aggregator.storage.best_score:.2f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
+                f"\n--- 🏆 New Best RL: {self.aggregator.storage.best_score:.2f} {step_info} (Prev: {prev_str}) ---"
             )
         if update_info.get("new_best_game"):
             prev_str = (
-                f"{self.aggregator.storage.previous_best_game_score:.0f}"  # Corrected access
-                if self.aggregator.storage.previous_best_game_score
-                > -float("inf")  # Corrected access
+                f"{self.aggregator.storage.previous_best_game_score:.0f}"
+                if self.aggregator.storage.previous_best_game_score > -float("inf")
                 else "N/A"
             )
             print(
-                f"--- 🎮 New Best Game: {self.aggregator.storage.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
+                f"--- 🎮 New Best Game: {self.aggregator.storage.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
             )
-        if update_info.get("new_best_loss"):
+        # Check for new best NN losses
+        if update_info.get("new_best_loss"):  # Value loss
             prev_str = (
-                f"{self.aggregator.storage.previous_best_value_loss:.4f}"  # Corrected access
-                if self.aggregator.storage.previous_best_value_loss
-                < float("inf")  # Corrected access
+                f"{self.aggregator.storage.previous_best_value_loss:.4f}"
+                if self.aggregator.storage.previous_best_value_loss < float("inf")
                 else "N/A"
             )
             print(
-                f"---📉 New Best Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
+                f"---📉 New Best V.Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
+            )
+        if update_info.get("new_best_policy_loss"):  # Policy loss
+            prev_str = (
+                f"{self.aggregator.storage.previous_best_policy_loss:.4f}"
+                if self.aggregator.storage.previous_best_policy_loss < float("inf")
+                else "N/A"
+            )
+            print(
+                f"---📉 New Best P.Loss: {self.aggregator.storage.best_policy_loss:.4f} {step_info} (Prev: {prev_str}) ---"
             )
 
+        # Trigger console log based on episode count if interval is set
+        log_now = False
+        with self._lock:
+            self.updates_since_last_log += 1
+            if (
+                self.console_log_interval > 0
+                and self.updates_since_last_log >= self.console_log_interval
+            ):
+                log_now = True
+                self.updates_since_last_log = 0
+
+        if log_now:
+            self.log_summary(current_step)
+
     def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats and triggers console logging if interval met. Thread-safe."""
-        # Aggregator call is thread-safe
+        """Records step stats (e.g., NN update) and triggers console logging if interval met. Thread-safe."""
         update_info = self.aggregator.record_step(step_data)
         g_step = step_data.get(
             "global_step", self.aggregator.storage.current_global_step
-        )  # Corrected access
+        )
 
         # Print new best loss immediately if it occurred during this step's update
-        if update_info.get("new_best_loss"):
+        if update_info.get("new_best_loss"):  # Value loss
             prev_str = (
-                f"{self.aggregator.storage.previous_best_value_loss:.4f}"  # Corrected access
-                if self.aggregator.storage.previous_best_value_loss
-                < float("inf")  # Corrected access
+                f"{self.aggregator.storage.previous_best_value_loss:.4f}"
+                if self.aggregator.storage.previous_best_value_loss < float("inf")
                 else "N/A"
             )
             step_info = f"at Step ~{g_step/1e6:.1f}M"
             print(
-                f"---📉 New Best Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"  # Corrected access
+                f"---📉 New Best V.Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
+            )
+        if update_info.get("new_best_policy_loss"):  # Policy loss
+            prev_str = (
+                f"{self.aggregator.storage.previous_best_policy_loss:.4f}"
+                if self.aggregator.storage.previous_best_policy_loss < float("inf")
+                else "N/A"
+            )
+            step_info = f"at Step ~{g_step/1e6:.1f}M"
+            print(
+                f"---📉 New Best P.Loss: {self.aggregator.storage.best_policy_loss:.4f} {step_info} (Prev: {prev_str}) ---"
             )
 
-        # Increment rollout counter and check logging frequency (thread-safe)
+        # Increment counter and check logging frequency (thread-safe)
+        # Logging frequency might now be based on NN updates instead of rollouts
         log_now = False
         with self._lock:
-            # Increment rollout counter if an agent update occurred
-            # Check for a key that is reliably present after an update, like 'lr' or 'update_time'
-            if "lr" in step_data or "update_time" in step_data:
-                self.rollouts_since_last_log += 1
+            # Increment counter if an NN update occurred (check for loss keys)
+            if "policy_loss" in step_data or "value_loss" in step_data:
+                self.updates_since_last_log += 1
                 if (
                     self.console_log_interval > 0
-                    and self.rollouts_since_last_log >= self.console_log_interval
+                    and self.updates_since_last_log >= self.console_log_interval
                 ):
                     log_now = True
-                    self.rollouts_since_last_log = 0  # Reset counter
+                    self.updates_since_last_log = 0
 
         if log_now:
             self.log_summary(g_step)
@@ -8179,12 +5991,8 @@ class SimpleStatsRecorder(StatsRecorderBase):
 
     def log_summary(self, global_step: int):
         """Logs the current summary statistics to the console."""
-        # Get summary data (thread-safe)
         summary = self.get_summary(global_step)
-        # Use aggregator's start time
-        elapsed_runtime = (
-            time.time() - self.aggregator.storage.start_time
-        )  # Corrected access
+        elapsed_runtime = time.time() - self.aggregator.storage.start_time
         runtime_hrs = elapsed_runtime / 3600
 
         best_score_val = (
@@ -8192,32 +6000,38 @@ class SimpleStatsRecorder(StatsRecorderBase):
             if summary["best_score"] > -float("inf")
             else "N/A"
         )
-        best_loss_val = (
-            f"{summary['best_loss']:.4f}"
+        best_game_score_val = (
+            f"{summary['best_game_score']:.0f}"
+            if summary["best_game_score"] > -float("inf")
+            else "N/A"
+        )
+        best_v_loss_val = (
+            f"{summary['best_loss']:.4f}"  # Value loss
             if summary["best_loss"] < float("inf")
+            else "N/A"
+        )
+        best_p_loss_val = (
+            f"{summary['best_policy_loss']:.4f}"  # Policy loss
+            if summary["best_policy_loss"] < float("inf")
             else "N/A"
         )
         avg_window_size = summary.get("summary_avg_window_size", "?")
 
-        # --- Use avg_minibatch_sps_window instead of steps_per_second ---
-        # Ensure the key exists before formatting
-        sps_val = summary.get("avg_minibatch_sps_window", 0.0)
-        sps_str = f"{sps_val/1000:.1f}k" if sps_val >= 1000 else f"{sps_val:.0f}"
-        # --- End change ---
-
+        # Removed SPS
         log_str = (
-            f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
-            f"Ep: {summary['total_episodes']:<7} | SPS(MB): {sps_str:<5} | "  # Changed SPS label
-            f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | "
-            f"Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_loss_val}) | "
+            f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "  # Step might mean NN steps
+            f"Ep: {summary['total_episodes']:<7} | "
+            # f"RLScore(Avg{avg_window_size}): {summary['avg_score_window']:<6.2f} (Best: {best_score_val}) | " # Keep RL score?
+            f"GameScore(Avg{avg_window_size}): {summary['avg_game_score_window']:<6.0f} (Best: {best_game_score_val}) | "
+            f"V.Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_v_loss_val}) | "
+            f"P.Loss(Avg{avg_window_size}): {summary['policy_loss']:.4f} (Best: {best_p_loss_val}) | "
             f"LR: {summary['current_lr']:.1e}"
         )
         avg_tris_cleared = summary.get("avg_triangles_cleared_window", 0.0)
         log_str += f" | TrisClr(Avg{avg_window_size}): {avg_tris_cleared:.1f}"
 
-        print(log_str)  # Print is thread-safe
+        print(log_str)
 
-        # Update last log time (no lock needed, only read by this method)
         self.last_log_time = time.time()
 
     def record_histogram(
@@ -8585,6 +6399,7 @@ def format_image_for_tb(image: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
 
 
 File: stats\tb_scalar_logger.py
+# File: stats/tb_scalar_logger.py
 import torch
 from torch.utils.tensorboard import SummaryWriter
 import threading
@@ -8656,20 +6471,16 @@ class TBScalarLogger:
         with self._lock:
             try:
                 scalar_map = {
-                    "policy_loss": "Loss/Policy Loss",
-                    "value_loss": "Loss/Value Loss",
-                    "entropy": "Loss/Entropy",
-                    "grad_norm": "Debug/Grad Norm",
-                    "avg_max_q": "Debug/Avg Max Q",
-                    "beta": "Debug/Beta",
-                    "buffer_size": "Debug/Buffer Size",
-                    "lr": "Train/Learning Rate",
-                    "epsilon": "Train/Epsilon",
-                    "sps_collection": "Performance/SPS Collection",  # Collection SPS
-                    "update_steps_per_second": "Performance/SPS Update (Overall)",  # Overall SPS
-                    "minibatch_update_sps": "Performance/SPS Update (Minibatch)",  # NEW: Minibatch SPS
-                    "update_time": "Performance/Update Time",
-                    "step_time": "Performance/Total Step Time",  # Might be less useful now
+                    "policy_loss": "Loss/Policy Loss",  # Keep policy loss for NN
+                    "value_loss": "Loss/Value Loss",  # Keep value loss for NN
+                    # Removed entropy, grad_norm, sps_collection, update_steps_per_second, minibatch_update_sps
+                    "avg_max_q": "Debug/Avg Max Q",  # Keep if NN estimates Q
+                    "beta": "Debug/Beta",  # Keep if PER used
+                    "buffer_size": "Debug/Buffer Size",  # Keep for MCTS/NN buffer
+                    "lr": "Train/Learning Rate",  # Keep for NN
+                    "epsilon": "Train/Epsilon",  # Keep if used
+                    "update_time": "Performance/Update Time",  # Keep for NN update time
+                    "step_time": "Performance/Total Step Time",  # Keep if relevant
                     "cpu_usage": "Resource/CPU Usage (%)",
                     "memory_usage": "Resource/Memory Usage (%)",
                     "gpu_memory_usage_percent": "Resource/GPU Memory Usage (%)",
@@ -8679,10 +6490,16 @@ class TBScalarLogger:
                         self.writer.add_scalar(tag, step_data[key], g_step)
 
                 # --- Corrected Access ---
-                if update_info.get("new_best_loss"):
+                if update_info.get("new_best_loss"):  # Value loss
                     self.writer.add_scalar(
-                        "Best Performance/Loss",
+                        "Best Performance/Value Loss",
                         aggregator.storage.best_value_loss,
+                        g_step,
+                    )
+                if update_info.get("new_best_policy_loss"):  # Policy loss
+                    self.writer.add_scalar(
+                        "Best Performance/Policy Loss",
+                        aggregator.storage.best_policy_loss,
                         g_step,
                     )
                 # --- End Correction ---
@@ -8704,8 +6521,13 @@ import threading
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
 from .simple_stats_recorder import SimpleStatsRecorder
-from config import TensorBoardConfig, EnvConfig, RNNConfig
-from agent.networks.agent_network import ActorCriticNetwork
+from config import (
+    TensorBoardConfig,
+    EnvConfig,
+    RNNConfig,
+)  # Keep RNNConfig for potential future use
+
+# Removed ActorCriticNetwork import
 
 # Import helper modules
 from .tb_log_utils import format_image_for_tb
@@ -8728,18 +6550,18 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         console_recorder: SimpleStatsRecorder,
         log_dir: str,
         hparam_dict: Optional[Dict[str, Any]] = None,
-        model_for_graph: Optional[ActorCriticNetwork] = None,
-        dummy_input_for_graph: Optional[Tuple] = None,
+        model_for_graph: Optional[torch.nn.Module] = None,  # Changed type hint
+        dummy_input_for_graph: Optional[Any] = None,  # Changed type hint
         histogram_log_interval: int = TensorBoardConfig.HISTOGRAM_LOG_FREQ,
         image_log_interval: int = TensorBoardConfig.IMAGE_LOG_FREQ,
-        env_config: Optional[EnvConfig] = None,  # Keep for context if needed by helpers
-        rnn_config: Optional[RNNConfig] = None,  # Keep for context if needed by helpers
+        env_config: Optional[EnvConfig] = None,
+        rnn_config: Optional[RNNConfig] = None,
     ):
         self.aggregator = aggregator
         self.console_recorder = console_recorder
         self.log_dir = log_dir
         self.writer: Optional[SummaryWriter] = None
-        self._lock = threading.Lock()  # Lock for writer and counters
+        self._lock = threading.Lock()
 
         try:
             self.writer = SummaryWriter(log_dir=self.log_dir)
@@ -8766,7 +6588,6 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print(f"FATAL: Error initializing TensorBoard SummaryWriter: {e}")
             traceback.print_exc()
             self.writer = None
-            # Nullify helpers if writer failed
             self.scalar_logger = None
             self.histogram_logger = None
             self.image_logger = None
@@ -8793,9 +6614,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         g_step = (
             global_step
             if global_step is not None
-            else getattr(
-                self.aggregator.storage, "current_global_step", 0
-            )  # Corrected access
+            else getattr(self.aggregator.storage, "current_global_step", 0)
         )
 
         if self.scalar_logger:
@@ -8820,13 +6639,11 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         )
 
     def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats to TensorBoard and delegates to console recorder."""
+        """Records step stats (e.g., NN training step) to TensorBoard and console."""
         update_info = self.aggregator.record_step(step_data)
         g_step = step_data.get(
             "global_step",
-            getattr(
-                self.aggregator.storage, "current_global_step", 0
-            ),  # Corrected access
+            getattr(self.aggregator.storage, "current_global_step", 0),
         )
 
         if self.scalar_logger:
@@ -8834,17 +6651,17 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 g_step, step_data, update_info, self.aggregator
             )
 
-        # Check if histogram/image logging should be triggered (based on rollouts/updates)
-        log_histograms = False
-        log_images = False
-        if "policy_loss" in step_data:  # Assume update happened
+        # Increment histogram/image counters if an update occurred
+        # Check for a key indicating an NN update, e.g., 'policy_loss' or 'value_loss'
+        if "policy_loss" in step_data or "value_loss" in step_data:
             if self.histogram_logger:
-                log_histograms = self.histogram_logger.should_log(g_step)
+                self.histogram_logger.increment_rollout_counter()
+                if self.histogram_logger.should_log(g_step):
+                    self.histogram_logger.reset_rollout_counter()  # Reset only if logged
             if self.image_logger:
-                log_images = self.image_logger.should_log(g_step)
-
-        # Note: Actual histogram/image data needs to be passed separately via record_histogram/record_image
-        # This method only logs scalars derived from step_data.
+                self.image_logger.increment_rollout_counter()
+                if self.image_logger.should_log(g_step):
+                    self.image_logger.reset_rollout_counter()  # Reset only if logged
 
         self.console_recorder.record_step(step_data)
 
@@ -8881,28 +6698,29 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             return
         with self._lock:
             try:
-                original_device = next(model.parameters()).device
+                # Ensure model is on CPU for graph tracing if needed
+                original_device = next(iter(model.parameters())).device
                 model.cpu()
-                # Simplified CPU conversion assuming tuple/tensor input
-                if isinstance(input_to_model, tuple):
+                # Convert input to CPU if it's a tensor or tuple of tensors
+                if isinstance(input_to_model, torch.Tensor):
+                    dummy_input_cpu = input_to_model.cpu()
+                elif isinstance(input_to_model, tuple):
                     dummy_input_cpu = tuple(
                         i.cpu() if isinstance(i, torch.Tensor) else i
                         for i in input_to_model
                     )
-                elif isinstance(input_to_model, torch.Tensor):
-                    dummy_input_cpu = input_to_model.cpu()
                 else:
-                    dummy_input_cpu = input_to_model  # Assume already CPU compatible
+                    dummy_input_cpu = input_to_model  # Assume compatible
 
                 self.writer.add_graph(model, dummy_input_cpu, verbose=False)
                 print("[TensorBoardStatsRecorder] Model graph logged.")
-                model.to(original_device)
+                model.to(original_device)  # Move model back
             except Exception as e:
                 print(f"Error logging model graph: {e}.")
                 traceback.print_exc()
                 try:
-                    model.to(original_device)
-                except:
+                    model.to(original_device)  # Attempt to move back even on error
+                except Exception:
                     pass
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
@@ -8921,18 +6739,17 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
             print(
                 "[TensorBoardStatsRecorder] Writer was not initialized or already closed."
             )
-            self.console_recorder.close(is_cleanup=is_cleanup)  # Pass flag
+            self.console_recorder.close(is_cleanup=is_cleanup)
             return
 
         with self._lock:
             print("[TensorBoardStatsRecorder] Acquired lock for closing.")
             try:
-                # Skip logging final hparams if this close is part of a cleanup
                 if not is_cleanup and self.hparam_logger:
                     print("[TensorBoardStatsRecorder] Logging final hparams...")
                     final_step = getattr(
                         self.aggregator.storage, "current_global_step", 0
-                    )  # Corrected access
+                    )
                     final_summary = self.get_summary(final_step)
                     self.hparam_logger.log_final_hparams_from_summary(final_summary)
                     print("[TensorBoardStatsRecorder] Final hparams logged.")
@@ -8955,8 +6772,8 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 print(
                     "[TensorBoardStatsRecorder] Releasing lock after closing attempt."
                 )
-        # Close console recorder outside the lock
-        self.console_recorder.close(is_cleanup=is_cleanup)  # Pass flag
+
+        self.console_recorder.close(is_cleanup=is_cleanup)
         print("[TensorBoardStatsRecorder] Close method finished.")
 
 
@@ -8975,17 +6792,14 @@ __all__ = [
 
 
 File: training\checkpoint_manager.py
-# File: training/checkpoint_manager.py
-# File: training/checkpoint_manager.py
 import os
 import torch
 import traceback
 import re
 import time
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Tuple
 import pickle
 
-from agent.ppo_agent import PPOAgent
 from utils.running_mean_std import RunningMeanStd
 from stats.aggregator import StatsAggregator  # Updated import path
 from config.general import TOTAL_TRAINING_STEPS
@@ -9101,7 +6915,7 @@ class CheckpointManager:
 
     def __init__(
         self,
-        agent: PPOAgent,
+        # agent: PPOAgent,
         stats_aggregator: StatsAggregator,  # Use updated import
         base_checkpoint_dir: str,
         run_checkpoint_dir: str,
@@ -9109,7 +6923,7 @@ class CheckpointManager:
         device: torch.device,
         obs_rms_dict: Optional[Dict[str, RunningMeanStd]] = None,
     ):
-        self.agent = agent
+        # self.agent = agent
         self.stats_aggregator = stats_aggregator
         self.base_checkpoint_dir = base_checkpoint_dir
         self.run_checkpoint_dir = run_checkpoint_dir
@@ -9467,1686 +7281,6 @@ class CheckpointManager:
         return self.global_step, self.episode_count
 
 
-File: training\collector_logic.py
-# File: training/collector_logic.py
-import time
-import torch
-import numpy as np
-import traceback
-from typing import (
-    List,
-    Dict,
-    Any,
-    Tuple,
-    Optional,
-    TYPE_CHECKING,
-)  # Added TYPE_CHECKING
-
-from config import EnvConfig, RewardConfig, PPOConfig, RNNConfig, ObsNormConfig
-from environment.game_state import GameState
-from agent.ppo_agent import PPOAgent
-from stats.stats_recorder import StatsRecorderBase
-
-# Removed: from .rollout_storage import RolloutStorage
-from .collector_state import CollectorState
-from .normalization import normalize_obs, update_obs_rms
-from .env_interaction import (
-    reset_env,
-    update_raw_obs_from_state_dict,
-    reset_rnn_state_for_env,
-)
-
-# Use TYPE_CHECKING for RolloutStorage hint to avoid runtime import error
-if TYPE_CHECKING:
-    from .rollout_storage import RolloutStorage
-
-
-class CollectorLogic:
-    """Handles the core logic of collecting one step of experience."""
-
-    def __init__(
-        self,
-        envs: List[GameState],
-        agent: PPOAgent,
-        storage: "RolloutStorage",  # Use string hint or TYPE_CHECKING block
-        state: CollectorState,
-        stats_recorder: StatsRecorderBase,
-        env_config: EnvConfig,
-        reward_config: RewardConfig,
-        ppo_config: PPOConfig,
-        rnn_config: RNNConfig,
-        obs_norm_config: ObsNormConfig,
-    ):
-        # --- Import RolloutStorage here ---
-        from .rollout_storage import RolloutStorage
-
-        # --- End Import ---
-
-        self.envs = envs
-        self.agent = agent
-        self.storage = (
-            storage  # storage is already passed in, no need to re-assign from import
-        )
-        self.state = state
-        self.stats_recorder = stats_recorder
-        self.env_config = env_config
-        self.reward_config = reward_config
-        self.ppo_config = ppo_config
-        self.rnn_config = rnn_config
-        self.obs_norm_config = obs_norm_config
-        self.num_envs = len(envs)
-
-    def _record_episode_stats(
-        self, env_index: int, final_reward_adjustment: float, current_global_step: int
-    ):
-        """Records completed episode statistics using the thread-safe stats_recorder."""
-        self.state.episode_count += 1
-        final_episode_score = (
-            self.state.current_episode_scores[env_index] + final_reward_adjustment
-        )
-        final_episode_length = self.state.current_episode_lengths[env_index]
-        final_game_score = self.state.current_episode_game_scores[env_index]
-        final_triangles_cleared = self.state.current_episode_triangles_cleared[
-            env_index
-        ]
-
-        self.stats_recorder.record_episode(
-            episode_score=final_episode_score,
-            episode_length=final_episode_length,
-            episode_num=self.state.episode_count,
-            global_step=current_global_step,
-            game_score=final_game_score,
-            triangles_cleared=final_triangles_cleared,
-        )
-
-    def collect_one_step(self, current_global_step: int) -> int:
-        """Collects one step of experience from all environments."""
-        step_start_time = time.time()
-        with self.storage._lock:
-            current_rollout_step = self.storage.step  # Get current storage step index
-
-        # 1. Identify active environments and get valid actions (CPU operations)
-        active_env_indices: List[int] = []
-        valid_actions_list: List[Optional[List[int]]] = [None] * self.num_envs
-        envs_done_pre_action: List[int] = []
-
-        for i in range(self.num_envs):
-            self.envs[i]._update_timers()  # Update internal env timers if any
-            if self.state.current_dones_cpu[i]:
-                continue  # Skip already done envs
-            if self.envs[i].is_frozen():
-                continue  # Skip frozen envs (e.g., during animation)
-
-            valid_actions = self.envs[i].valid_actions()
-            if not valid_actions:
-                envs_done_pre_action.append(i)  # Mark as done if no valid moves
-            else:
-                valid_actions_list[i] = valid_actions
-                active_env_indices.append(i)
-
-        # 2. Select actions ONLY for active environments (Agent interaction)
-        actions_np = np.zeros(self.num_envs, dtype=np.int64)
-        log_probs_np = np.zeros(self.num_envs, dtype=np.float32)
-        values_np = np.zeros(self.num_envs, dtype=np.float32)
-        next_lstm_state_device = (
-            self.state.current_lstm_state_device
-        )  # Start with current state
-
-        if active_env_indices:
-            active_indices_tensor = torch.tensor(active_env_indices, dtype=torch.long)
-
-            # Prepare batch of RAW observations on CPU
-            batch_obs_grid_raw = self.state.current_raw_obs_grid_cpu[active_env_indices]
-            batch_obs_shapes_raw = self.state.current_raw_obs_shapes_cpu[
-                active_env_indices
-            ]
-            batch_obs_availability_raw = self.state.current_raw_obs_availability_cpu[
-                active_env_indices
-            ]
-            batch_obs_explicit_features_raw = (
-                self.state.current_raw_obs_explicit_features_cpu[active_env_indices]
-            )
-
-            # Normalize observations on CPU using helper
-            batch_obs_grid_norm = normalize_obs(
-                batch_obs_grid_raw,
-                self.state.obs_rms.get("grid"),
-                self.obs_norm_config.OBS_CLIP,
-            )
-            batch_obs_shapes_norm = normalize_obs(
-                batch_obs_shapes_raw,
-                self.state.obs_rms.get("shapes"),
-                self.obs_norm_config.OBS_CLIP,
-            )
-            batch_obs_availability_norm = normalize_obs(
-                batch_obs_availability_raw,
-                self.state.obs_rms.get("shape_availability"),
-                self.obs_norm_config.OBS_CLIP,
-            )
-            batch_obs_explicit_features_norm = normalize_obs(
-                batch_obs_explicit_features_raw,
-                self.state.obs_rms.get("explicit_features"),
-                self.obs_norm_config.OBS_CLIP,
-            )
-
-            # Convert normalized observations to tensors on agent's device
-            batch_obs_grid_t = torch.from_numpy(batch_obs_grid_norm).to(
-                self.agent.device
-            )
-            batch_obs_shapes_t = torch.from_numpy(batch_obs_shapes_norm).to(
-                self.agent.device
-            )
-            batch_obs_availability_t = torch.from_numpy(batch_obs_availability_norm).to(
-                self.agent.device
-            )
-            batch_obs_explicit_features_t = torch.from_numpy(
-                batch_obs_explicit_features_norm
-            ).to(self.agent.device)
-            batch_valid_actions = [valid_actions_list[i] for i in active_env_indices]
-
-            # Select corresponding hidden state (already on agent device)
-            batch_hidden_state_device = None
-            if (
-                self.rnn_config.USE_RNN
-                and self.state.current_lstm_state_device is not None
-            ):
-                h_n, c_n = self.state.current_lstm_state_device
-                batch_hidden_state_device = (
-                    h_n[:, active_indices_tensor, :].contiguous(),
-                    c_n[:, active_indices_tensor, :].contiguous(),
-                )
-
-            # Call agent's select_action_batch (uses internal lock)
-            (
-                batch_actions_t,
-                batch_log_probs_t,
-                batch_values_t,
-                batch_next_lstm_state_device,
-            ) = self.agent.select_action_batch(
-                batch_obs_grid_t,
-                batch_obs_shapes_t,
-                batch_obs_availability_t,
-                batch_obs_explicit_features_t,
-                batch_hidden_state_device,
-                batch_valid_actions,
-            )
-
-            # Store results back into numpy arrays (CPU)
-            actions_np[active_env_indices] = batch_actions_t.cpu().numpy()
-            log_probs_np[active_env_indices] = batch_log_probs_t.cpu().numpy()
-            values_np[active_env_indices] = batch_values_t.cpu().numpy()
-
-            # Update the full hidden state (on agent device)
-            if self.rnn_config.USE_RNN and batch_next_lstm_state_device is not None:
-                next_h, next_c = (
-                    self.state.current_lstm_state_device[0].clone(),
-                    self.state.current_lstm_state_device[1].clone(),
-                )
-                next_h[:, active_indices_tensor, :] = batch_next_lstm_state_device[0]
-                next_c[:, active_indices_tensor, :] = batch_next_lstm_state_device[1]
-                next_lstm_state_device = (next_h, next_c)
-
-        # 3. Step environments, handle resets, update RAW observations (CPU operations)
-        # Prepare buffers for the *next* step's raw observations
-        next_raw_obs_grid_cpu = np.copy(self.state.current_raw_obs_grid_cpu)
-        next_raw_obs_shapes_cpu = np.copy(self.state.current_raw_obs_shapes_cpu)
-        next_raw_obs_availability_cpu = np.copy(
-            self.state.current_raw_obs_availability_cpu
-        )
-        next_raw_obs_explicit_features_cpu = np.copy(
-            self.state.current_raw_obs_explicit_features_cpu
-        )
-        step_rewards_np = np.zeros(self.num_envs, dtype=np.float32)
-        step_dones_np = np.copy(
-            self.state.current_dones_cpu
-        )  # Dones resulting from *this* step
-
-        for i in range(self.num_envs):
-            final_reward_adj = 0.0
-            if self.state.current_dones_cpu[
-                i
-            ]:  # Env was done at the start of this step, reset it
-                new_state_dict = reset_env(
-                    self.envs[i],
-                    self.state.current_episode_scores,
-                    self.state.current_episode_lengths,
-                    self.state.current_episode_game_scores,
-                    self.state.current_episode_triangles_cleared,
-                    i,
-                    self.env_config,
-                )
-                update_raw_obs_from_state_dict(
-                    i,
-                    new_state_dict,
-                    next_raw_obs_grid_cpu,
-                    next_raw_obs_shapes_cpu,
-                    next_raw_obs_availability_cpu,
-                    next_raw_obs_explicit_features_cpu,
-                )
-                reset_rnn_state_for_env(
-                    i, self.rnn_config.USE_RNN, next_lstm_state_device, self.agent
-                )  # Reset next state
-                step_dones_np[i] = False  # It's not done *after* the reset
-            elif (
-                i in envs_done_pre_action
-            ):  # Env became done because no actions were valid
-                final_reward_adj = self.reward_config.PENALTY_GAME_OVER
-                log_probs_np[i], values_np[i] = (
-                    -1e9,
-                    0.0,
-                )  # Assign dummy values for storage
-                self.state.current_episode_lengths[
-                    i
-                ] += 1  # Increment length for the step that led to game over
-                self._record_episode_stats(i, final_reward_adj, current_global_step)
-                new_state_dict = reset_env(
-                    self.envs[i],
-                    self.state.current_episode_scores,
-                    self.state.current_episode_lengths,
-                    self.state.current_episode_game_scores,
-                    self.state.current_episode_triangles_cleared,
-                    i,
-                    self.env_config,
-                )
-                update_raw_obs_from_state_dict(
-                    i,
-                    new_state_dict,
-                    next_raw_obs_grid_cpu,
-                    next_raw_obs_shapes_cpu,
-                    next_raw_obs_availability_cpu,
-                    next_raw_obs_explicit_features_cpu,
-                )
-                reset_rnn_state_for_env(
-                    i, self.rnn_config.USE_RNN, next_lstm_state_device, self.agent
-                )  # Reset next state
-                step_dones_np[i] = True  # Mark as done for the *next* step
-            elif i in active_env_indices:  # Env was active, take a step
-                action_to_take = actions_np[i]
-                try:
-                    reward, done = self.envs[i].step(action_to_take)
-                    step_rewards_np[i], step_dones_np[i] = reward, done
-                    self.state.current_episode_scores[i] += reward
-                    self.state.current_episode_lengths[i] += 1
-                    self.state.current_episode_game_scores[i] = self.envs[i].game_score
-                    self.state.current_episode_triangles_cleared[i] = self.envs[
-                        i
-                    ].triangles_cleared_this_episode
-                    if done:
-                        self._record_episode_stats(
-                            i, 0.0, current_global_step
-                        )  # Record completed episode
-                        new_state_dict = reset_env(
-                            self.envs[i],
-                            self.state.current_episode_scores,
-                            self.state.current_episode_lengths,
-                            self.state.current_episode_game_scores,
-                            self.state.current_episode_triangles_cleared,
-                            i,
-                            self.env_config,
-                        )
-                        update_raw_obs_from_state_dict(
-                            i,
-                            new_state_dict,
-                            next_raw_obs_grid_cpu,
-                            next_raw_obs_shapes_cpu,
-                            next_raw_obs_availability_cpu,
-                            next_raw_obs_explicit_features_cpu,
-                        )
-                        reset_rnn_state_for_env(
-                            i,
-                            self.rnn_config.USE_RNN,
-                            next_lstm_state_device,
-                            self.agent,
-                        )  # Reset next state
-                    else:  # Game continues, get next state
-                        next_state_dict = self.envs[i].get_state()
-                        update_raw_obs_from_state_dict(
-                            i,
-                            next_state_dict,
-                            next_raw_obs_grid_cpu,
-                            next_raw_obs_shapes_cpu,
-                            next_raw_obs_availability_cpu,
-                            next_raw_obs_explicit_features_cpu,
-                        )
-                except Exception as e:
-                    print(f"ERROR: Env {i} step failed (Action: {action_to_take}): {e}")
-                    traceback.print_exc()
-                    step_rewards_np[i], step_dones_np[i] = (
-                        self.reward_config.PENALTY_GAME_OVER,
-                        True,
-                    )
-                    self.state.current_episode_lengths[i] += 1
-                    self._record_episode_stats(i, 0.0, current_global_step)
-                    new_state_dict = reset_env(
-                        self.envs[i],
-                        self.state.current_episode_scores,
-                        self.state.current_episode_lengths,
-                        self.state.current_episode_game_scores,
-                        self.state.current_episode_triangles_cleared,
-                        i,
-                        self.env_config,
-                    )
-                    update_raw_obs_from_state_dict(
-                        i,
-                        new_state_dict,
-                        next_raw_obs_grid_cpu,
-                        next_raw_obs_shapes_cpu,
-                        next_raw_obs_availability_cpu,
-                        next_raw_obs_explicit_features_cpu,
-                    )
-                    reset_rnn_state_for_env(
-                        i, self.rnn_config.USE_RNN, next_lstm_state_device, self.agent
-                    )  # Reset next state
-
-        # 4. Update RMS with the RAW observations collected *before* this step (CPU)
-        update_obs_rms(
-            self.state.current_raw_obs_grid_cpu, self.state.obs_rms.get("grid")
-        )
-        update_obs_rms(
-            self.state.current_raw_obs_shapes_cpu, self.state.obs_rms.get("shapes")
-        )
-        update_obs_rms(
-            self.state.current_raw_obs_availability_cpu,
-            self.state.obs_rms.get("shape_availability"),
-        )
-        update_obs_rms(
-            self.state.current_raw_obs_explicit_features_cpu,
-            self.state.obs_rms.get("explicit_features"),
-        )
-
-        # 5. Store potentially NORMALIZED results in RolloutStorage (CPU tensors)
-        # Normalize the observations *before* the step was taken
-        obs_grid_norm = normalize_obs(
-            self.state.current_raw_obs_grid_cpu,
-            self.state.obs_rms.get("grid"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        obs_shapes_norm = normalize_obs(
-            self.state.current_raw_obs_shapes_cpu,
-            self.state.obs_rms.get("shapes"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        obs_availability_norm = normalize_obs(
-            self.state.current_raw_obs_availability_cpu,
-            self.state.obs_rms.get("shape_availability"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        obs_explicit_features_norm = normalize_obs(
-            self.state.current_raw_obs_explicit_features_cpu,
-            self.state.obs_rms.get("explicit_features"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-
-        obs_grid_t = torch.from_numpy(obs_grid_norm)
-        obs_shapes_t = torch.from_numpy(obs_shapes_norm)
-        obs_availability_t = torch.from_numpy(obs_availability_norm)
-        obs_explicit_features_t = torch.from_numpy(obs_explicit_features_norm)
-        actions_t = torch.from_numpy(actions_np).long().unsqueeze(1)
-        log_probs_t = torch.from_numpy(log_probs_np).float().unsqueeze(1)
-        values_t = torch.from_numpy(values_np).float().unsqueeze(1)
-        rewards_t = torch.from_numpy(step_rewards_np).float().unsqueeze(1)
-        # Store the dones that resulted *from this step*
-        dones_t_for_storage = torch.from_numpy(step_dones_np).float().unsqueeze(1)
-
-        # Get LSTM state corresponding to the observation *before* the action (copy from device to CPU)
-        lstm_state_to_store_cpu = None
-        if self.rnn_config.USE_RNN and self.state.current_lstm_state_device is not None:
-            lstm_state_to_store_cpu = (
-                self.state.current_lstm_state_device[0].cpu(),
-                self.state.current_lstm_state_device[1].cpu(),
-            )
-
-        # Insert into storage (uses internal lock)
-        self.storage.insert(
-            obs_grid_t,
-            obs_shapes_t,
-            obs_availability_t,
-            obs_explicit_features_t,
-            actions_t,
-            log_probs_t,
-            values_t,
-            rewards_t,
-            dones_t_for_storage,
-            lstm_state_to_store_cpu,
-        )
-
-        # 6. Update collector's current RAW state (CPU) and LSTM state (Device) for the *next* iteration
-        self.state.current_raw_obs_grid_cpu = next_raw_obs_grid_cpu
-        self.state.current_raw_obs_shapes_cpu = next_raw_obs_shapes_cpu
-        self.state.current_raw_obs_availability_cpu = next_raw_obs_availability_cpu
-        self.state.current_raw_obs_explicit_features_cpu = (
-            next_raw_obs_explicit_features_cpu
-        )
-        self.state.current_dones_cpu = (
-            step_dones_np  # Update dones for the next step check
-        )
-        self.state.current_lstm_state_device = (
-            next_lstm_state_device  # Update LSTM state (on agent device)
-        )
-
-        # 7. Record performance (thread-safe recorder)
-        collection_time = time.time() - step_start_time
-        sps = self.num_envs / max(1e-9, collection_time)
-        self.stats_recorder.record_step(
-            {"sps_collection": sps, "rollout_collection_time": collection_time}
-        )
-
-        return self.num_envs  # Return number of steps collected (always num_envs here)
-
-
-File: training\collector_state.py
-# File: training/collector_state.py
-import numpy as np
-import torch
-from typing import Dict, Optional, Tuple
-
-from config import EnvConfig, RNNConfig
-from utils.running_mean_std import RunningMeanStd
-from agent.ppo_agent import PPOAgent  # For type hint
-
-
-class CollectorState:
-    """Holds the state variables managed by the RolloutCollector."""
-
-    def __init__(
-        self,
-        num_envs: int,
-        env_config: EnvConfig,
-        rnn_config: RNNConfig,
-        agent: PPOAgent,
-    ):
-        self.num_envs = num_envs
-        self.env_config = env_config
-        self.rnn_config = rnn_config
-        self.agent = agent  # Needed to get initial RNN state
-
-        # CPU buffers for current environment states
-        self.current_raw_obs_grid_cpu = np.zeros(
-            (num_envs, *env_config.GRID_STATE_SHAPE), dtype=np.float32
-        )
-        self.current_raw_obs_shapes_cpu = np.zeros(
-            (num_envs, env_config.SHAPE_STATE_DIM), dtype=np.float32
-        )
-        self.current_raw_obs_availability_cpu = np.zeros(
-            (num_envs, env_config.SHAPE_AVAILABILITY_DIM), dtype=np.float32
-        )
-        self.current_raw_obs_explicit_features_cpu = np.zeros(
-            (num_envs, env_config.EXPLICIT_FEATURES_DIM), dtype=np.float32
-        )
-        self.current_dones_cpu = np.zeros(num_envs, dtype=bool)
-
-        # Episode trackers
-        self.current_episode_scores = np.zeros(num_envs, dtype=np.float32)
-        self.current_episode_lengths = np.zeros(num_envs, dtype=np.int32)
-        self.current_episode_game_scores = np.zeros(num_envs, dtype=np.int32)
-        self.current_episode_triangles_cleared = np.zeros(num_envs, dtype=np.int32)
-        self.episode_count = 0  # Total completed episodes tracked here
-
-        # RNN state (managed by collector, lives on agent's device)
-        self.current_lstm_state_device: Optional[Tuple[torch.Tensor, torch.Tensor]] = (
-            None
-        )
-        if self.rnn_config.USE_RNN:
-            self.current_lstm_state_device = self.agent.get_initial_hidden_state(
-                self.num_envs
-            )
-
-        # Observation normalization RMS instances (managed by main collector)
-        self.obs_rms: Dict[str, RunningMeanStd] = {}
-
-    def reset_rnn_state(self):
-        """Resets the RNN state."""
-        if self.rnn_config.USE_RNN:
-            self.current_lstm_state_device = self.agent.get_initial_hidden_state(
-                self.num_envs
-            )
-
-    def reset_episode_trackers(self, env_index: int):
-        """Resets trackers for a specific environment."""
-        self.current_episode_scores[env_index] = 0.0
-        self.current_episode_lengths[env_index] = 0
-        self.current_episode_game_scores[env_index] = 0
-        self.current_episode_triangles_cleared[env_index] = 0
-
-
-File: training\env_interaction.py
-# File: training/env_interaction.py
-import numpy as np
-import torch
-import traceback
-from typing import List, Tuple, Optional
-
-from environment.game_state import GameState, StateType
-from config import EnvConfig
-from agent.ppo_agent import PPOAgent  # For type hinting
-
-
-def update_raw_obs_from_state_dict(
-    env_index: int,
-    state_dict: StateType,
-    raw_obs_grid_cpu: np.ndarray,
-    raw_obs_shapes_cpu: np.ndarray,
-    raw_obs_availability_cpu: np.ndarray,
-    raw_obs_explicit_features_cpu: np.ndarray,
-):
-    """Updates the CPU RAW observation buffers for a given environment index."""
-    raw_obs_grid_cpu[env_index] = state_dict["grid"]
-    raw_obs_shapes_cpu[env_index] = state_dict["shapes"]
-    raw_obs_availability_cpu[env_index] = state_dict["shape_availability"]
-    raw_obs_explicit_features_cpu[env_index] = state_dict["explicit_features"]
-
-
-def reset_env(
-    env: GameState,
-    episode_scores: np.ndarray,
-    episode_lengths: np.ndarray,
-    episode_game_scores: np.ndarray,
-    episode_triangles_cleared: np.ndarray,
-    env_index: int,
-    env_config: EnvConfig,  # Pass env_config for dummy state shape
-) -> StateType:
-    """Resets a single environment and returns its initial state dict."""
-    try:
-        state_dict = env.reset()
-        episode_scores[env_index] = 0.0
-        episode_lengths[env_index] = 0
-        episode_game_scores[env_index] = 0
-        episode_triangles_cleared[env_index] = 0
-        return state_dict
-    except Exception as e:
-        print(f"ERROR resetting env {env_index}: {e}")
-        traceback.print_exc()
-        # Return a dummy state matching expected structure
-        dummy_state: StateType = {
-            "grid": np.zeros(env_config.GRID_STATE_SHAPE, dtype=np.float32),
-            "shapes": np.zeros(env_config.SHAPE_STATE_DIM, dtype=np.float32),
-            "shape_availability": np.zeros(
-                env_config.SHAPE_AVAILABILITY_DIM, dtype=np.float32
-            ),
-            "explicit_features": np.zeros(
-                env_config.EXPLICIT_FEATURES_DIM, dtype=np.float32
-            ),
-        }
-        # Mark as done implicitly by returning dummy state? Or handle done flag separately?
-        # Let's assume the caller handles the done flag based on the exception.
-        return dummy_state
-
-
-def reset_all_envs(
-    envs: List[GameState],
-    num_envs: int,
-    raw_obs_grid_cpu: np.ndarray,
-    raw_obs_shapes_cpu: np.ndarray,
-    raw_obs_availability_cpu: np.ndarray,
-    raw_obs_explicit_features_cpu: np.ndarray,
-    dones_cpu: np.ndarray,
-    episode_scores: np.ndarray,
-    episode_lengths: np.ndarray,
-    episode_game_scores: np.ndarray,
-    episode_triangles_cleared: np.ndarray,
-    env_config: EnvConfig,  # Pass env_config
-):
-    """Resets all environments and updates initial raw observations."""
-    print(f"[EnvInteraction] Resetting {num_envs} environments...")
-    initial_states = [None] * num_envs
-    for i in range(num_envs):
-        try:
-            initial_states[i] = envs[i].reset()
-            episode_scores[i] = 0.0
-            episode_lengths[i] = 0
-            episode_game_scores[i] = 0
-            episode_triangles_cleared[i] = 0
-            dones_cpu[i] = False
-        except Exception as e:
-            print(f"ERROR resetting env {i}: {e}")
-            traceback.print_exc()
-            initial_states[i] = {
-                "grid": np.zeros(env_config.GRID_STATE_SHAPE, dtype=np.float32),
-                "shapes": np.zeros(env_config.SHAPE_STATE_DIM, dtype=np.float32),
-                "shape_availability": np.zeros(
-                    env_config.SHAPE_AVAILABILITY_DIM, dtype=np.float32
-                ),
-                "explicit_features": np.zeros(
-                    env_config.EXPLICIT_FEATURES_DIM, dtype=np.float32
-                ),
-            }
-            dones_cpu[i] = True  # Mark as done if reset failed
-
-    for i in range(num_envs):
-        if initial_states[i] is not None:
-            update_raw_obs_from_state_dict(
-                i,
-                initial_states[i],
-                raw_obs_grid_cpu,
-                raw_obs_shapes_cpu,
-                raw_obs_availability_cpu,
-                raw_obs_explicit_features_cpu,
-            )
-    print("[EnvInteraction] Environments reset.")
-
-
-def reset_rnn_state_for_env(
-    env_index: int,
-    use_rnn: bool,
-    current_lstm_state_device: Optional[Tuple[torch.Tensor, torch.Tensor]],
-    agent: PPOAgent,  # Pass agent to get initial state
-):
-    """Resets the hidden state for a specific environment index if RNN is used."""
-    if use_rnn and current_lstm_state_device is not None:
-        reset_h, reset_c = agent.get_initial_hidden_state(1)
-        if reset_h is not None and reset_c is not None:
-            current_lstm_state_device[0][:, env_index : env_index + 1, :] = reset_h
-            current_lstm_state_device[1][:, env_index : env_index + 1, :] = reset_c
-
-
-File: training\normalization.py
-# File: training/normalization.py
-import numpy as np
-from typing import Optional
-
-from utils.running_mean_std import RunningMeanStd
-
-
-def update_obs_rms(obs_batch: np.ndarray, rms_instance: Optional[RunningMeanStd]):
-    """Update the running mean/std for a given observation key if enabled."""
-    if rms_instance is not None:
-        rms_instance.update(obs_batch)
-
-
-def normalize_obs(
-    obs_batch: np.ndarray, rms_instance: Optional[RunningMeanStd], clip_value: float
-) -> np.ndarray:
-    """Normalize observations using running mean/std if enabled."""
-    if rms_instance is not None:
-        normalized_obs = rms_instance.normalize(obs_batch)
-        clipped_obs = np.clip(normalized_obs, -clip_value, clip_value)
-        return clipped_obs.astype(np.float32)
-    else:
-        return obs_batch.astype(np.float32)
-
-
-File: training\rollout_collector.py
-# File: training/rollout_collector.py
-import time
-import torch
-import numpy as np
-import traceback
-import threading
-from typing import List, Dict, Any, Tuple, Optional
-
-from config import (
-    EnvConfig,
-    RewardConfig,
-    TensorBoardConfig,
-    PPOConfig,
-    RNNConfig,
-    ObsNormConfig,
-)
-from environment.game_state import GameState
-from agent.ppo_agent import PPOAgent
-from stats.stats_recorder import StatsRecorderBase
-from utils.running_mean_std import RunningMeanStd
-from .rollout_storage import RolloutStorage
-
-# Import new helper classes (except CollectorLogic)
-from .collector_state import CollectorState
-
-# Removed: from .collector_logic import CollectorLogic
-
-# Keep normalization import for compute_advantages and add update_obs_rms
-from .normalization import normalize_obs, update_obs_rms
-
-# Keep env interaction import for reset_all_envs
-from .env_interaction import reset_all_envs
-
-
-class RolloutCollector:
-    """
-    Main interface for rollout collection. Initializes and coordinates state and logic handlers.
-    """
-
-    def __init__(
-        self,
-        envs: List[GameState],
-        agent: PPOAgent,
-        stats_recorder: StatsRecorderBase,
-        env_config: EnvConfig,
-        ppo_config: PPOConfig,
-        rnn_config: RNNConfig,
-        reward_config: RewardConfig,
-        tb_config: TensorBoardConfig,
-        obs_norm_config: ObsNormConfig,
-        device: torch.device,
-    ):
-        # --- Import CollectorLogic here ---
-        from .collector_logic import CollectorLogic
-
-        # --- End Import ---
-
-        self.envs = envs
-        self.agent = agent
-        self.stats_recorder = stats_recorder
-        self.num_envs = env_config.NUM_ENVS
-        self.env_config = env_config
-        self.ppo_config = ppo_config
-        self.rnn_config = rnn_config
-        self.reward_config = reward_config
-        self.tb_config = tb_config
-        self.obs_norm_config = obs_norm_config
-        self.device = device
-
-        self._lock = threading.Lock()  # Keep lock if needed for main class state
-
-        # Initialize Storage
-        self.rollout_storage = RolloutStorage(
-            ppo_config.NUM_STEPS_PER_ROLLOUT,
-            self.num_envs,
-            self.env_config,
-            self.rnn_config,
-            self.device,
-        )
-
-        # Initialize State Handler
-        self.state = CollectorState(
-            self.num_envs, self.env_config, self.rnn_config, self.agent
-        )
-
-        # Initialize Logic Handler (using the imported class)
-        self.logic = CollectorLogic(
-            self.envs,
-            self.agent,
-            self.rollout_storage,
-            self.state,
-            self.stats_recorder,
-            self.env_config,
-            self.reward_config,
-            self.ppo_config,
-            self.rnn_config,
-            self.obs_norm_config,
-        )
-
-        # Initialize Observation Normalization (RMS instances stored in state)
-        if self.obs_norm_config.ENABLE_OBS_NORMALIZATION:
-            print("[RolloutCollector] Observation Normalization ENABLED.")
-            if self.obs_norm_config.NORMALIZE_GRID:
-                self.state.obs_rms["grid"] = RunningMeanStd(
-                    shape=self.env_config.GRID_STATE_SHAPE,
-                    epsilon=self.obs_norm_config.EPSILON,
-                )
-                print(
-                    f"  - Normalizing Grid (shape: {self.env_config.GRID_STATE_SHAPE})"
-                )
-            if self.obs_norm_config.NORMALIZE_SHAPES:
-                self.state.obs_rms["shapes"] = RunningMeanStd(
-                    shape=(self.env_config.SHAPE_STATE_DIM,),
-                    epsilon=self.obs_norm_config.EPSILON,
-                )
-                print(
-                    f"  - Normalizing Shapes (shape: {(self.env_config.SHAPE_STATE_DIM,)})"
-                )
-            if self.obs_norm_config.NORMALIZE_AVAILABILITY:
-                self.state.obs_rms["shape_availability"] = RunningMeanStd(
-                    shape=(self.env_config.SHAPE_AVAILABILITY_DIM,),
-                    epsilon=self.obs_norm_config.EPSILON,
-                )
-                print(
-                    f"  - Normalizing Availability (shape: {(self.env_config.SHAPE_AVAILABILITY_DIM,)})"
-                )
-            if self.obs_norm_config.NORMALIZE_EXPLICIT_FEATURES:
-                self.state.obs_rms["explicit_features"] = RunningMeanStd(
-                    shape=(self.env_config.EXPLICIT_FEATURES_DIM,),
-                    epsilon=self.obs_norm_config.EPSILON,
-                )
-                print(
-                    f"  - Normalizing Explicit Features (shape: {(self.env_config.EXPLICIT_FEATURES_DIM,)})"
-                )
-        else:
-            print("[RolloutCollector] Observation Normalization DISABLED.")
-
-        # Reset environments and populate initial observations using helper
-        reset_all_envs(
-            self.envs,
-            self.num_envs,
-            self.state.current_raw_obs_grid_cpu,
-            self.state.current_raw_obs_shapes_cpu,
-            self.state.current_raw_obs_availability_cpu,
-            self.state.current_raw_obs_explicit_features_cpu,
-            self.state.current_dones_cpu,
-            self.state.current_episode_scores,
-            self.state.current_episode_lengths,
-            self.state.current_episode_game_scores,
-            self.state.current_episode_triangles_cleared,
-            self.env_config,
-        )
-        # Initial RMS update using helper (accessing state.obs_rms)
-        update_obs_rms(
-            self.state.current_raw_obs_grid_cpu, self.state.obs_rms.get("grid")
-        )
-        update_obs_rms(
-            self.state.current_raw_obs_shapes_cpu, self.state.obs_rms.get("shapes")
-        )
-        update_obs_rms(
-            self.state.current_raw_obs_availability_cpu,
-            self.state.obs_rms.get("shape_availability"),
-        )
-        update_obs_rms(
-            self.state.current_raw_obs_explicit_features_cpu,
-            self.state.obs_rms.get("explicit_features"),
-        )
-        # Copy initial obs to storage
-        self._copy_initial_observations_to_storage()  # Use internal method
-
-        print(f"[RolloutCollector] Initialized for {self.num_envs} environments.")
-
-    def get_obs_rms_dict(self) -> Dict[str, RunningMeanStd]:
-        """Returns the dictionary containing the RunningMeanStd instances."""
-        return self.state.obs_rms
-
-    def _copy_initial_observations_to_storage(self):
-        """Normalizes (if enabled) and copies initial observations to RolloutStorage."""
-        obs_grid_norm = normalize_obs(
-            self.state.current_raw_obs_grid_cpu,
-            self.state.obs_rms.get("grid"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        obs_shapes_norm = normalize_obs(
-            self.state.current_raw_obs_shapes_cpu,
-            self.state.obs_rms.get("shapes"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        obs_availability_norm = normalize_obs(
-            self.state.current_raw_obs_availability_cpu,
-            self.state.obs_rms.get("shape_availability"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        obs_explicit_features_norm = normalize_obs(
-            self.state.current_raw_obs_explicit_features_cpu,
-            self.state.obs_rms.get("explicit_features"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-
-        initial_obs_grid_t = torch.from_numpy(obs_grid_norm)
-        initial_obs_shapes_t = torch.from_numpy(obs_shapes_norm)
-        initial_obs_availability_t = torch.from_numpy(obs_availability_norm)
-        initial_obs_explicit_features_t = torch.from_numpy(obs_explicit_features_norm)
-        initial_dones_t = (
-            torch.from_numpy(self.state.current_dones_cpu).float().unsqueeze(1)
-        )
-
-        with self.rollout_storage._lock:
-            self.rollout_storage.obs_grid[0].copy_(initial_obs_grid_t)
-            self.rollout_storage.obs_shapes[0].copy_(initial_obs_shapes_t)
-            self.rollout_storage.obs_availability[0].copy_(initial_obs_availability_t)
-            self.rollout_storage.obs_explicit_features[0].copy_(
-                initial_obs_explicit_features_t
-            )
-            self.rollout_storage.dones[0].copy_(initial_dones_t)
-
-            if (
-                self.rnn_config.USE_RNN
-                and self.state.current_lstm_state_device is not None
-            ):
-                if (
-                    self.rollout_storage.hidden_states is not None
-                    and self.rollout_storage.cell_states is not None
-                ):
-                    self.rollout_storage.hidden_states[0].copy_(
-                        self.state.current_lstm_state_device[0].cpu()
-                    )
-                    self.rollout_storage.cell_states[0].copy_(
-                        self.state.current_lstm_state_device[1].cpu()
-                    )
-
-    def collect_one_step(self, current_global_step: int) -> int:
-        """Delegates the collection of one step to the logic handler."""
-        return self.logic.collect_one_step(current_global_step)
-
-    def compute_advantages_for_storage(self):
-        """Computes GAE advantages using the data in RolloutStorage."""
-        final_obs_grid_norm = normalize_obs(
-            self.state.current_raw_obs_grid_cpu,
-            self.state.obs_rms.get("grid"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        final_obs_shapes_norm = normalize_obs(
-            self.state.current_raw_obs_shapes_cpu,
-            self.state.obs_rms.get("shapes"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        final_obs_availability_norm = normalize_obs(
-            self.state.current_raw_obs_availability_cpu,
-            self.state.obs_rms.get("shape_availability"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-        final_obs_explicit_features_norm = normalize_obs(
-            self.state.current_raw_obs_explicit_features_cpu,
-            self.state.obs_rms.get("explicit_features"),
-            self.obs_norm_config.OBS_CLIP,
-        )
-
-        final_obs_grid_t = torch.from_numpy(final_obs_grid_norm).to(self.agent.device)
-        final_obs_shapes_t = torch.from_numpy(final_obs_shapes_norm).to(
-            self.agent.device
-        )
-        final_obs_availability_t = torch.from_numpy(final_obs_availability_norm).to(
-            self.agent.device
-        )
-        final_obs_explicit_features_t = torch.from_numpy(
-            final_obs_explicit_features_norm
-        ).to(self.agent.device)
-        final_lstm_state = self.state.current_lstm_state_device
-
-        needs_sequence_dim = (
-            self.rnn_config.USE_RNN or self.agent.transformer_config.USE_TRANSFORMER
-        )
-        if needs_sequence_dim:
-            final_obs_grid_t = final_obs_grid_t.unsqueeze(1)
-            final_obs_shapes_t = final_obs_shapes_t.unsqueeze(1)
-            final_obs_availability_t = final_obs_availability_t.unsqueeze(1)
-            final_obs_explicit_features_t = final_obs_explicit_features_t.unsqueeze(1)
-
-        # --- Acquire agent lock and use no_grad for value prediction ---
-        with self.agent._lock, torch.no_grad():
-            self.agent.network.eval()  # Ensure eval mode
-            _, next_value, _ = self.agent.network(
-                final_obs_grid_t,
-                final_obs_shapes_t,
-                final_obs_availability_t,
-                final_obs_explicit_features_t,
-                final_lstm_state,
-                padding_mask=None,
-            )
-        # --- Lock released ---
-
-        if needs_sequence_dim:
-            next_value = next_value.squeeze(1)
-        if next_value.ndim == 1:
-            next_value = next_value.unsqueeze(-1)
-
-        final_dones = (
-            torch.from_numpy(self.state.current_dones_cpu)
-            .float()
-            .unsqueeze(1)
-            .to(self.agent.device)
-        )
-
-        self.rollout_storage.compute_returns_and_advantages(
-            next_value, final_dones, self.ppo_config.GAMMA, self.ppo_config.GAE_LAMBDA
-        )
-
-    def get_episode_count(self) -> int:
-        """Returns the total number of episodes completed."""
-        return self.state.episode_count
-
-    @property
-    def global_step(self) -> int:
-        if hasattr(self.stats_recorder, "aggregator") and hasattr(
-            self.stats_recorder.aggregator, "storage"
-        ):
-            return getattr(
-                self.stats_recorder.aggregator.storage, "current_global_step", 0
-            )
-        return 0
-
-    @global_step.setter
-    def global_step(self, value: int):
-        if hasattr(self.stats_recorder, "aggregator") and hasattr(
-            self.stats_recorder.aggregator, "storage"
-        ):
-            setattr(
-                self.stats_recorder.aggregator.storage, "current_global_step", value
-            )
-
-
-File: training\rollout_storage.py
-# File: training/rollout_storage.py
-import torch
-import threading  # Added for Lock
-from typing import Optional, Tuple, Dict, Any
-
-from config import EnvConfig, RNNConfig
-
-
-class RolloutStorage:
-    """
-    Stores rollout data collected from parallel environments for PPO.
-    Observations stored here are potentially normalized.
-    Uses pinned memory for faster CPU -> GPU transfers.
-    Includes locks for thread safety.
-    """
-
-    def __init__(
-        self,
-        num_steps: int,
-        num_envs: int,
-        env_config: EnvConfig,
-        rnn_config: RNNConfig,
-        device: torch.device,  # Target device for agent updates
-    ):
-        self.num_steps = num_steps
-        self.num_envs = num_envs
-        self.env_config = env_config
-        self.rnn_config = rnn_config
-        self.device = device  # Target device for agent updates
-        self.storage_device = torch.device("cpu")  # Store data on CPU
-        self.pin_memory = self.device.type == "cuda"
-
-        # Lock for protecting storage access from multiple threads
-        self._lock = threading.Lock()
-
-        grid_c, grid_h, grid_w = self.env_config.GRID_STATE_SHAPE
-        shape_feat_dim = self.env_config.SHAPE_STATE_DIM
-        shape_availability_dim = self.env_config.SHAPE_AVAILABILITY_DIM
-        explicit_features_dim = self.env_config.EXPLICIT_FEATURES_DIM
-
-        # Initialize storage tensors on CPU
-        self.obs_grid = torch.zeros(
-            num_steps + 1, num_envs, grid_c, grid_h, grid_w, device=self.storage_device
-        )
-        self.obs_shapes = torch.zeros(
-            num_steps + 1, num_envs, shape_feat_dim, device=self.storage_device
-        )
-        self.obs_availability = torch.zeros(
-            num_steps + 1, num_envs, shape_availability_dim, device=self.storage_device
-        )
-        self.obs_explicit_features = torch.zeros(
-            num_steps + 1, num_envs, explicit_features_dim, device=self.storage_device
-        )
-        self.actions = torch.zeros(
-            num_steps, num_envs, 1, device=self.storage_device
-        ).long()
-        self.log_probs = torch.zeros(num_steps, num_envs, 1, device=self.storage_device)
-        self.rewards = torch.zeros(num_steps, num_envs, 1, device=self.storage_device)
-        self.dones = torch.zeros(num_steps + 1, num_envs, 1, device=self.storage_device)
-        self.values = torch.zeros(
-            num_steps + 1, num_envs, 1, device=self.storage_device
-        )
-        self.returns = torch.zeros(num_steps, num_envs, 1, device=self.storage_device)
-
-        self.hidden_states = None
-        self.cell_states = None
-        if self.rnn_config.USE_RNN:
-            lstm_hidden_size = self.rnn_config.LSTM_HIDDEN_SIZE
-            num_layers = self.rnn_config.LSTM_NUM_LAYERS
-            self.hidden_states = torch.zeros(
-                num_steps + 1,
-                num_layers,
-                num_envs,
-                lstm_hidden_size,
-                device=self.storage_device,
-            )
-            self.cell_states = torch.zeros(
-                num_steps + 1,
-                num_layers,
-                num_envs,
-                lstm_hidden_size,
-                device=self.storage_device,
-            )
-
-        if self.pin_memory:
-            print("[RolloutStorage] Pinning memory for faster CPU->GPU transfer.")
-            self.obs_grid = self.obs_grid.pin_memory()
-            self.obs_shapes = self.obs_shapes.pin_memory()
-            self.obs_availability = self.obs_availability.pin_memory()
-            self.obs_explicit_features = self.obs_explicit_features.pin_memory()
-            self.actions = self.actions.pin_memory()
-            self.log_probs = self.log_probs.pin_memory()
-            self.rewards = self.rewards.pin_memory()
-            self.dones = self.dones.pin_memory()
-            self.values = self.values.pin_memory()
-            self.returns = self.returns.pin_memory()
-            if self.hidden_states is not None:
-                self.hidden_states = self.hidden_states.pin_memory()
-            if self.cell_states is not None:
-                self.cell_states = self.cell_states.pin_memory()
-
-        self.step = 0
-
-    def to(self, device: torch.device):
-        """Moves storage tensors to the specified device (use with caution)."""
-        with self._lock:  # Protect during move
-            if self.storage_device == device:
-                return
-            print(
-                f"[RolloutStorage] WARNING: Explicitly moving storage to {device}. This might negate pinned memory benefits."
-            )
-            self.obs_grid = self.obs_grid.to(device)
-            self.obs_shapes = self.obs_shapes.to(device)
-            self.obs_availability = self.obs_availability.to(device)
-            self.obs_explicit_features = self.obs_explicit_features.to(device)
-            self.rewards = self.rewards.to(device)
-            self.values = self.values.to(device)
-            self.returns = self.returns.to(device)
-            self.log_probs = self.log_probs.to(device)
-            self.actions = self.actions.to(device)
-            self.dones = self.dones.to(device)
-            if self.hidden_states is not None:
-                self.hidden_states = self.hidden_states.to(device)
-            if self.cell_states is not None:
-                self.cell_states = self.cell_states.to(device)
-            self.storage_device = device
-            self.pin_memory = False
-
-    def insert(
-        self,
-        obs_grid: torch.Tensor,
-        obs_shapes: torch.Tensor,
-        obs_availability: torch.Tensor,
-        obs_explicit_features: torch.Tensor,
-        action: torch.Tensor,
-        log_prob: torch.Tensor,
-        value: torch.Tensor,
-        reward: torch.Tensor,
-        done: torch.Tensor,
-        lstm_state: Optional[
-            Tuple[torch.Tensor, torch.Tensor]
-        ] = None,  # Assumed CPU tensors
-    ):
-        """Insert one step of data. Thread-safe."""
-        with self._lock:  # Protect storage modification
-            if self.step >= self.num_steps:
-                raise IndexError(
-                    f"RolloutStorage step index {self.step} out of bounds (max {self.num_steps-1})"
-                )
-
-            current_step_index = self.step
-
-            # Data is assumed to be on CPU already
-            self.obs_grid[current_step_index].copy_(
-                obs_grid, non_blocking=self.pin_memory
-            )
-            self.obs_shapes[current_step_index].copy_(
-                obs_shapes, non_blocking=self.pin_memory
-            )
-            self.obs_availability[current_step_index].copy_(
-                obs_availability, non_blocking=self.pin_memory
-            )
-            self.obs_explicit_features[current_step_index].copy_(
-                obs_explicit_features, non_blocking=self.pin_memory
-            )
-            self.actions[current_step_index].copy_(action, non_blocking=self.pin_memory)
-            self.log_probs[current_step_index].copy_(
-                log_prob, non_blocking=self.pin_memory
-            )
-            self.values[current_step_index].copy_(value, non_blocking=self.pin_memory)
-            self.rewards[current_step_index].copy_(reward, non_blocking=self.pin_memory)
-            self.dones[current_step_index].copy_(done, non_blocking=self.pin_memory)
-
-            if self.rnn_config.USE_RNN and lstm_state is not None:
-                if self.hidden_states is not None and self.cell_states is not None:
-                    self.hidden_states[current_step_index].copy_(
-                        lstm_state[0], non_blocking=self.pin_memory
-                    )
-                    self.cell_states[current_step_index].copy_(
-                        lstm_state[1], non_blocking=self.pin_memory
-                    )
-
-            # Store the *next* observation/done state at step+1 index
-            next_step_index = current_step_index + 1
-            self.obs_grid[next_step_index].copy_(obs_grid, non_blocking=self.pin_memory)
-            self.obs_shapes[next_step_index].copy_(
-                obs_shapes, non_blocking=self.pin_memory
-            )
-            self.obs_availability[next_step_index].copy_(
-                obs_availability, non_blocking=self.pin_memory
-            )
-            self.obs_explicit_features[next_step_index].copy_(
-                obs_explicit_features, non_blocking=self.pin_memory
-            )
-            self.dones[next_step_index].copy_(done, non_blocking=self.pin_memory)
-            if self.rnn_config.USE_RNN and lstm_state is not None:
-                if self.hidden_states is not None:
-                    self.hidden_states[next_step_index].copy_(
-                        lstm_state[0], non_blocking=self.pin_memory
-                    )
-                if self.cell_states is not None:
-                    self.cell_states[next_step_index].copy_(
-                        lstm_state[1], non_blocking=self.pin_memory
-                    )
-
-            self.step += 1
-
-    def after_update(self):
-        """Reset storage after PPO update, keeping the last observation and state. Thread-safe."""
-        with self._lock:  # Protect storage modification
-            last_step_index = self.num_steps
-            self.obs_grid[0].copy_(
-                self.obs_grid[last_step_index], non_blocking=self.pin_memory
-            )
-            self.obs_shapes[0].copy_(
-                self.obs_shapes[last_step_index], non_blocking=self.pin_memory
-            )
-            self.obs_availability[0].copy_(
-                self.obs_availability[last_step_index], non_blocking=self.pin_memory
-            )
-            self.obs_explicit_features[0].copy_(
-                self.obs_explicit_features[last_step_index],
-                non_blocking=self.pin_memory,
-            )
-            self.dones[0].copy_(
-                self.dones[last_step_index], non_blocking=self.pin_memory
-            )
-
-            if self.rnn_config.USE_RNN:
-                if self.hidden_states is not None:
-                    self.hidden_states[0].copy_(
-                        self.hidden_states[last_step_index],
-                        non_blocking=self.pin_memory,
-                    )
-                if self.cell_states is not None:
-                    self.cell_states[0].copy_(
-                        self.cell_states[last_step_index], non_blocking=self.pin_memory
-                    )
-            self.step = 0
-
-    def compute_returns_and_advantages(
-        self,
-        next_value: torch.Tensor,  # Value of state s_T (on agent device)
-        final_dones: torch.Tensor,  # Done state after action a_{T-1} (on agent device)
-        gamma: float,
-        gae_lambda: float,
-    ):
-        """Computes returns and GAE advantages. Thread-safe."""
-        with self._lock:  # Protect storage modification
-            if self.step != self.num_steps:
-                print(
-                    f"Warning: Computing returns before storage is full (step={self.step}, num_steps={self.num_steps})"
-                )
-
-            effective_num_steps = self.step
-            last_step_index = effective_num_steps
-
-            # Move inputs to CPU for calculation with storage tensors
-            next_value_cpu = next_value.cpu()
-            final_dones_cpu = final_dones.cpu()
-
-            self.values[last_step_index].copy_(
-                next_value_cpu, non_blocking=self.pin_memory
-            )
-            self.dones[last_step_index].copy_(
-                final_dones_cpu, non_blocking=self.pin_memory
-            )
-
-            gae = 0.0
-            for step in reversed(range(effective_num_steps)):
-                delta = (
-                    self.rewards[step]
-                    + gamma * self.values[step + 1] * (1.0 - self.dones[step + 1])
-                    - self.values[step]
-                )
-                gae = delta + gamma * gae_lambda * gae * (1.0 - self.dones[step + 1])
-                self.returns[step] = gae + self.values[step]
-
-    def get_data_for_update(self) -> Dict[str, Any]:
-        """
-        Returns collected data prepared for PPO update iterations. Thread-safe.
-        Data is returned as flattened tensors [N = T*B, ...] on CPU (potentially pinned).
-        """
-        with self._lock:  # Protect storage access
-            effective_num_steps = self.step
-            if effective_num_steps == 0:
-                return {}
-
-            advantages = (
-                self.returns[:effective_num_steps] - self.values[:effective_num_steps]
-            )
-            num_samples = effective_num_steps * self.num_envs
-
-            def _flatten(tensor: torch.Tensor, steps: int) -> torch.Tensor:
-                return tensor[:steps].reshape(steps * self.num_envs, *tensor.shape[2:])
-
-            initial_lstm_state = None
-            if (
-                self.rnn_config.USE_RNN
-                and self.hidden_states is not None
-                and self.cell_states is not None
-            ):
-                # Return the initial state for the sequence (on CPU)
-                initial_lstm_state = (
-                    self.hidden_states[0].clone(),
-                    self.cell_states[0].clone(),
-                )
-
-            data = {
-                "obs_grid": _flatten(self.obs_grid, effective_num_steps),
-                "obs_shapes": _flatten(self.obs_shapes, effective_num_steps),
-                "obs_availability": _flatten(
-                    self.obs_availability, effective_num_steps
-                ),
-                "obs_explicit_features": _flatten(
-                    self.obs_explicit_features, effective_num_steps
-                ),
-                "actions": _flatten(self.actions, effective_num_steps).squeeze(-1),
-                "log_probs": _flatten(self.log_probs, effective_num_steps).squeeze(-1),
-                "values": _flatten(self.values, effective_num_steps).squeeze(-1),
-                "returns": _flatten(self.returns, effective_num_steps).squeeze(-1),
-                "advantages": _flatten(advantages, effective_num_steps).squeeze(-1),
-                "initial_lstm_state": initial_lstm_state,  # On CPU
-                "dones": self.dones[:effective_num_steps]
-                .permute(1, 0, 2)
-                .squeeze(-1),  # Shape (B, T)
-            }
-            return data
-
-
-File: training\trainer.py
-# File: training/trainer.py
-import time
-import torch
-import numpy as np
-import traceback
-import random
-import math
-from typing import List, Optional, Dict, Any, Union, Tuple, Deque
-import gc
-import threading  # Added for Lock
-
-from collections import defaultdict
-
-from config import (
-    EnvConfig,
-    PPOConfig,
-    RNNConfig,
-    TrainConfig,
-    ModelConfig,
-    ObsNormConfig,
-    TransformerConfig,
-    TensorBoardConfig,
-    VisConfig,
-    RewardConfig,
-    TOTAL_TRAINING_STEPS,
-    BASE_CHECKPOINT_DIR,
-    get_run_checkpoint_dir,
-)
-from environment.game_state import GameState
-from agent.ppo_agent import PPOAgent
-from stats.stats_recorder import StatsRecorderBase
-from stats.aggregator import StatsAggregator
-from .rollout_collector import RolloutCollector
-from .checkpoint_manager import CheckpointManager
-from .training_utils import get_env_image_as_numpy
-
-
-class Trainer:
-    """
-    Orchestrates the PPO training process.
-    NOTE: This class is now primarily used by the TrainingWorker thread.
-    The main training loop logic resides within the worker's run method.
-    """
-
-    def __init__(
-        self,
-        envs: List[GameState],  # Still needed for context? Maybe not directly.
-        agent: PPOAgent,
-        stats_recorder: StatsRecorderBase,
-        env_config: EnvConfig,
-        ppo_config: PPOConfig,
-        rnn_config: RNNConfig,
-        train_config: TrainConfig,
-        model_config: ModelConfig,
-        obs_norm_config: ObsNormConfig,
-        transformer_config: TransformerConfig,
-        device: torch.device,
-        load_checkpoint_path: Optional[str] = None,
-        # Removed rollout_collector and storage, managed by worker/main app
-    ):
-        print("[Trainer-PPO] Initializing (as component)...")
-        # Store necessary components, but don't initialize workers here
-        # self.envs = envs # Not directly used by trainer logic anymore
-        self.agent = agent
-        self.stats_recorder = stats_recorder
-        if not hasattr(stats_recorder, "aggregator") or not isinstance(
-            stats_recorder.aggregator, StatsAggregator
-        ):
-            raise TypeError(
-                "StatsRecorder provided to Trainer must have a 'aggregator' attribute of type StatsAggregator."
-            )
-        self.stats_aggregator: StatsAggregator = stats_recorder.aggregator
-
-        self.num_envs = env_config.NUM_ENVS
-        self.device = device
-        self.env_config = env_config
-        self.ppo_config = ppo_config
-        self.rnn_config = rnn_config
-        self.train_config = train_config
-        self.model_config = model_config
-        self.obs_norm_config = obs_norm_config
-        self.transformer_config = transformer_config
-        self.reward_config = RewardConfig()
-        self.tb_config = TensorBoardConfig()
-        self.vis_config = VisConfig()
-
-        # Checkpoint manager is now initialized and managed by MainApp
-        self.checkpoint_manager: Optional[CheckpointManager] = None
-
-        # State related to update progress (managed by worker)
-        self.current_update_epoch = 0
-        self.current_minibatch_index = 0
-        self.update_indices: Optional[np.ndarray] = None
-        self.update_metrics_accumulator: Dict[str, float] = defaultdict(float)
-        self.num_minibatches_per_epoch = 0
-        self.total_update_steps = 0
-        self.num_updates_this_epoch = 0
-        self.update_start_time: float = 0.0
-
-        # Other state variables (managed by worker or main app)
-        self.global_step = 0
-        self.training_target_step = TOTAL_TRAINING_STEPS
-        self.last_image_log_step = -1
-        self.last_checkpoint_step = 0
-        self.rollouts_completed_since_last_checkpoint = 0
-        self.current_phase = "Idle"  # Worker controls its phase
-
-        print("[Trainer-PPO] Component Initialization complete.")
-        # Note: Checkpoint loading and LR scheduling are handled by MainApp/CheckpointManager/Worker
-
-    def set_checkpoint_manager(self, ckpt_manager: CheckpointManager):
-        """Allows MainApp to set the checkpoint manager after initialization."""
-        self.checkpoint_manager = ckpt_manager
-        # Sync initial state from manager if needed (though worker usually gets it)
-        self.global_step = self.checkpoint_manager.global_step
-        self.training_target_step = self.checkpoint_manager.training_target_step
-
-    def get_current_phase(self) -> str:
-        """Returns the current phase (now likely managed by the worker)."""
-        # This might be better tracked within the worker itself
-        return self.current_phase
-
-    def get_update_progress_details(self) -> Dict[str, Any]:
-        """Returns detailed progress information for the current update phase."""
-        # This state is now managed within the TrainingWorker's run loop
-        # This method might need to fetch state from the worker if called from main thread
-        # For now, return placeholder or rely on worker updating shared state/queue
-        details = {
-            "overall_progress": 0.0,
-            "epoch_progress": 0.0,
-            "current_epoch": 0,
-            "total_epochs": 0,
-            "phase": "Idle",
-            "update_start_time": 0.0,
-            "num_minibatches_per_epoch": 0,
-            "current_minibatch_index": 0,
-        }
-        # In a real implementation, this would query the TrainingWorker thread
-        return details
-
-    def _get_current_lr(self) -> float:
-        """Safely gets the current learning rate from the optimizer."""
-        try:
-            # Use agent's lock for thread safety
-            with self.agent._lock:
-                if (
-                    hasattr(self.agent, "optimizer")
-                    and self.agent.optimizer.param_groups
-                ):
-                    return self.agent.optimizer.param_groups[0]["lr"]
-                else:
-                    return self.ppo_config.LEARNING_RATE
-        except Exception:
-            return self.ppo_config.LEARNING_RATE
-
-    def _update_learning_rate(self):
-        """
-        Updates the learning rate based on the configured schedule.
-        NOTE: This should ideally be called by the main thread or the worker
-              before starting an update cycle, using the global step from the stats aggregator.
-        """
-        if not self.ppo_config.USE_LR_SCHEDULER:
-            return
-
-        # Use the global step from the aggregator for consistency
-        current_global_step = self.stats_aggregator.current_global_step
-        # Use the target step from the checkpoint manager (which should be synced)
-        total_steps = max(
-            1,
-            (
-                self.checkpoint_manager.training_target_step
-                if self.checkpoint_manager
-                else TOTAL_TRAINING_STEPS
-            ),
-        )
-
-        current_progress = current_global_step / total_steps
-        initial_lr = self.ppo_config.LEARNING_RATE
-        schedule_type = getattr(self.ppo_config, "LR_SCHEDULE_TYPE", "linear")
-
-        if schedule_type == "linear":
-            end_fraction = getattr(self.ppo_config, "LR_LINEAR_END_FRACTION", 0.0)
-            decay_fraction = max(0.0, 1.0 - min(1.0, current_progress))
-            new_lr = initial_lr * (end_fraction + (1.0 - end_fraction) * decay_fraction)
-        elif schedule_type == "cosine":
-            min_factor = getattr(self.ppo_config, "LR_COSINE_MIN_FACTOR", 0.01)
-            min_lr = initial_lr * min_factor
-            new_lr = min_lr + 0.5 * (initial_lr - min_lr) * (
-                1 + math.cos(math.pi * min(1.0, current_progress))
-            )
-        else:
-            new_lr = self._get_current_lr()  # Keep current if unknown schedule
-
-        min_factor_floor = getattr(self.ppo_config, "LR_COSINE_MIN_FACTOR", 0.0)
-        new_lr = max(new_lr, initial_lr * min_factor_floor)
-
-        try:
-            # Use agent's lock for thread safety
-            with self.agent._lock:
-                if (
-                    hasattr(self.agent, "optimizer")
-                    and self.agent.optimizer.param_groups
-                ):
-                    if abs(self.agent.optimizer.param_groups[0]["lr"] - new_lr) > 1e-9:
-                        # print(f"[LR Update] Step {current_global_step}: Updating LR from {self.agent.optimizer.param_groups[0]['lr']:.2e} to {new_lr:.2e}")
-                        for param_group in self.agent.optimizer.param_groups:
-                            param_group["lr"] = new_lr
-        except Exception as e:
-            print(f"Warning: Unexpected error updating LR: {e}")
-
-    # --- Methods below are largely deprecated or adapted for worker ---
-
-    def _prepare_regular_update(self):
-        """DEPRECATED - Logic moved to TrainingWorker."""
-        print("Trainer._prepare_regular_update() called - DEPRECATED")
-        pass
-
-    def _iterate_regular_update(self):
-        """DEPRECATED - Logic moved to TrainingWorker."""
-        print("Trainer._iterate_regular_update() called - DEPRECATED")
-        pass
-
-    def _finalize_update_phase(self):
-        """DEPRECATED - Logic moved to TrainingWorker."""
-        print("Trainer._finalize_update_phase() called - DEPRECATED")
-        pass
-
-    def _handle_update_error(self):
-        """DEPRECATED - Logic moved to TrainingWorker."""
-        print("Trainer._handle_update_error() called - DEPRECATED")
-        pass
-
-    def perform_training_iteration(self):
-        """DEPRECATED - Logic moved to worker threads and MainApp loop."""
-        print("Trainer.perform_training_iteration() called - DEPRECATED")
-        pass
-
-    def maybe_save_checkpoint(self, force_save=False):
-        """
-        Saves a checkpoint based on frequency or if forced.
-        NOTE: This should be called by the main thread, not the worker.
-        """
-        if not self.checkpoint_manager:
-            print("Warning: Checkpoint Manager not set in Trainer. Cannot save.")
-            return
-
-        # Use stats aggregator's rollout count for frequency check
-        rollouts_completed = getattr(
-            self.stats_aggregator,
-            "rollouts_processed",
-            self.rollouts_completed_since_last_checkpoint,
-        )  # Fallback needed?
-
-        save_freq_rollouts = self.train_config.CHECKPOINT_SAVE_FREQ
-        should_save_freq = (
-            save_freq_rollouts > 0
-            and rollouts_completed
-            >= save_freq_rollouts  # Check if enough rollouts passed
-        )
-
-        if force_save or should_save_freq:
-            print(
-                f"[Trainer->CkptMgr] Saving checkpoint. Force: {force_save}, FreqMet: {should_save_freq}, Rollouts: {rollouts_completed}"
-            )
-            current_global_step = self.stats_aggregator.current_global_step
-            current_episode_count = self.stats_aggregator.total_episodes
-            current_target_step = self.checkpoint_manager.training_target_step
-
-            self.checkpoint_manager.save_checkpoint(
-                current_global_step,
-                current_episode_count,
-                training_target_step=current_target_step,
-                is_final=False,  # Assume not final unless called by cleanup
-            )
-            # Reset counter - How to sync this back to worker/aggregator?
-            # Maybe the main thread tracks rollouts_since_last_checkpoint based on queue activity.
-            # For now, just save. Resetting counter needs careful thought.
-            # self.rollouts_completed_since_last_checkpoint = 0 # This state is local, might be wrong
-            self.last_checkpoint_step = current_global_step
-
-    def _maybe_log_image(self):
-        """
-        Logs a sample environment image to TensorBoard based on frequency.
-        NOTE: This should be called by the main thread, not the worker.
-        """
-        # This logic depends on having access to envs, which the trainer might not have directly.
-        # Best handled by the main thread which owns the envs list.
-        print("Trainer._maybe_log_image() called - DEPRECATED (moved to MainApp)")
-        pass
-
-    def train_loop(self):
-        """Main training loop (DEPRECATED - logic moved to TrainingWorker)."""
-        print("[Trainer-PPO] train_loop() is deprecated. Use Worker threads.")
-
-    def cleanup(self, save_final: bool = True):
-        """
-        Cleans up resources.
-        NOTE: Actual saving and closing is handled by MainApp. This is mostly a placeholder.
-        """
-        print("[Trainer-PPO] Cleanup called (component level)...")
-        # Saving and closing stats recorder is handled by MainApp during its cleanup
-        # if self.checkpoint_manager and save_final and self.global_step > 0:
-        #     print("[Trainer-PPO] Requesting final checkpoint save...")
-        #     self.checkpoint_manager.save_checkpoint(
-        #         self.global_step,
-        #         self.stats_aggregator.total_episodes,
-        #         is_final=True,
-        #         training_target_step=self.training_target_step,
-        #     )
-        # if hasattr(self.stats_recorder, "close"):
-        #     try:
-        #         self.stats_recorder.close()
-        #     except Exception as e:
-        #         print(f"Error closing stats recorder: {e}")
-        print("[Trainer-PPO] Component cleanup finished.")
-
-
 File: training\training_utils.py
 import pygame
 import numpy as np
@@ -11190,15 +7324,9 @@ def get_env_image_as_numpy(
 
 
 File: training\__init__.py
-from .rollout_collector import RolloutCollector
-from .rollout_storage import RolloutStorage
 from .checkpoint_manager import CheckpointManager
 
-__all__ = [
-    "RolloutCollector",
-    "RolloutStorage",
-    "CheckpointManager",
-]
+__all__ = ["CheckpointManager"]
 
 
 File: ui\demo_renderer.py
@@ -11312,7 +7440,7 @@ from typing import Tuple, Callable, Dict, TYPE_CHECKING
 # Type Aliases for Callbacks
 HandleDemoMouseMotionCallback = Callable[[Tuple[int, int]], None]
 HandleDemoMouseButtonDownCallback = Callable[[pygame.event.Event], None]
-ToggleTrainingRunCallback = Callable[[], None]
+# Removed ToggleTrainingRunCallback
 RequestCleanupCallback = Callable[[], None]
 CancelCleanupCallback = Callable[[], None]
 ConfirmCleanupCallback = Callable[[], None]
@@ -11323,10 +7451,9 @@ StartDebugModeCallback = Callable[[], None]
 ExitDebugModeCallback = Callable[[], None]
 HandleDebugInputCallback = Callable[[pygame.event.Event], None]
 
-# Forward declaration for type hinting
 if TYPE_CHECKING:
     from .renderer import UIRenderer
-    from app_state import AppState  # Import Enum
+    from app_state import AppState
 
 
 class InputHandler:
@@ -11336,7 +7463,7 @@ class InputHandler:
         self,
         screen: pygame.Surface,
         renderer: "UIRenderer",
-        toggle_training_run_cb: ToggleTrainingRunCallback,
+        # Removed toggle_training_run_cb
         request_cleanup_cb: RequestCleanupCallback,
         cancel_cleanup_cb: CancelCleanupCallback,
         confirm_cleanup_cb: ConfirmCleanupCallback,
@@ -11351,7 +7478,7 @@ class InputHandler:
     ):
         self.screen = screen
         self.renderer = renderer
-        self.toggle_training_run_cb = toggle_training_run_cb
+        # Removed self.toggle_training_run_cb
         self.request_cleanup_cb = request_cleanup_cb
         self.cancel_cleanup_cb = cancel_cleanup_cb
         self.confirm_cleanup_cb = confirm_cleanup_cb
@@ -11366,33 +7493,29 @@ class InputHandler:
 
         self.shape_preview_rects: Dict[int, pygame.Rect] = {}
 
-        # Button rects are now managed within ButtonStatusRenderer,
-        # but we need references for click detection here.
-        self.run_btn_rect = pygame.Rect(0, 0, 0, 0)
+        # Button rects (Run button removed)
+        # self.run_btn_rect = pygame.Rect(0, 0, 0, 0) # Removed
         self.cleanup_btn_rect = pygame.Rect(0, 0, 0, 0)
         self.demo_btn_rect = pygame.Rect(0, 0, 0, 0)
         self.debug_btn_rect = pygame.Rect(0, 0, 0, 0)
         self.confirm_yes_rect = pygame.Rect(0, 0, 0, 0)
         self.confirm_no_rect = pygame.Rect(0, 0, 0, 0)
-        self._update_button_rects()  # Initial calculation
+        self._update_button_rects()
 
     def _update_button_rects(self):
         """Calculates button rects based on initial layout assumptions."""
-        # These rects are primarily for click detection, actual rendering is in LeftPanel
-        # TODO: Get these rects dynamically from the ButtonStatusRenderer if possible
-        # For now, keep the static calculation as a fallback.
         button_height = 40
         button_y_pos = 10
-        run_button_width = 100
+        # Removed run_button_width
         cleanup_button_width = 160
         demo_button_width = 120
         debug_button_width = 120
         button_spacing = 10
 
-        self.run_btn_rect = pygame.Rect(
-            button_spacing, button_y_pos, run_button_width, button_height
-        )
-        current_x = self.run_btn_rect.right + button_spacing
+        # Start directly with cleanup button
+        current_x = button_spacing
+        # self.run_btn_rect = pygame.Rect(button_spacing, button_y_pos, run_button_width, button_height) # Removed
+        # current_x = self.run_btn_rect.right + button_spacing # Removed
         self.cleanup_btn_rect = pygame.Rect(
             current_x, button_y_pos, cleanup_button_width, button_height
         )
@@ -11405,35 +7528,27 @@ class InputHandler:
             current_x, button_y_pos, debug_button_width, button_height
         )
 
-        # Confirmation buttons are positioned dynamically during rendering
         sw, sh = self.screen.get_size()
         self.confirm_yes_rect = pygame.Rect(0, 0, 100, 40)
         self.confirm_no_rect = pygame.Rect(0, 0, 100, 40)
-        self.confirm_yes_rect.center = (
-            sw // 2 - 60,
-            sh // 2 + 50,
-        )  # Approximate center
-        self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)  # Approximate center
+        self.confirm_yes_rect.center = (sw // 2 - 60, sh // 2 + 50)
+        self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)
 
     def handle_input(
         self, app_state_str: str, cleanup_confirmation_active: bool
     ) -> bool:
-        """
-        Processes Pygame events. Returns True to continue running, False to exit.
-        """
-        from app_state import AppState  # Local import for Enum comparison
+        """Processes Pygame events. Returns True to continue running, False to exit."""
+        from app_state import AppState
 
         try:
             mouse_pos = pygame.mouse.get_pos()
         except pygame.error:
             mouse_pos = (0, 0)
 
-        # Update dynamic rects (like confirmation buttons)
         sw, sh = self.screen.get_size()
         self.confirm_yes_rect.center = (sw // 2 - 60, sh // 2 + 50)
         self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)
 
-        # Update shape preview rects if in demo mode
         if (
             app_state_str == AppState.PLAYING.value
             and self.renderer
@@ -11445,12 +7560,7 @@ class InputHandler:
         else:
             self.shape_preview_rects.clear()
 
-        if (
-            app_state_str == AppState.MAIN_MENU.value
-            and not cleanup_confirmation_active
-        ):
-            if hasattr(self.renderer, "check_hover"):
-                self.renderer.check_hover(mouse_pos, app_state_str)
+        # Removed hover check
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -11463,7 +7573,7 @@ class InputHandler:
                         (new_w, new_h), pygame.RESIZABLE
                     )
                     self._update_ui_screen_references(self.screen)
-                    self._update_button_rects()  # Recalculate static button rects on resize
+                    self._update_button_rects()
                     if hasattr(self.renderer, "force_redraw"):
                         self.renderer.force_redraw()
                     print(f"Window resized: {new_w}x{new_h}")
@@ -11471,7 +7581,6 @@ class InputHandler:
                     print(f"Error resizing window: {e}")
                 continue
 
-            # --- Cleanup Confirmation Mode ---
             if cleanup_confirmation_active:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     self.cancel_cleanup_cb()
@@ -11482,7 +7591,6 @@ class InputHandler:
                         self.cancel_cleanup_cb()
                 continue
 
-            # --- Playing (Demo) Mode ---
             elif app_state_str == AppState.PLAYING.value:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
@@ -11492,7 +7600,6 @@ class InputHandler:
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     self.handle_demo_mouse_button_down_cb(event)
 
-            # --- Debug Mode ---
             elif app_state_str == AppState.DEBUG.value:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
@@ -11502,25 +7609,20 @@ class InputHandler:
                 elif event.type == pygame.MOUSEBUTTONDOWN:
                     self.handle_debug_input_cb(event)
 
-            # --- Main Menu Mode ---
             elif app_state_str == AppState.MAIN_MENU.value:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
                         return self.exit_app_cb()
-                    elif event.key == pygame.K_p:
-                        self.toggle_training_run_cb()
+                    # Removed 'P' key binding for toggle run
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    # Use the stored rects for collision detection
-                    if self.run_btn_rect.collidepoint(mouse_pos):
-                        self.toggle_training_run_cb()
-                    elif self.cleanup_btn_rect.collidepoint(mouse_pos):
+                    # Removed run_btn_rect check
+                    if self.cleanup_btn_rect.collidepoint(mouse_pos):
                         self.request_cleanup_cb()
                     elif self.demo_btn_rect.collidepoint(mouse_pos):
                         self.start_demo_mode_cb()
                     elif self.debug_btn_rect.collidepoint(mouse_pos):
                         self.start_debug_mode_cb()
 
-            # --- Error Mode ---
             elif app_state_str == AppState.ERROR.value:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
                     return self.exit_app_cb()
@@ -11534,9 +7636,8 @@ class InputHandler:
             getattr(self.renderer, "left_panel", None),
             getattr(self.renderer, "game_area", None),
             getattr(self.renderer, "overlays", None),
-            getattr(self.renderer, "tooltips", None),
+            # Removed tooltips
             getattr(self.renderer, "demo_renderer", None),
-            # Add demo sub-renderers if they hold screen refs
             getattr(
                 getattr(self.renderer, "demo_renderer", None), "grid_renderer", None
             ),
@@ -11727,6 +7828,7 @@ class OverlayRenderer:
 
 
 File: ui\plotter.py
+# File: ui/plotter.py
 import pygame
 from typing import Dict, Optional, Deque
 from collections import deque
@@ -11752,29 +7854,27 @@ class Plotter:
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        # --- Reduced plot update interval ---
-        self.plot_update_interval: float = 0.2  # Changed from 2.0 to 0.2
-        # --- End Reduced plot update interval ---
+        self.plot_update_interval: float = 0.2
         self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
 
         self.colors = {
             "rl_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
             "game_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[1]),
-            "policy_loss": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[3]),
-            "value_loss": normalize_color_for_matplotlib(VisConfig.BLUE),
-            "entropy": normalize_color_for_matplotlib((150, 150, 150)),
+            "policy_loss": normalize_color_for_matplotlib(
+                VisConfig.GOOGLE_COLORS[3]
+            ),  # Keep for NN policy loss
+            "value_loss": normalize_color_for_matplotlib(
+                VisConfig.BLUE
+            ),  # Keep for NN value loss
+            # Removed entropy
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
-            "minibatch_sps": normalize_color_for_matplotlib(
-                VisConfig.LIGHTG
-            ),  # Changed key
+            # Removed minibatch_sps
             "tris_cleared": normalize_color_for_matplotlib(VisConfig.YELLOW),
-            "lr": normalize_color_for_matplotlib((255, 0, 255)),
-            "cpu": normalize_color_for_matplotlib((255, 165, 0)),  # Orange
-            "memory": normalize_color_for_matplotlib((0, 191, 255)),  # Deep Sky Blue
-            "gpu_mem": normalize_color_for_matplotlib(
-                (123, 104, 238)
-            ),  # Medium Slate Blue
+            # Removed lr (can add back if needed for NN)
+            "cpu": normalize_color_for_matplotlib((255, 165, 0)),
+            "memory": normalize_color_for_matplotlib((0, 191, 255)),
+            "gpu_mem": normalize_color_for_matplotlib((123, 104, 238)),
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
 
@@ -11785,19 +7885,22 @@ class Plotter:
         if target_width <= 10 or target_height <= 10 or not plot_data:
             return None
 
+        # Updated data keys
         data_keys = [
             "game_scores",
             "episode_triangles_cleared",
-            "episode_scores",
+            "episode_scores",  # Keep RL score? Or remove? Keep for now.
             "episode_lengths",
-            "minibatch_update_sps_values",  # Changed key
-            "lr_values",
-            "value_losses",
-            "policy_losses",
-            "entropies",
+            "policy_losses",  # Added NN policy loss
+            "value_losses",  # Kept NN value loss
+            # Removed: minibatch_update_sps_values, lr_values, entropies
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
+            # Add placeholders for other potential plots
+            "placeholder1",
+            "placeholder2",
+            "placeholder3",
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
@@ -11813,6 +7916,7 @@ class Plotter:
                 fig_width_in = max(1, target_width / dpi)
                 fig_height_in = max(1, target_height / dpi)
 
+                # Keep 4x3 layout for now, fill unused plots with placeholders
                 fig, axes = plt.subplots(
                     4, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
@@ -11852,7 +7956,7 @@ class Plotter:
                     placeholder_text="RL Score",
                 )
 
-                # Row 2: Training Dynamics
+                # Row 2: Training Dynamics / NN Losses
                 render_single_plot(
                     axes_flat[3],
                     data_lists["episode_lengths"],
@@ -11861,54 +7965,26 @@ class Plotter:
                     self.rolling_window_sizes,
                     placeholder_text="Episode Length",
                 )
-                # Changed plot data key, title, and color key
                 render_single_plot(
                     axes_flat[4],
-                    data_lists["minibatch_update_sps_values"],  # Changed key
-                    "Minibatch Steps/Sec",  # Changed title
-                    self.colors["minibatch_sps"],  # Changed key
-                    self.rolling_window_sizes,
-                    placeholder_text="Minibatch SPS",
-                )
-                render_single_plot(
-                    axes_flat[5],
-                    data_lists["lr_values"],
-                    "Learning Rate",
-                    self.colors["lr"],
-                    [],
-                    y_log_scale=True,
-                    placeholder_text="Learning Rate",
-                )
-
-                # Row 3: Losses & Entropy
-                render_single_plot(
-                    axes_flat[6],
-                    data_lists["value_losses"],
-                    "Value Loss",
-                    self.colors["value_loss"],
-                    self.rolling_window_sizes,
-                    placeholder_text="Value Loss",
-                )
-                render_single_plot(
-                    axes_flat[7],
                     data_lists["policy_losses"],
                     "Policy Loss",
                     self.colors["policy_loss"],
                     self.rolling_window_sizes,
                     placeholder_text="Policy Loss",
-                )
+                )  # NN Policy Loss
                 render_single_plot(
-                    axes_flat[8],
-                    data_lists["entropies"],
-                    "Entropy",
-                    self.colors["entropy"],
+                    axes_flat[5],
+                    data_lists["value_losses"],
+                    "Value Loss",
+                    self.colors["value_loss"],
                     self.rolling_window_sizes,
-                    placeholder_text="Entropy",
-                )
+                    placeholder_text="Value Loss",
+                )  # NN Value Loss
 
-                # Row 4: Resource Usage
+                # Row 3: Resource Usage
                 render_single_plot(
-                    axes_flat[9],
+                    axes_flat[6],
                     data_lists["cpu_usage"],
                     "CPU Usage (%)",
                     self.colors["cpu"],
@@ -11916,16 +7992,15 @@ class Plotter:
                     placeholder_text="CPU %",
                 )
                 render_single_plot(
-                    axes_flat[10],
+                    axes_flat[7],
                     data_lists["memory_usage"],
                     "Memory Usage (%)",
                     self.colors["memory"],
                     self.rolling_window_sizes,
                     placeholder_text="Mem %",
                 )
-                # Changed plot data key and title
                 render_single_plot(
-                    axes_flat[11],
+                    axes_flat[8],
                     data_lists["gpu_memory_usage_percent"],
                     "GPU Memory (%)",
                     self.colors["gpu_mem"],
@@ -11933,9 +8008,35 @@ class Plotter:
                     placeholder_text="GPU Mem %",
                 )
 
+                # Row 4: Placeholders / Future Plots
+                render_single_plot(
+                    axes_flat[9],
+                    data_lists["placeholder1"],
+                    "Future Plot 1",
+                    self.colors["placeholder"],
+                    [],
+                    placeholder_text="Future Plot 1",
+                )
+                render_single_plot(
+                    axes_flat[10],
+                    data_lists["placeholder2"],
+                    "Future Plot 2",
+                    self.colors["placeholder"],
+                    [],
+                    placeholder_text="Future Plot 2",
+                )
+                render_single_plot(
+                    axes_flat[11],
+                    data_lists["placeholder3"],
+                    "Future Plot 3",
+                    self.colors["placeholder"],
+                    [],
+                    placeholder_text="Future Plot 3",
+                )
+
                 # Remove x-axis labels/ticks for inner plots
                 for i, ax in enumerate(axes_flat):
-                    if i < 9:
+                    if i < 9:  # Adjust based on layout (4x3 -> 9 inner plots)
                         ax.set_xticklabels([])
                         ax.set_xlabel("")
                     ax.tick_params(axis="x", rotation=0)
@@ -12439,12 +8540,10 @@ from config import VisConfig, EnvConfig, DemoConfig
 from environment.game_state import GameState
 from .panels import LeftPanelRenderer, GameAreaRenderer
 from .overlays import OverlayRenderer
-
-# Removed TooltipRenderer import
 from .plotter import Plotter
 from .demo_renderer import DemoRenderer
 from .input_handler import InputHandler
-from app_state import AppState  # Import Enum
+from app_state import AppState
 
 
 class UIRenderer:
@@ -12457,7 +8556,6 @@ class UIRenderer:
         self.left_panel = LeftPanelRenderer(screen, vis_config, self.plotter)
         self.game_area = GameAreaRenderer(screen, vis_config)
         self.overlays = OverlayRenderer(screen, vis_config)
-        # Removed TooltipRenderer instance
         self.demo_config = DemoConfig()
         self.demo_renderer = DemoRenderer(
             screen, vis_config, self.demo_config, self.game_area
@@ -12467,13 +8565,11 @@ class UIRenderer:
     def set_input_handler(self, input_handler: InputHandler):
         """Sets the InputHandler reference after it's initialized."""
         self.left_panel.input_handler = input_handler
-        # Also set the reference in the button renderer
         if hasattr(self.left_panel, "button_status_renderer"):
             self.left_panel.button_status_renderer.input_handler_ref = input_handler
 
     def check_hover(self, mouse_pos: Tuple[int, int], app_state_str: str):
-        """Passes hover check to the tooltip renderer."""
-        # Removed tooltip hover check logic
+        """Placeholder for hover checks if needed later."""
         pass
 
     def force_redraw(self):
@@ -12482,12 +8578,12 @@ class UIRenderer:
 
     def render_all(
         self,
-        app_state: str,  # Keep as string for now, internal logic uses Enum
-        is_process_running: bool,
+        app_state: str,
+        is_process_running: bool,  # Keep for potential MCTS/NN status
         status: str,
         stats_summary: Dict[str, Any],
-        envs: List[GameState],
-        num_envs: int,
+        envs: List[GameState],  # Keep for visualization
+        num_envs: int,  # Keep for visualization layout
         env_config: EnvConfig,
         cleanup_confirmation_active: bool,
         cleanup_message: str,
@@ -12495,16 +8591,14 @@ class UIRenderer:
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         demo_env: Optional[GameState] = None,
-        update_progress_details: Dict[str, Any] = {},
-        agent_param_count: int = 0,
-        worker_counts: Dict[str, int] = {
-            "env_runners": 0,
-            "trainers": 0,
-        },  # Added worker_counts
+        update_progress_details: Dict[str, Any] = {},  # Keep for potential NN progress
+        agent_param_count: int = 0,  # Keep for NN param count
+        worker_counts: Dict[
+            str, int
+        ] = {},  # Keep structure for potential future workers
     ):
         """Renders UI based on the application state."""
         try:
-            # Convert string state back to Enum for comparison if needed, or keep using string
             current_app_state = (
                 AppState(app_state)
                 if app_state in AppState._value2member_map_
@@ -12513,7 +8607,7 @@ class UIRenderer:
 
             if current_app_state == AppState.MAIN_MENU:
                 self._render_main_menu(
-                    is_process_running=is_process_running,
+                    is_process_running=is_process_running,  # Pass to left panel
                     status=status,
                     stats_summary=stats_summary,
                     envs=envs,
@@ -12523,10 +8617,10 @@ class UIRenderer:
                     last_cleanup_message_time=last_cleanup_message_time,
                     tensorboard_log_dir=tensorboard_log_dir,
                     plot_data=plot_data,
-                    update_progress_details=update_progress_details,
+                    update_progress_details=update_progress_details,  # Pass to left panel
                     app_state=app_state,
                     agent_param_count=agent_param_count,
-                    worker_counts=worker_counts,  # Pass worker counts
+                    worker_counts=worker_counts,  # Pass to left panel
                 )
             elif current_app_state == AppState.PLAYING:
                 if demo_env:
@@ -12549,13 +8643,6 @@ class UIRenderer:
                 self.overlays.render_status_message(
                     cleanup_message, last_cleanup_message_time
                 )
-
-            # Removed tooltip rendering call
-            # if (
-            #     current_app_state == AppState.MAIN_MENU
-            #     and not cleanup_confirmation_active
-            # ):
-            #     self.tooltips.render_tooltip()
 
             pygame.display.flip()
 
@@ -12585,9 +8672,9 @@ class UIRenderer:
         update_progress_details: Dict[str, Any],
         app_state: str,
         agent_param_count: int,
-        worker_counts: Dict[str, int],  # Added worker_counts
+        worker_counts: Dict[str, int],
     ):
-        """Renders the main training dashboard view."""
+        """Renders the main dashboard view."""
         self.screen.fill(VisConfig.BLACK)
         current_width, current_height = self.screen.get_size()
         left_panel_ratio = max(0.1, min(0.9, self.vis_config.LEFT_PANEL_RATIO))
@@ -12603,27 +8690,27 @@ class UIRenderer:
 
         self.left_panel.render(
             panel_width=lp_width,
-            is_process_running=is_process_running,
+            is_process_running=is_process_running,  # Pass for potential future use
             status=status,
             stats_summary=stats_summary,
             tensorboard_log_dir=tensorboard_log_dir,
             plot_data=plot_data,
             app_state=app_state,
-            update_progress_details=update_progress_details,
+            update_progress_details=update_progress_details,  # Pass for potential NN progress
             agent_param_count=agent_param_count,
-            worker_counts=worker_counts,  # Pass worker counts
+            worker_counts=worker_counts,  # Pass for potential future use
         )
-        self.game_area.render(
-            envs=envs,
-            num_envs=num_envs,
-            env_config=env_config,
-            panel_width=ga_width,
-            panel_x_offset=lp_width,
-        )
+        # Render game area only if width is sufficient
+        if ga_width > 0:
+            self.game_area.render(
+                envs=envs,  # Pass envs for visualization
+                num_envs=num_envs,  # Pass num_envs for layout
+                env_config=env_config,
+                panel_width=ga_width,
+                panel_x_offset=lp_width,
+            )
 
-    def _render_initializing_screen(
-        self, status_message: str = "Initializing RL Components..."
-    ):
+    def _render_initializing_screen(self, status_message: str = "Initializing..."):
         self._render_simple_message(status_message, VisConfig.WHITE)
 
     def _render_error_screen(self, status_message: str):
@@ -13700,21 +9787,19 @@ from config import (
     RNNConfig,
     TransformerConfig,
     ModelConfig,
-    TOTAL_TRAINING_STEPS,
+    # Removed TOTAL_TRAINING_STEPS
 )
-from config.general import DEVICE  # Keep direct import for DEVICE
+from config.general import DEVICE
 
 from ui.plotter import Plotter
-from ui.input_handler import InputHandler  # Keep for type hint
+from ui.input_handler import InputHandler
 from .left_panel_components import (
     ButtonStatusRenderer,
     InfoTextRenderer,
     TBStatusRenderer,
     PlotAreaRenderer,
 )
-from app_state import AppState  # Import Enum
-
-# Removed TOOLTIP_TEXTS_BASE
+from app_state import AppState
 
 
 class LeftPanelRenderer:
@@ -13725,8 +9810,7 @@ class LeftPanelRenderer:
         self.vis_config = vis_config
         self.plotter = plotter
         self.fonts = self._init_fonts()
-        # Removed self.stat_rects
-        self.input_handler: Optional[InputHandler] = None  # Set externally
+        self.input_handler: Optional[InputHandler] = None
 
         self.button_status_renderer = ButtonStatusRenderer(self.screen, self.fonts)
         self.info_text_renderer = InfoTextRenderer(self.screen, self.fonts)
@@ -13763,79 +9847,76 @@ class LeftPanelRenderer:
     def render(
         self,
         panel_width: int,
-        is_process_running: bool,
+        is_process_running: bool,  # Keep for potential future use (MCTS/NN running)
         status: str,
         stats_summary: Dict[str, Any],
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         app_state: str,
-        update_progress_details: Dict[str, Any],
+        update_progress_details: Dict[str, Any],  # Keep for potential NN progress
         agent_param_count: int,
-        worker_counts: Dict[str, int],  # Added worker_counts
+        worker_counts: Dict[str, int],  # Keep structure, content will change
     ):
         """Renders the entire left panel within the given width."""
         current_height = self.screen.get_height()
         lp_rect = pygame.Rect(0, 0, panel_width, current_height)
 
+        # Simplified status mapping
         status_color_map = {
             "Ready": (30, 30, 30),
-            "Collecting Experience": (30, 40, 30),
-            "Updating Agent": (30, 30, 50),
             "Confirm Cleanup": (50, 20, 20),
             "Cleaning": (60, 30, 30),
             "Error": (60, 0, 0),
             "Playing Demo": (30, 30, 40),
             "Debugging Grid": (40, 30, 40),
             "Initializing": (40, 40, 40),
-            "Training Complete": (30, 50, 30),
+            # Add potential future states
+            "Running MCTS": (30, 40, 30),
+            "Training NN": (30, 30, 50),
         }
         base_status = status.split(" (")[0] if "(" in status else status
         bg_color = status_color_map.get(base_status, (30, 30, 30))
 
         pygame.draw.rect(self.screen, bg_color, lp_rect)
-        # Removed self.stat_rects.clear()
         current_y = 10
 
-        # Removed storing rects from sub-renderers
+        # Render Buttons and Status (simplified)
         next_y = self.button_status_renderer.render(
             y_start=current_y,
             panel_width=panel_width,
             app_state=app_state,
-            is_process_running=is_process_running,
+            is_process_running=is_process_running,  # Pass for potential future use
             status=status,
             stats_summary=stats_summary,
-            update_progress_details=update_progress_details,
+            update_progress_details=update_progress_details,  # Pass for potential NN progress
         )
         current_y = next_y
 
+        # Render Info Text (simplified)
         next_y = self.info_text_renderer.render(
             current_y + 5,
             stats_summary,
             panel_width,
             agent_param_count,
-            worker_counts,  # Pass worker counts
+            worker_counts,  # Pass potentially adapted worker counts
         )
         current_y = next_y
 
+        # Render TB Status (unchanged)
         next_y = self.tb_status_renderer.render(
             current_y + 10, tensorboard_log_dir, panel_width
         )
         current_y = next_y
 
-        # --- Modified Plot Rendering Condition ---
-        # Render plots whenever in the main menu, regardless of running state
+        # Render Plots (unchanged condition, but plots themselves are simplified)
         if app_state == AppState.MAIN_MENU.value:
             self.plot_area_renderer.render(
                 y_start=current_y + 5,
                 panel_width=panel_width,
                 screen_height=current_height,
                 plot_data=plot_data,
-                status=status,
+                status=status,  # Pass status for placeholder text
             )
-        # --- End Modified Plot Rendering Condition ---
-
-    # Removed get_stat_rects method
-    # Removed get_tooltip_texts method
 
 
 File: ui\panels\__init__.py
@@ -13849,16 +9930,16 @@ File: ui\panels\left_panel_components\button_status_renderer.py
 # File: ui/panels/left_panel_components/button_status_renderer.py
 import pygame
 import time
-import math  # Added for pulsing effect
-from typing import Dict, Tuple, Any, Optional  # Added Optional
+import math
+from typing import Dict, Tuple, Any, Optional
 
 from config import WHITE, YELLOW, RED, GOOGLE_COLORS, LIGHTG
 from utils.helpers import format_eta
-from ui.input_handler import InputHandler  # Import for type hint
+from ui.input_handler import InputHandler
 
 
 class ButtonStatusRenderer:
-    """Renders the top buttons, compact status block, and update progress bar(s)."""
+    """Renders the top buttons (excluding Run/Stop), and compact status block."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
@@ -13867,10 +9948,9 @@ class ButtonStatusRenderer:
         self.status_label_font = fonts.get(
             "notification_label", pygame.font.Font(None, 16)
         )
-        self.progress_font = fonts.get("progress_bar", pygame.font.Font(None, 14))
+        # Removed self.progress_font
         self.ui_font = fonts.get("ui", pygame.font.Font(None, 24))
-        # Store reference to input handler to get button rects
-        self.input_handler_ref: Optional[InputHandler] = None  # Set externally
+        self.input_handler_ref: Optional[InputHandler] = None
 
     def _draw_button(
         self,
@@ -13880,21 +9960,13 @@ class ButtonStatusRenderer:
         enabled: bool = True,
     ):
         """Helper to draw a single button, optionally grayed out."""
-        final_color = (
-            color
-            if enabled
-            else (
-                tuple(max(30, c // 2) for c in color[:3])
-                if isinstance(color, tuple) and len(color) >= 3
-                else (50, 50, 50)
-            )
-        )
+        final_color = color if enabled else tuple(max(30, c // 2) for c in color[:3])
         pygame.draw.rect(self.screen, final_color, rect, border_radius=5)
         text_color = WHITE if enabled else (150, 150, 150)
         if self.ui_font:
             label_surface = self.ui_font.render(text, True, text_color)
             self.screen.blit(label_surface, label_surface.get_rect(center=rect.center))
-        else:  # Fallback if font fails
+        else:
             pygame.draw.line(self.screen, RED, rect.topleft, rect.bottomright, 2)
             pygame.draw.line(self.screen, RED, rect.topright, rect.bottomleft, 2)
 
@@ -13910,245 +9982,65 @@ class ButtonStatusRenderer:
         status_color = YELLOW
         if "Error" in status:
             status_color = RED
-        elif "Collecting" in status:
-            status_color = GOOGLE_COLORS[0]
-        elif "Updating" in status:  # Should not be called here now, but keep for safety
-            status_color = GOOGLE_COLORS[2]
         elif "Ready" in status:
             status_color = WHITE
         elif "Debugging" in status:
             status_color = (200, 100, 200)
+        elif "Playing" in status:
+            status_color = (100, 150, 200)
         elif "Initializing" in status:
             status_color = LIGHTG
-        elif "Training Complete" in status:
-            status_color = (100, 200, 100)  # Green for complete
+        elif "Cleaning" in status:
+            status_color = (200, 100, 100)
+        elif "Confirm" in status:
+            status_color = (200, 150, 50)
 
         status_surface = self.status_font.render(status_text, True, status_color)
         status_rect = status_surface.get_rect(topleft=(x_margin, current_y))
         self.screen.blit(status_surface, status_rect)
         current_y += line_height_status
 
-        # --- Fetch steps from summary ---
-        global_step = stats_summary.get("global_step", 0)
-        training_target_step = stats_summary.get("training_target_step", 0)
-        # --- End Fetch steps ---
+        # Display basic info like total episodes/games played
+        global_step = stats_summary.get(
+            "global_step", 0
+        )  # Step might mean games or NN steps
         total_episodes = stats_summary.get("total_episodes", 0)
-        minibatch_sps = stats_summary.get(
-            "avg_minibatch_sps_window", 0.0
-        )  # Use avg window
 
-        # Format steps with underscores
         global_step_str = f"{global_step:,}".replace(",", "_")
-        target_step_str = f"{training_target_step:,}".replace(",", "_")
+        eps_str = f"~{total_episodes} Eps"  # Or Games
 
-        # Use fetched target step for display
-        steps_str = (
-            f"{global_step_str}/{target_step_str} Steps"
-            if training_target_step > 0
-            else f"{global_step_str} Steps"
-        )
-        eps_str, sps_str = (
-            f"~{total_episodes} Eps",  # Use ~ as it might be slightly behind
-            f"~{minibatch_sps:.0f} SPS (MB)",  # Display minibatch SPS
-        )
-        line2_text = f"{steps_str} | {eps_str} | {sps_str}"
+        line2_text = f"{global_step_str} Steps | {eps_str}"  # Simplified info line
         line2_surface = self.status_label_font.render(line2_text, True, LIGHTG)
         line2_rect = line2_surface.get_rect(topleft=(x_margin, current_y))
         self.screen.blit(line2_surface, line2_rect)
 
         current_y += line_height_label + 2
-
         return current_y
 
-    def _render_single_progress_bar(
-        self,
-        y_pos: int,
-        panel_width: int,
-        progress: float,
-        bar_color: Tuple[int, int, int],
-        text_prefix: str = "",
-        bar_height: int = 16,
-        x_offset: int = 10,
-        custom_text: str = "",
-        pulsing: bool = False,  # Add pulsing flag
-    ) -> pygame.Rect:
-        """Renders a single progress bar component with optional pulsing effect."""
-        x_margin, bar_width = x_offset, panel_width - 2 * x_offset
-        if bar_width <= 0:
-            return pygame.Rect(x_margin, y_pos, 0, 0)
-
-        background_rect = pygame.Rect(x_margin, y_pos, bar_width, bar_height)
-        pygame.draw.rect(self.screen, (60, 60, 80), background_rect, border_radius=3)
-        clamped_progress = max(0.0, min(1.0, progress))
-        progress_width = int(bar_width * clamped_progress)
-
-        # --- Pulsing Effect ---
-        final_bar_color = bar_color
-        if pulsing:
-            pulse_speed = 3.0  # Adjust speed of pulse
-            pulse_range = 0.2  # Adjust intensity of pulse (0.0 to 1.0)
-            pulse_factor = (1.0 - pulse_range) + pulse_range * (
-                0.5 * (1 + math.sin(time.time() * pulse_speed))
-            )
-            final_bar_color = tuple(
-                min(255, max(0, int(c * pulse_factor))) for c in bar_color[:3]
-            )
-        # --- End Pulsing Effect ---
-
-        if progress_width > 0:
-            pygame.draw.rect(
-                self.screen,
-                final_bar_color,  # Use potentially modified color
-                pygame.Rect(x_margin, y_pos, progress_width, bar_height),
-                border_radius=3,
-            )
-        pygame.draw.rect(self.screen, LIGHTG, background_rect, 1, border_radius=3)
-
-        if self.progress_font:
-            progress_text_str = (
-                custom_text if custom_text else f"{text_prefix}{clamped_progress:.0%}"
-            )
-            text_surface = self.progress_font.render(progress_text_str, True, WHITE)
-            self.screen.blit(
-                text_surface, text_surface.get_rect(center=background_rect.center)
-            )
-        return background_rect
-
-    def _render_detailed_progress_bars(
-        self,
-        y_start: int,
-        panel_width: int,
-        progress_details: Dict[str, Any],
-        stats_summary: Dict[str, Any],  # Add stats_summary for SPS
-        bar_color: Tuple[int, int, int],
-        tooltip_key_prefix: str = "Update",
-    ) -> int:
-        """Renders two progress bars (overall, epoch) and epoch text, including ETAs."""
-        x_margin, bar_height, bar_spacing = 10, 16, 2
-        text_height = self.progress_font.get_linesize() if self.progress_font else 14
-        current_y = y_start
-
-        overall_progress = progress_details.get("overall_progress", 0.0)
-        epoch_progress = progress_details.get("epoch_progress", 0.0)
-        current_epoch = progress_details.get("current_epoch", 0)
-        total_epochs = progress_details.get("total_epochs", 0)
-        update_start_time = progress_details.get("update_start_time", 0.0)
-        num_minibatches_per_epoch = progress_details.get("num_minibatches_per_epoch", 0)
-        current_minibatch_index = progress_details.get("current_minibatch_index", 0)
-
-        # Get current minibatch SPS from summary
-        current_minibatch_sps = stats_summary.get(
-            "avg_minibatch_sps_window", 0.0
-        )  # Use avg
-
-        bar_width = panel_width - 2 * x_margin
-        if bar_width <= 0:
-            return current_y
-
-        overall_eta_str, epoch_eta_str = "N/A", "N/A"
-        time_elapsed = time.time() - update_start_time if update_start_time > 0 else 0.0
-
-        # --- Calculate ETAs using Minibatch SPS ---
-        if time_elapsed > 1.0 and num_minibatches_per_epoch > 0:
-            total_minibatches_overall = total_epochs * num_minibatches_per_epoch
-            minibatches_done_overall = max(
-                0,
-                (current_epoch - 1) * num_minibatches_per_epoch
-                + current_minibatch_index,
-            )
-            minibatches_remaining_overall = max(
-                0, total_minibatches_overall - minibatches_done_overall
-            )
-
-            if current_minibatch_sps > 1e-3:  # Use minibatch SPS if available
-                remaining_time_overall = (
-                    minibatches_remaining_overall / current_minibatch_sps
-                )
-                overall_eta_str = format_eta(remaining_time_overall)
-            elif overall_progress > 1e-6:  # Fallback to old method if SPS is zero
-                remaining_time_overall = max(
-                    0.0, (time_elapsed / overall_progress) - time_elapsed
-                )
-                overall_eta_str = format_eta(remaining_time_overall)
-
-            minibatches_remaining_epoch = max(
-                0, num_minibatches_per_epoch - current_minibatch_index
-            )
-            if current_minibatch_sps > 1e-3:
-                remaining_time_epoch = (
-                    minibatches_remaining_epoch / current_minibatch_sps
-                )
-                epoch_eta_str = format_eta(remaining_time_epoch)
-            elif epoch_progress > 1e-6 and num_minibatches_per_epoch > 0:  # Fallback
-                effective_epochs_done = max(1e-6, (current_epoch - 1) + epoch_progress)
-                time_per_epoch_estimate = time_elapsed / effective_epochs_done
-                remaining_time_epoch = max(
-                    0.0, time_per_epoch_estimate * (1.0 - epoch_progress)
-                )
-                epoch_eta_str = format_eta(remaining_time_epoch)
-            elif epoch_progress == 0.0:
-                epoch_eta_str = "Starting..."
-        # --- End ETA Calculation ---
-
-        epoch_text = f"Epoch {current_epoch}/{total_epochs} (Minibatch {current_minibatch_index}/{num_minibatches_per_epoch})"  # Added minibatch info
-        if self.progress_font:
-            text_surface = self.progress_font.render(epoch_text, True, WHITE)
-            text_rect = text_surface.get_rect(topleft=(x_margin, current_y))
-            self.screen.blit(text_surface, text_rect)
-            current_y += text_height + 2
-
-        epoch_bar_text = f"Epoch: {epoch_progress:.0%} | ETA: {epoch_eta_str}"
-        epoch_bar_rect = self._render_single_progress_bar(
-            current_y,
-            panel_width,
-            epoch_progress,
-            bar_color,
-            custom_text=epoch_bar_text,
-            pulsing=True,  # Add pulsing effect
-        )
-        current_y += bar_height + bar_spacing
-
-        overall_bar_color = tuple(min(255, max(0, int(c * 0.7))) for c in bar_color[:3])
-        overall_bar_text = (
-            f"Overall Update: {overall_progress:.0%} | ETA: {overall_eta_str}"
-        )
-        overall_bar_rect = self._render_single_progress_bar(
-            current_y,
-            panel_width,
-            overall_progress,
-            overall_bar_color,
-            custom_text=overall_bar_text,
-            pulsing=True,  # Add pulsing effect
-        )
-        current_y += bar_height + 5
-
-        return current_y
+    # Removed _render_single_progress_bar
+    # Removed _render_detailed_progress_bars
 
     def render(
         self,
         y_start: int,
         panel_width: int,
         app_state: str,
-        is_process_running: bool,
+        is_process_running: bool,  # Keep for potential future use (e.g., MCTS running)
         status: str,
         stats_summary: Dict[str, Any],
-        update_progress_details: Dict[str, Any],
+        update_progress_details: Dict[str, Any],  # Keep for potential NN progress
     ) -> int:
-        """Renders buttons, status, and progress bar(s). Returns next_y."""
-        from app_state import AppState  # Local import for Enum comparison
+        """Renders buttons (excluding Run/Stop) and status. Returns next_y."""
+        from app_state import AppState
 
         next_y = y_start
 
-        # Get button rects from InputHandler if available
-        run_btn_rect = (
-            self.input_handler_ref.run_btn_rect
-            if self.input_handler_ref
-            else pygame.Rect(10, y_start, 100, 40)
-        )
+        # Get button rects from InputHandler
+        # Removed run_btn_rect
         cleanup_btn_rect = (
             self.input_handler_ref.cleanup_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(run_btn_rect.right + 10, y_start, 160, 40)
+            else pygame.Rect(10, y_start, 160, 40)
         )
         demo_btn_rect = (
             self.input_handler_ref.demo_btn_rect
@@ -14161,125 +10053,37 @@ class ButtonStatusRenderer:
             else pygame.Rect(demo_btn_rect.right + 10, y_start, 120, 40)
         )
 
-        # --- Run/Stop Button Logic ---
-        run_stop_enabled = app_state == AppState.MAIN_MENU.value
-        run_button_text = "Run"
-        run_button_color = (40, 40, 80)  # Default Run color
+        # Removed Run/Stop button rendering
 
-        if is_process_running:
-            run_button_text = "Stop"
-            run_button_color = (80, 40, 40)  # Default Stop color
-            if "Collecting" in status:
-                run_button_color = (40, 80, 40)  # Greenish when collecting
-            elif "Updating" in status:
-                run_button_color = (40, 40, 80)  # Blueish when updating
-            elif status.startswith("Training Complete"):
-                run_button_color = (80, 80, 40)  # Yellowish when complete but running
-        elif status.startswith("Training Complete"):
-            run_button_text = "Run"  # Show Run even if complete, but disabled
-            run_stop_enabled = False  # Disable Run if complete and stopped
-
+        # Render other buttons
+        buttons_enabled = app_state == AppState.MAIN_MENU.value
         self._draw_button(
-            run_btn_rect, run_button_text, run_button_color, enabled=run_stop_enabled
+            cleanup_btn_rect, "Cleanup This Run", (100, 40, 40), enabled=buttons_enabled
         )
-        # --- End Run/Stop Button Logic ---
+        self._draw_button(
+            demo_btn_rect, "Play Demo", (40, 100, 40), enabled=buttons_enabled
+        )
+        self._draw_button(
+            debug_btn_rect, "Debug Mode", (100, 40, 100), enabled=buttons_enabled
+        )
+        # Set next_y below the buttons
+        button_bottom = max(
+            cleanup_btn_rect.bottom, demo_btn_rect.bottom, debug_btn_rect.bottom
+        )
+        next_y = button_bottom + 10
 
-        # --- Conditional Rendering: Progress Bar OR Other Buttons ---
-        if is_process_running:
-            # --- Training Progress Bar (uses stats_summary) ---
-            progress_bar_x = run_btn_rect.right + 10
-            progress_bar_width = panel_width - progress_bar_x - 10
-            progress_bar_height = run_btn_rect.height
-            progress_bar_y = run_btn_rect.y
-
-            # --- Fetch steps from summary ---
-            current_global_step = stats_summary.get("global_step", 0)
-            training_target_step = stats_summary.get("training_target_step", 0)
-            # --- End Fetch steps ---
-            start_time = stats_summary.get("start_time", 0.0)
-
-            progress = (
-                current_global_step / max(1, training_target_step)
-                if training_target_step > 0
-                else 0.0
-            )
-            progress_bar_color = (20, 100, 20)
-
-            # Format steps with underscores using the current step
-            global_step_str = f"{current_global_step:,}".replace(",", "_")
-            target_step_str = f"{training_target_step:,}".replace(",", "_")
-
-            # Handle cases where target step might be 0 or less
-            if training_target_step <= 0:
-                progress_text = f"{global_step_str} Steps (No Target)"
-                progress = 0.0  # No progress if no target
-            elif current_global_step >= training_target_step:
-                # Use fetched target step for display
-                progress_text = (
-                    f"Target Reached ({global_step_str} / {target_step_str})"
-                )
-                progress, progress_bar_color = 1.0, (100, 150, 100)
-            else:
-                eta_str = "N/A"
-                time_elapsed = time.time() - start_time if start_time > 0 else 0.0
-                if progress > 1e-6 and progress < 1.0 and time_elapsed > 1.0:
-                    eta_str = format_eta(
-                        max(0.0, (time_elapsed / progress) - time_elapsed)
-                    )
-                elif progress >= 1.0:
-                    eta_str = "Done"
-                else:
-                    eta_str = "Calculating..." if current_global_step > 0 else "N/A"
-                # Use fetched target step for display
-                progress_text = f"{global_step_str} / {target_step_str} Steps ({progress:.1%}) | ETA: {eta_str}"
-
-            progress_rect = self._render_single_progress_bar(
-                progress_bar_y,
-                panel_width,
-                progress,
-                progress_bar_color,
-                bar_height=progress_bar_height,
-                x_offset=progress_bar_x,
-                custom_text=progress_text,
-            )
-            next_y = run_btn_rect.bottom + 10
-            # --- End Training Progress Bar ---
-        else:
-            # Render other buttons only if not running
-            buttons_enabled = app_state == AppState.MAIN_MENU.value
-            self._draw_button(
-                cleanup_btn_rect,
-                "Cleanup This Run",
-                (100, 40, 40),
-                enabled=buttons_enabled,
-            )
-            self._draw_button(
-                demo_btn_rect, "Play Demo", (40, 100, 40), enabled=buttons_enabled
-            )
-            self._draw_button(
-                debug_btn_rect, "Debug Mode", (100, 40, 100), enabled=buttons_enabled
-            )
-            next_y = run_btn_rect.bottom + 10  # Set next_y after buttons
-        # --- End Conditional Rendering ---
-
-        # --- Render Status Block OR Update Progress ---
+        # Render Status Block
         status_block_y = next_y
-        if status == "Updating Agent":
-            # Render detailed progress bars instead of compact status
-            next_y = self._render_detailed_progress_bars(
-                status_block_y,
-                panel_width,
-                update_progress_details,  # Pass the fetched details
-                stats_summary,  # Pass stats summary for SPS
-                GOOGLE_COLORS[2],  # Use blue color for update
-                tooltip_key_prefix="Update",
-            )
-        else:
-            # Render the normal compact status block
-            next_y = self._render_compact_status(
-                status_block_y, panel_width, status, stats_summary
-            )
-        # --- End Status Block / Update Progress ---
+        # Removed check for "Updating Agent" status to render progress bars
+        # Always render the compact status block now
+        next_y = self._render_compact_status(
+            status_block_y, panel_width, status, stats_summary
+        )
+
+        # Render NN training progress bar if applicable (using update_progress_details)
+        # Example placeholder:
+        # if update_progress_details and update_progress_details.get('phase') == 'Training NN':
+        #     next_y = self._render_detailed_progress_bars(...) # Adapt this call
 
         return next_y
 
@@ -14292,11 +10096,9 @@ from typing import Dict, Any, Tuple
 
 from config import RNNConfig, TransformerConfig, ModelConfig, WHITE, LIGHTG, GRAY
 
-# Removed DEVICE import from here
-
 
 class InfoTextRenderer:
-    """Renders essential non-plotted information text, including network config and live resources."""
+    """Renders essential non-plotted information text."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
@@ -14309,41 +10111,20 @@ class InfoTextRenderer:
 
     def _get_network_description(self) -> str:
         """Builds a description string based on network components."""
-        parts = ["CNN+MLP Fusion"]
-        if self.transformer_config.USE_TRANSFORMER:
-            parts.append("Transformer")
-        if self.rnn_config.USE_RNN:
-            parts.append("LSTM")
-        return (
-            f"Actor-Critic ({' -> '.join(parts)})"
-            if len(parts) > 1
-            else "Actor-Critic (CNN+MLP Fusion)"
-        )
+        # Adapt based on AlphaZero NN architecture later
+        return "AlphaZero Neural Network"  # Placeholder
 
     def _get_network_details(self) -> str:
         """Builds a detailed string of network configuration."""
+        # Adapt based on AlphaZero NN architecture later
         details = []
-        cnn_str = str(self.model_config_net.CONV_CHANNELS).replace(" ", "")
-        details.append(
-            f"CNN: {cnn_str} (K={self.model_config_net.CONV_KERNEL_SIZE}, S={self.model_config_net.CONV_STRIDE}, P={self.model_config_net.CONV_PADDING})"
-        )
-        shape_mlp_str = str(self.model_config_net.SHAPE_FEATURE_MLP_DIMS).replace(
-            " ", ""
-        )
-        details.append(f"Shape MLP: {shape_mlp_str}")
-        fusion_mlp_str = str(self.model_config_net.COMBINED_FC_DIMS).replace(" ", "")
-        details.append(f"Fusion MLP: {fusion_mlp_str}")
-        if self.transformer_config.USE_TRANSFORMER:
-            details.append(
-                f"Transformer: L={self.transformer_config.TRANSFORMER_NUM_LAYERS}, H={self.transformer_config.TRANSFORMER_NHEAD}, D={self.transformer_config.TRANSFORMER_D_MODEL}"
-            )
-        if self.rnn_config.USE_RNN:
-            details.append(f"LSTM: H={self.rnn_config.LSTM_HIDDEN_SIZE}")
-        return " | ".join(details)
+        # Example: Add details about ResNet blocks, policy/value heads if known
+        # cnn_str = str(self.model_config_net.CONV_CHANNELS).replace(" ", "")
+        # details.append(f"CNN Base: {cnn_str}")
+        return "Details TBD"  # Placeholder
 
     def _get_live_resource_usage(self) -> Dict[str, str]:
         """Fetches live CPU, Memory, and GPU Memory usage from cached summary."""
-        # Import DEVICE here to ensure the updated value is used
         from config.general import DEVICE
 
         usage = {"CPU": "N/A", "Mem": "N/A", "GPU Mem": "N/A"}
@@ -14354,12 +10135,9 @@ class InfoTextRenderer:
         if cpu_val is not None:
             usage["CPU"] = f"{cpu_val:.1f}%"
         if mem_val is not None:
-            # Added missing closing quote
-            usage["Mem"] = f"{mem_val:.1f}%"
+            usage["Mem"] = f"{mem_val:.1f}%"  # Fixed quote
 
-        # Check if DEVICE is None before accessing its type
-        device_type = DEVICE.type if DEVICE else "cpu"  # Default to 'cpu' if None
-
+        device_type = DEVICE.type if DEVICE else "cpu"
         if gpu_val is not None:
             usage["GPU Mem"] = (
                 f"{gpu_val:.1f}%" if device_type == "cuda" else "N/A (CPU)"
@@ -14373,11 +10151,10 @@ class InfoTextRenderer:
         y_start: int,
         stats_summary: Dict[str, Any],
         panel_width: int,
-        agent_param_count: int,
-        worker_counts: Dict[str, int],  # Added worker_counts
+        agent_param_count: int,  # Keep for NN param count
+        worker_counts: Dict[str, int],  # Keep structure, but content will change
     ) -> int:
         """Renders the info text block. Returns next_y."""
-        # Import DEVICE here as well for the device_type_str
         from config.general import DEVICE
 
         self.stats_summary_cache = stats_summary
@@ -14394,10 +10171,7 @@ class InfoTextRenderer:
             detail_font.get_linesize(),
             resource_font.get_linesize(),
         )
-        # Check if DEVICE is None before accessing its type
-        device_type_str = (
-            DEVICE.type.upper() if DEVICE and hasattr(DEVICE, "type") else "CPU"
-        )
+        device_type_str = DEVICE.type.upper() if DEVICE else "CPU"
         network_desc, network_details = (
             self._get_network_description(),
             self._get_network_details(),
@@ -14411,22 +10185,14 @@ class InfoTextRenderer:
             if start_time_unix > 0
             else "N/A"
         )
-        # --- Get Worker Counts ---
-        env_runners = worker_counts.get("env_runners", 0)
-        trainers = worker_counts.get("trainers", 0)
-        worker_str = f"Env: {env_runners} | Train: {trainers}"
-        # --- End Worker Counts ---
-        # --- Get Learning Rate ---
-        lr_val = stats_summary.get("current_lr", 0.0)
-        lr_str = f"{lr_val:.1e}" if lr_val > 0 else "N/A"
-        # --- End Learning Rate ---
+        # Removed worker_str and lr_str (can be added back if needed)
 
         info_lines = [
             ("Device", device_type_str),
             ("Network", network_desc),
             ("Params", param_str),
-            ("LR", lr_str),  # Added LR
-            ("Workers", worker_str),  # Added Workers
+            # ("LR", lr_str), # Removed LR for now
+            # ("Workers", worker_str), # Removed Workers for now
             ("Run Started", start_time_str),
         ]
         last_y, x_pos_key, x_pos_val_offset, current_y = y_start, 10, 5, y_start + 5
@@ -14455,9 +10221,7 @@ class InfoTextRenderer:
 
         current_y = last_y + 2
         try:
-            # --- Change color here ---
             detail_surf = detail_font.render(network_details, True, WHITE)
-            # --- End change color ---
             detail_rect = detail_surf.get_rect(topleft=(x_pos_key, current_y))
             clip_width_detail = max(0, panel_width - detail_rect.left - 10)
             blit_area_detail = (
@@ -14475,9 +10239,7 @@ class InfoTextRenderer:
         resource_usage = self._get_live_resource_usage()
         resource_str = f"Live Usage | CPU: {resource_usage['CPU']} | Mem: {resource_usage['Mem']} | GPU Mem: {resource_usage['GPU Mem']}"
         try:
-            # --- Change color here ---
             resource_surf = resource_font.render(resource_str, True, WHITE)
-            # --- End change color ---
             resource_rect = resource_surf.get_rect(topleft=(x_pos_key, current_y))
             clip_width_resource = max(0, panel_width - resource_rect.left - 10)
             blit_area_resource = (
@@ -15127,7 +10889,6 @@ def run_pre_checks() -> bool:
             )
         print("GameState state type check PASSED (returned dict).")
 
-        # Check grid shape
         if "grid" not in s_test_dict:
             raise KeyError("State dictionary missing 'grid' key.")
         grid_state = s_test_dict["grid"]
@@ -15142,7 +10903,6 @@ def run_pre_checks() -> bool:
             )
         print(f"GameState 'grid' state shape check PASSED (Shape: {grid_state.shape}).")
 
-        # Check 'shapes' component
         if "shapes" not in s_test_dict:
             raise KeyError("State dictionary missing 'shapes' key.")
         shape_state = s_test_dict["shapes"]
@@ -15159,7 +10919,6 @@ def run_pre_checks() -> bool:
             f"GameState 'shapes' feature shape check PASSED (Shape: {shape_state.shape})."
         )
 
-        # Check 'shape_availability' component
         if "shape_availability" not in s_test_dict:
             raise KeyError("State dictionary missing 'shape_availability' key.")
         availability_state = s_test_dict["shape_availability"]
@@ -15176,7 +10935,6 @@ def run_pre_checks() -> bool:
             f"GameState 'shape_availability' state shape check PASSED (Shape: {availability_state.shape})."
         )
 
-        # Check 'explicit_features' component
         if "explicit_features" not in s_test_dict:
             raise KeyError("State dictionary missing 'explicit_features' key.")
         explicit_features_state = s_test_dict["explicit_features"]
@@ -15193,24 +10951,12 @@ def run_pre_checks() -> bool:
             f"GameState 'explicit_features' state shape check PASSED (Shape: {explicit_features_state.shape})."
         )
 
-        # Check PBRS calculation (if enabled)
         if env_config_instance.CALCULATE_POTENTIAL_OUTCOMES_IN_STATE:
             print("Potential outcome calculation is ENABLED in EnvConfig.")
         else:
             print("Potential outcome calculation is DISABLED in EnvConfig.")
 
-        # --- MODIFIED LINE ---
-        # Access calculate_potential through the features attribute
-        if hasattr(gs_test, "features") and hasattr(
-            gs_test.features, "calculate_potential"
-        ):
-            _ = gs_test.features.calculate_potential()  # Call via gs_test.features
-            print("GameState PBRS potential calculation check PASSED.")
-        else:
-            raise AttributeError(
-                "GameState missing 'features' attribute or 'features' missing 'calculate_potential' method for PBRS."
-            )
-        # --- END MODIFIED LINE ---
+        # Removed PBRS check
 
         _ = gs_test.valid_actions()
         print("GameState valid_actions check PASSED.")
@@ -15236,113 +10982,6 @@ def run_pre_checks() -> bool:
     sys.exit(1)
 
 
-File: utils\running_mean_std.py
-import numpy as np
-from typing import Tuple, Union, Dict, Any
-
-# Adapted from Stable Baselines3 VecNormalize
-# https://github.com/DLR-RM/stable-baselines3/blob/master/stable_baselines3/common/running_mean_std.py
-
-
-class RunningMeanStd:
-    """Tracks the mean, variance, and count of values using Welford's algorithm."""
-
-    # https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
-    def __init__(self, epsilon: float = 1e-4, shape: Tuple[int, ...] = ()):
-        """
-        Calulates the running mean and std of a data stream.
-        :param epsilon: helps with arithmetic issues.
-        :param shape: the shape of the data stream's output.
-        """
-        self.mean = np.zeros(shape, np.float64)
-        self.var = np.ones(shape, np.float64)
-        self.count = epsilon
-
-    def copy(self) -> "RunningMeanStd":
-        """Creates a copy of the RunningMeanStd object."""
-        new_object = RunningMeanStd(shape=self.mean.shape)
-        new_object.mean = self.mean.copy()
-        new_object.var = self.var.copy()
-        new_object.count = self.count
-        return new_object
-
-    def reset(self, epsilon: float = 1e-4) -> None:
-        """Reset the statistics"""
-        self.mean = np.zeros_like(self.mean)
-        self.var = np.ones_like(self.var)
-        self.count = epsilon
-
-    def combine(self, other: "RunningMeanStd") -> None:
-        """
-        Combine stats from another ``RunningMeanStd`` object.
-        :param other: The other object to combine with.
-        """
-        self.update_from_moments(other.mean, other.var, other.count)
-
-    def update(self, arr: np.ndarray) -> None:
-        """
-        Update the running mean and variance from a batch of samples.
-        :param arr: Numpy array of shape (batch_size,) + shape
-        """
-        if arr.shape[1:] != self.mean.shape:
-            raise ValueError(
-                f"Expected input shape {self.mean.shape} (excluding batch dimension), got {arr.shape[1:]}"
-            )
-
-        batch_mean = np.mean(arr, axis=0)
-        batch_var = np.var(arr, axis=0)
-        batch_count = arr.shape[0]
-        self.update_from_moments(batch_mean, batch_var, batch_count)
-
-    def update_from_moments(
-        self,
-        batch_mean: np.ndarray,
-        batch_var: np.ndarray,
-        batch_count: Union[int, float],
-    ) -> None:
-        """
-        Update the running mean and variance from batch moments.
-        :param batch_mean: the mean of the batch
-        :param batch_var: the variance of the batch
-        :param batch_count: the number of samples in the batch
-        """
-        delta = batch_mean - self.mean
-        tot_count = self.count + batch_count
-
-        new_mean = self.mean + delta * batch_count / tot_count
-        # Combine variances using Welford's method component analysis
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        # M2 = Combined sum of squares of differences from the mean
-        m_2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
-        new_var = m_2 / tot_count
-        new_count = tot_count
-
-        self.mean = new_mean
-        self.var = new_var
-        self.count = new_count
-
-    def normalize(self, arr: np.ndarray, epsilon: float = 1e-8) -> np.ndarray:
-        """Normalize an array using the running mean and variance."""
-        # Ensure input is float64 for stability if needed, though usually input is float32
-        # arr_float64 = arr.astype(np.float64)
-        return (arr - self.mean) / np.sqrt(self.var + epsilon)
-
-    def state_dict(self) -> Dict[str, Any]:
-        """Return the state of the running mean std for saving."""
-        return {
-            "mean": self.mean.copy(),
-            "var": self.var.copy(),
-            "count": self.count,
-        }
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        """Load the state of the running mean std from a saved dictionary."""
-        self.mean = state_dict["mean"].copy()
-        self.var = state_dict["var"].copy()
-        self.count = state_dict["count"]
-
-
 File: utils\types.py
 from typing import Dict, Any
 import numpy as np
@@ -15353,16 +10992,18 @@ AgentStateDict = Dict[str, Any]
 
 
 File: utils\__init__.py
+# File: utils/__init__.py
 from .helpers import (
     get_device,
     set_random_seeds,
     ensure_numpy,
     save_object,
     load_object,
+    format_eta,  # Added format_eta
 )
 from .init_checks import run_pre_checks
 from .types import StateType, ActionType, AgentStateDict
-from .running_mean_std import RunningMeanStd  # Import new class
+from .running_mean_std import RunningMeanStd
 
 
 __all__ = [
@@ -15371,11 +11012,12 @@ __all__ = [
     "ensure_numpy",
     "save_object",
     "load_object",
+    "format_eta",  # Added format_eta
     "run_pre_checks",
     "StateType",
     "ActionType",
     "AgentStateDict",
-    "RunningMeanStd", 
+    "RunningMeanStd",
 ]
 
 

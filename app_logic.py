@@ -22,16 +22,17 @@ class AppLogic:
         """Checks if training target (e.g., games played) was met upon loading."""
         # This needs adaptation based on how AlphaZero training progress is tracked.
         # For now, assume completion isn't automatically checked this way.
+        # Example: Check against games played or NN training steps in aggregator
         # if (
-        #     self.app.initializer.checkpoint_manager
-        #     and self.app.initializer.checkpoint_manager.training_target_step > 0 # Target might be games now
-        #     and self.app.initializer.checkpoint_manager.global_step # Step might be games now
-        #     >= self.app.initializer.checkpoint_manager.training_target_step
+        #     self.app.initializer.stats_recorder
+        #     and hasattr(self.app.initializer.stats_recorder, "aggregator")
         # ):
-        #     self.app.status = "Training Complete" # Or "Target Reached"
-        #     print(
-        #         f"Training target already reached ({self.app.initializer.checkpoint_manager.global_step:,}/{self.app.initializer.checkpoint_manager.training_target_step:,}). Ready."
-        #     )
+        #     aggregator = self.app.initializer.stats_recorder.aggregator
+        #     target_games = getattr(aggregator.storage, "training_target_games", 0) # Example target
+        #     current_games = getattr(aggregator.storage, "total_episodes", 0)
+        #     if target_games > 0 and current_games >= target_games:
+        #         self.app.status = "Target Reached"
+        #         print(f"Target games already reached ({current_games:,}/{target_games:,}). Ready.")
         pass  # Keep simple for now
 
     def update_status_and_check_completion(self):
@@ -238,7 +239,7 @@ class AppLogic:
                     agent_param_count=getattr(
                         self.app.initializer, "agent_param_count", 0
                     ),
-                    # worker_counts={}, # Removed worker counts
+                    worker_counts={},  # Removed worker counts
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
@@ -345,6 +346,7 @@ class AppLogic:
                     "total_episodes",
                     0,
                 )
+                # Target step is now managed within aggregator/checkpoint manager
                 target_step = getattr(
                     self.app.initializer.checkpoint_manager, "training_target_step", 0
                 )

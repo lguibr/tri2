@@ -44,7 +44,7 @@ class InfoTextRenderer:
         if cpu_val is not None:
             usage["CPU"] = f"{cpu_val:.1f}%"
         if mem_val is not None:
-            usage["Mem"] = f"{mem_val:.1f}%"  # Fixed quote
+            usage["Mem"] = f"{mem_val:.1f}%"
 
         device_type = DEVICE.type if DEVICE else "cpu"
         if gpu_val is not None:

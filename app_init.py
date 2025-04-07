@@ -91,7 +91,7 @@ class AppInitializer:
                 # Adapt render_all call later if needed
                 self.app.renderer.render_all(
                     app_state=self.app.app_state.value,
-                    is_process_running=self.app.is_process_running,  # is_process_running might mean MCTS/Training now
+                    is_process_running=False,  # No PPO process running
                     status=self.app.status,
                     stats_summary={},
                     envs=[],
@@ -105,7 +105,7 @@ class AppInitializer:
                     demo_env=None,
                     update_progress_details={},  # Keep for potential NN training progress
                     agent_param_count=0,
-                    # worker_counts={}, # Remove worker counts for now
+                    worker_counts={},  # Remove worker counts for now
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
@@ -178,9 +178,8 @@ class AppInitializer:
             # Need to create a simplified version or adapt existing one
             # For now, assume it's adapted or create a placeholder
             try:
-                from init.stats_init import (
-                    initialize_stats_recorder,
-                )  # Hypothetical new init function
+                # Assuming init.stats_init exists and is adapted
+                from init.stats_init import initialize_stats_recorder
 
                 self.stats_recorder = initialize_stats_recorder(
                     stats_config=self.stats_config,
@@ -198,6 +197,10 @@ class AppInitializer:
                     "Warning: init.stats_init.initialize_stats_recorder not found. Skipping stats recorder init."
                 )
                 self.stats_recorder = None  # Fallback
+            except Exception as stats_init_err:
+                print(f"Error initializing stats recorder: {stats_init_err}")
+                traceback.print_exc()
+                self.stats_recorder = None
 
             if self.stats_recorder is None:
                 print("Warning: Stats Recorder initialization failed or skipped.")

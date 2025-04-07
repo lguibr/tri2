@@ -1,6 +1,8 @@
+# File: stats/aggregator_storage.py
 from collections import deque
-from typing import Deque, Dict, Any,
+from typing import Deque, Dict, Any, List  # Added List
 import time
+import numpy as np  # Added numpy
 
 
 class AggregatorStorage:
@@ -10,8 +12,12 @@ class AggregatorStorage:
         self.plot_window = plot_window
 
         # --- Deques for Plotting ---
-        # Removed: self.policy_losses
-        # Removed: self.value_losses
+        self.policy_losses: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Added for NN policy head
+        self.value_losses: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Kept for NN value head
         # Removed: self.entropies
         # Removed: self.grad_norms
         self.avg_max_qs: Deque[float] = deque(
@@ -73,8 +79,7 @@ class AggregatorStorage:
         self.best_value_loss: float = float("inf")  # Keep for NN value head loss
         self.previous_best_value_loss: float = float("inf")
         self.best_value_loss_step: int = 0
-        # Add best policy loss?
-        self.best_policy_loss: float = float("inf")
+        self.best_policy_loss: float = float("inf")  # Added for NN policy head loss
         self.previous_best_policy_loss: float = float("inf")
         self.best_policy_loss_step: int = 0
 
@@ -85,6 +90,8 @@ class AggregatorStorage:
     def get_all_plot_deques(self) -> Dict[str, Deque]:
         """Returns copies of all deques intended for plotting."""
         deque_names = [
+            "policy_losses",  # Added back for NN policy head
+            "value_losses",  # Kept for NN value head
             "avg_max_qs",
             "episode_scores",
             "episode_lengths",
@@ -99,9 +106,6 @@ class AggregatorStorage:
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
-            # Add NN losses if tracked
-            "policy_losses",  # Added back for NN policy head
-            "value_losses",  # Kept for NN value head
         ]
         # Filter out names that might not exist if loaded from old state
         return {
@@ -115,6 +119,8 @@ class AggregatorStorage:
         state = {}
         # Deques
         deque_names = [
+            "policy_losses",
+            "value_losses",
             "avg_max_qs",
             "episode_scores",
             "episode_lengths",
@@ -129,9 +135,6 @@ class AggregatorStorage:
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
-            # Add NN losses if tracked
-            "policy_losses",  # Added back for NN policy head
-            "value_losses",  # Kept for NN value head
         ]
         for name in deque_names:
             if hasattr(self, name):  # Check if deque exists before saving
@@ -167,7 +170,7 @@ class AggregatorStorage:
             "best_value_loss",
             "previous_best_value_loss",
             "best_value_loss_step",
-            "best_policy_loss",  # Added policy loss tracking
+            "best_policy_loss",
             "previous_best_policy_loss",
             "best_policy_loss_step",
         ]
@@ -181,6 +184,8 @@ class AggregatorStorage:
         self.plot_window = plot_window
 
         deque_names = [
+            "policy_losses",
+            "value_losses",
             "avg_max_qs",
             "episode_scores",
             "episode_lengths",
@@ -195,8 +200,6 @@ class AggregatorStorage:
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
-            "policy_losses",
-            "value_losses",
         ]
         for key in deque_names:
             data_to_load = state_dict.get(key)
@@ -261,7 +264,7 @@ class AggregatorStorage:
             "previous_best_game_score": -float("inf"),
             "best_value_loss": float("inf"),
             "previous_best_value_loss": float("inf"),
-            "best_policy_loss": float("inf"),  # Added policy loss tracking
+            "best_policy_loss": float("inf"),
             "previous_best_policy_loss": float("inf"),
         }
         for key in best_value_keys:

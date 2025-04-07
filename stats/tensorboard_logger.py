@@ -15,7 +15,8 @@ from config import (
     TensorBoardConfig,
     EnvConfig,
     RNNConfig,
-)  # Keep RNNConfig for potential future use
+    TransformerConfig,  # Added TransformerConfig
+)
 
 # Removed ActorCriticNetwork import
 
@@ -46,6 +47,9 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
         image_log_interval: int = TensorBoardConfig.IMAGE_LOG_FREQ,
         env_config: Optional[EnvConfig] = None,
         rnn_config: Optional[RNNConfig] = None,
+        transformer_config: Optional[
+            TransformerConfig
+        ] = None,  # Added transformer config
     ):
         self.aggregator = aggregator
         self.console_recorder = console_recorder
@@ -191,7 +195,7 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                 # Ensure model is on CPU for graph tracing if needed
                 original_device = next(iter(model.parameters())).device
                 model.cpu()
-                # Convert input to CPU if it's a tensor or tuple of tensors
+                # Convert input to CPU if it's a tensor or tuple/dict of tensors
                 if isinstance(input_to_model, torch.Tensor):
                     dummy_input_cpu = input_to_model.cpu()
                 elif isinstance(input_to_model, tuple):
@@ -199,6 +203,11 @@ class TensorBoardStatsRecorder(StatsRecorderBase):
                         i.cpu() if isinstance(i, torch.Tensor) else i
                         for i in input_to_model
                     )
+                elif isinstance(input_to_model, dict):
+                    dummy_input_cpu = {
+                        k: v.cpu() if isinstance(v, torch.Tensor) else v
+                        for k, v in input_to_model.items()
+                    }
                 else:
                     dummy_input_cpu = input_to_model  # Assume compatible
 

@@ -1,3 +1,4 @@
+# File: config/core.py
 import torch
 from typing import List, Tuple, Optional
 
@@ -18,14 +19,14 @@ from .constants import (
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 16 
-    FPS = 60 
+    NUM_ENVS_TO_RENDER = 16
+    FPS = 60
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
     LEFT_PANEL_RATIO = 0.7
-    ENV_SPACING = 2 
-    ENV_GRID_PADDING = 2 
+    ENV_SPACING = 2
+    ENV_GRID_PADDING = 2
 
     WHITE = WHITE
     BLACK = BLACK
@@ -69,6 +70,11 @@ class EnvConfig:
         # Keep original for now, but likely needs refactoring later.
         return self.NUM_SHAPE_SLOTS * (self.ROWS * self.COLS)
 
+
+# Removed RewardConfig
+
+
+# Removed PPOConfig
 
 
 class RNNConfig:  # Keep for potential future NN architectures
