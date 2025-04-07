@@ -1,8 +1,9 @@
+# File: config/__init__.py
 from .core import (
-    VisConfig, 
+    VisConfig,
     EnvConfig,
     RewardConfig,
-    PPOConfig, 
+    PPOConfig,
     RNNConfig,
     TrainConfig,
     ModelConfig,
@@ -13,15 +14,17 @@ from .core import (
     TransformerConfig,
 )
 from .general import (
-    DEVICE,
+    DEVICE,  # Keep DEVICE as it's set early
     RANDOM_SEED,
-    RUN_ID,
     BASE_CHECKPOINT_DIR,
     BASE_LOG_DIR,
-    RUN_CHECKPOINT_DIR,
-    RUN_LOG_DIR,
-    MODEL_SAVE_PATH,
     TOTAL_TRAINING_STEPS,
+    # Import getter functions instead of direct constants
+    get_run_id,
+    get_run_checkpoint_dir,
+    get_run_log_dir,
+    get_model_save_path,
+    get_console_log_dir,
 )
 from .utils import get_config_dict
 from .validation import print_config_info_and_validate
@@ -41,8 +44,9 @@ from .constants import (
     GAME_OVER_FLASH_COLOR,
 )
 
-# Assign RUN_LOG_DIR to TensorBoardConfig after imports
-TensorBoardConfig.LOG_DIR = RUN_LOG_DIR
+# Assign RUN_LOG_DIR to TensorBoardConfig using the getter
+# This ensures it uses the potentially resumed run's log directory
+TensorBoardConfig.LOG_DIR = get_run_log_dir()
 
 __all__ = [
     # Core Classes
@@ -61,16 +65,19 @@ __all__ = [
     # General Constants/Paths
     "DEVICE",
     "RANDOM_SEED",
-    "RUN_ID",
     "BASE_CHECKPOINT_DIR",
     "BASE_LOG_DIR",
-    "RUN_CHECKPOINT_DIR",
-    "RUN_LOG_DIR",
-    "MODEL_SAVE_PATH",
     "TOTAL_TRAINING_STEPS",
+    # Getters for dynamic paths
+    "get_run_id",
+    "get_run_checkpoint_dir",
+    "get_run_log_dir",
+    "get_model_save_path",
+    "get_console_log_dir",
     # Utils/Validation
     "get_config_dict",
     "print_config_info_and_validate",
+    # Constants
     "WHITE",
     "BLACK",
     "LIGHTG",

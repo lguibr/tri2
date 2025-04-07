@@ -1,3 +1,4 @@
+# File: config/validation.py
 from .core import (
     EnvConfig,
     PPOConfig,
@@ -7,16 +8,17 @@ from .core import (
     StatsConfig,
     TensorBoardConfig,
     VisConfig,
-    ObsNormConfig,  
-    TransformerConfig, 
+    ObsNormConfig,
+    TransformerConfig,
 )
 from .general import (
-    RUN_ID,
     DEVICE,
-    MODEL_SAVE_PATH,
-    RUN_CHECKPOINT_DIR,
-    RUN_LOG_DIR,
     TOTAL_TRAINING_STEPS,
+    # Import getters instead of direct constants
+    get_run_id,
+    get_run_log_dir,
+    get_run_checkpoint_dir,
+    get_model_save_path,  # Keep if needed, or remove if only used in trainer
 )
 
 
@@ -24,28 +26,37 @@ def print_config_info_and_validate():
     env_config_instance = EnvConfig()
     ppo_config_instance = PPOConfig()
     rnn_config_instance = RNNConfig()
-    transformer_config_instance = TransformerConfig()  # Added instance
-    obs_norm_config_instance = ObsNormConfig()  # Added instance
-    vis_config_instance = VisConfig()  # Added instance
+    transformer_config_instance = TransformerConfig()
+    obs_norm_config_instance = ObsNormConfig()
+    vis_config_instance = VisConfig()
+    train_config_instance = TrainConfig()  # Instantiate to access LOAD_CHECKPOINT_PATH
+
+    # Use getter functions for dynamic paths
+    run_id = get_run_id()
+    run_log_dir = get_run_log_dir()
+    run_checkpoint_dir = get_run_checkpoint_dir()
 
     print("-" * 70)
-    print(f"RUN ID: {RUN_ID}")
-    print(f"Log Directory: {RUN_LOG_DIR}")
-    print(f"Checkpoint Directory: {RUN_CHECKPOINT_DIR}")
-    print(f"Device: {DEVICE}")  # DEVICE should be set by now
+    print(f"RUN ID: {run_id}")  # Use variable
+    print(f"Log Directory: {run_log_dir}")  # Use variable
+    print(f"Checkpoint Directory: {run_checkpoint_dir}")  # Use variable
+    print(f"Device: {DEVICE}")
     print(
         f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
         f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
     )
 
-    if TrainConfig.LOAD_CHECKPOINT_PATH:
+    # Use the instance to check the config value
+    if train_config_instance.LOAD_CHECKPOINT_PATH:
         print(
             "*" * 70
-            + f"\n*** Warning: LOAD CHECKPOINT from: {TrainConfig.LOAD_CHECKPOINT_PATH} ***\n"
-            "*** Ensure ckpt matches current Model/PPO/RNN Config. ***\n" + "*" * 70
+            + f"\n*** Warning: LOAD CHECKPOINT specified: {train_config_instance.LOAD_CHECKPOINT_PATH} ***\n"
+            "*** CheckpointManager will attempt to load this path. ***\n" + "*" * 70
         )
     else:
-        print("--- Starting training from scratch (no checkpoint specified). ---")
+        print(
+            "--- No explicit checkpoint path. CheckpointManager will attempt auto-resume. ---"
+        )
 
     print("--- Pre-training DISABLED ---")
 

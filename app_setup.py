@@ -1,11 +1,12 @@
+# File: app_setup.py
 import os
 import pygame
 from typing import Tuple, Dict, Any
 
 from config import (
     VisConfig,
-    RUN_CHECKPOINT_DIR,
-    RUN_LOG_DIR,
+    get_run_checkpoint_dir,  # Use getter
+    get_run_log_dir,  # Use getter
     get_config_dict,
     print_config_info_and_validate,
 )
@@ -28,10 +29,17 @@ def initialize_pygame(
 
 
 def initialize_directories():
-    """Creates necessary runtime directories."""
-    os.makedirs(RUN_CHECKPOINT_DIR, exist_ok=True)
-    os.makedirs(RUN_LOG_DIR, exist_ok=True)
-    print(f"Ensured directories exist: {RUN_CHECKPOINT_DIR}, {RUN_LOG_DIR}")
+    """Creates necessary runtime directories using dynamic paths."""
+    run_checkpoint_dir = get_run_checkpoint_dir()
+    run_log_dir = get_run_log_dir()
+    # Note: Console log dir might be the same as run_log_dir,
+    # but creating it separately ensures it exists if structure changes.
+    # console_log_dir = get_console_log_dir() # Already created in main
+
+    os.makedirs(run_checkpoint_dir, exist_ok=True)
+    os.makedirs(run_log_dir, exist_ok=True)
+    # os.makedirs(console_log_dir, exist_ok=True) # Already created in main
+    print(f"Ensured directories exist: {run_checkpoint_dir}, {run_log_dir}")
 
 
 def load_and_validate_configs() -> Dict[str, Any]:

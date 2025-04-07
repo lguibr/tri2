@@ -1,3 +1,4 @@
+# File: ui/panels/left_panel.py
 import pygame
 from typing import Dict, Any, Optional, Deque
 
@@ -5,6 +6,7 @@ from config import (
     VisConfig,
     RNNConfig,
     TransformerConfig,
+    TOTAL_TRAINING_STEPS,  # Import total steps
 )
 from config.general import DEVICE
 
@@ -20,10 +22,11 @@ from .left_panel_components import (
 
 TOOLTIP_TEXTS_BASE = {
     "Status": "Current application state: Ready, Collecting Experience, Updating Agent, Confirm Cleanup, Cleaning, Error, Playing Demo, Debugging Grid.",
-    "Run Button": "Click to Start/Stop the training process. Disabled during active phases.",
-    "Cleanup Button": "Click to DELETE agent ckpt for CURRENT run ONLY, then re-init. Disabled during active phases.",
-    "Play Demo Button": "Click to enter interactive play mode. Disabled during active phases.",
-    "Debug Mode Button": "Click to enter grid debug mode (toggle cells, check lines). Disabled during active phases.",
+    "Run Button": "Click to Start/Stop the training process. Enabled only in Main Menu.",
+    "Cleanup Button": "Click to DELETE agent ckpt for CURRENT run ONLY, then re-init. Enabled only when stopped in Main Menu.",
+    "Play Demo Button": "Click to enter interactive play mode. Enabled only when stopped in Main Menu.",
+    "Debug Mode Button": "Click to enter grid debug mode (toggle cells, check lines). Enabled only when stopped in Main Menu.",
+    "Training Progress": f"Overall training progress towards {TOTAL_TRAINING_STEPS/1e6:.1f}M steps. Shows current steps, percentage, and estimated time remaining (ETA). Visible only during training.",
     "Device": "Computation device detected.",
     "Network": "Neural network architecture.",
     "TensorBoard Status": "Indicates TB logging status and log directory.",
@@ -31,8 +34,8 @@ TOOLTIP_TEXTS_BASE = {
     "Episodes Info": "Total Completed Episodes (Regular Training)",
     "SPS Info": "Steps Per Second (Collection + Update Avg, Regular Training)",
     "Update Epoch Info": "Current PPO Epoch / Total PPO Epochs for this update cycle.",
-    "Update Epoch Progress": "Progress through minibatches within the current PPO epoch.",
-    "Update Overall Progress": "Overall progress through all minibatches across all PPO epochs for this update cycle.",
+    "Update Epoch Progress": "Progress through minibatches within the current PPO epoch. Shows percentage and estimated time remaining (ETA) for this epoch.",  # Updated tooltip
+    "Update Overall Progress": "Overall progress through all minibatches across all PPO epochs for this update cycle. Shows percentage and estimated time remaining (ETA) for the entire update phase.",  # Updated tooltip
 }
 
 
@@ -106,7 +109,10 @@ class LeftPanelRenderer:
             "Debugging Grid": (40, 30, 40),
             "Initializing": (40, 40, 40),
         }
-        bg_color = status_color_map.get(status, (30, 30, 30))
+        # Handle status text containing epoch info during update
+        base_status = status.split(" (")[0] if "(" in status else status
+        bg_color = status_color_map.get(base_status, (30, 30, 30))
+
         pygame.draw.rect(self.screen, bg_color, lp_rect)
         self.stat_rects.clear()
 
@@ -118,56 +124,13 @@ class LeftPanelRenderer:
             panel_width=lp_width,  # Pass width
             app_state=app_state,
             is_process_running=is_process_running,
-            status=status,
+            status=status,  # Pass full status string
             stats_summary=stats_summary,
             update_progress_details=update_progress_details,
         )
-
-        # Get button rects from InputHandler for tooltips
-        if self.input_handler:
-            self.stat_rects["Run Button"] = self.input_handler.run_btn_rect
-            self.stat_rects["Cleanup Button"] = self.input_handler.cleanup_btn_rect
-            self.stat_rects["Play Demo Button"] = self.input_handler.demo_btn_rect
-            self.stat_rects["Debug Mode Button"] = self.input_handler.debug_btn_rect
-        else:  # Fallback if input_handler not set yet (shouldn't happen after init)
-            button_height = 40
-            button_y_pos = (
-                current_y  # Use current_y from before ButtonStatusRenderer.render
-            )
-            run_button_width = 100
-            cleanup_button_width = 160
-            demo_button_width = 120
-            debug_button_width = 120
-            button_spacing = 10
-            run_button_rect = pygame.Rect(
-                button_spacing, button_y_pos, run_button_width, button_height
-            )
-            cleanup_button_rect = pygame.Rect(
-                run_button_rect.right + button_spacing,
-                button_y_pos,
-                cleanup_button_width,
-                button_height,
-            )
-            demo_button_rect = pygame.Rect(
-                cleanup_button_rect.right + button_spacing,
-                button_y_pos,
-                demo_button_width,
-                button_height,
-            )
-            debug_button_rect = pygame.Rect(
-                demo_button_rect.right + button_spacing,
-                button_y_pos,
-                debug_button_width,
-                button_height,
-            )
-            self.stat_rects["Run Button"] = run_button_rect
-            self.stat_rects["Cleanup Button"] = cleanup_button_rect
-            self.stat_rects["Play Demo Button"] = demo_button_rect
-            self.stat_rects["Debug Mode Button"] = debug_button_rect
-
         self.stat_rects.update(
             rects_bs
-        )  # Add status rects etc. from ButtonStatusRenderer
+        )  # Add rects from renderer (buttons, progress, status)
         current_y = next_y
 
         # Render Info Text Block
@@ -196,6 +159,7 @@ class LeftPanelRenderer:
 
     def get_stat_rects(self) -> Dict[str, pygame.Rect]:
         """Returns the dictionary of rectangles for tooltip detection."""
+        # Ensure rects from button_status_renderer are included
         return self.stat_rects.copy()
 
     def get_tooltip_texts(self) -> Dict[str, str]:
@@ -215,5 +179,5 @@ class LeftPanelRenderer:
         else:
             texts["Network"] = f"Actor-Critic network using {' -> '.join(parts)}."
         if "Update Epoch Progress" in texts:
-            texts.pop("Update Progress", None)
+            texts.pop("Update Progress", None)  # Clean up old key if present
         return texts

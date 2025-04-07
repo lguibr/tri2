@@ -1,3 +1,4 @@
+# File: ui/plot_utils.py
 import numpy as np
 from typing import Optional, List, Union, Tuple
 import matplotlib
@@ -71,9 +72,7 @@ MAX_ALPHA = 1.0
 MIN_DATA_AVG_LINEWIDTH = 1
 MAX_DATA_AVG_LINEWIDTH = 2
 
-# Increased padding factors
-Y_PADDING_FACTOR = 0.20  # Increased from 0.1
-# X_PADDING_FACTOR = 0.05 # Removed horizontal padding factor
+# Y_PADDING_FACTOR = 0.20 # Removed vertical padding factor
 
 
 def calculate_trend_line(data: np.ndarray) -> Optional[Tuple[float, float]]:
@@ -186,7 +185,6 @@ def render_single_plot(
     label: str,
     color: Tuple[float, float, float],
     rolling_window_sizes: List[int],
-    # xlabel: Optional[str] = None, # Removed xlabel
     show_placeholder: bool = True,
     placeholder_text: Optional[str] = None,
     y_log_scale: bool = False,
@@ -197,7 +195,7 @@ def render_single_plot(
     Applies a background tint and border to the entire subplot based on trend desirability.
     Legend now includes current values and trend slope, placed at center-left.
     Handles empty data explicitly to show placeholder.
-    Increased vertical padding, removed horizontal padding and xlabel.
+    Removed vertical padding, removed horizontal padding and xlabel.
     Increased title and legend font sizes, increased legend background alpha.
     """
     try:
@@ -249,7 +247,7 @@ def render_single_plot(
 
     current_val = valid_data[-1]
     best_val = np.min(valid_data) if is_lower_better else np.max(valid_data)
-    best_val_str = f"Best: {_format_value(best_val, is_lower_better)}"  # Calculate best value string
+    best_val_str = f"Best: {_format_value(best_val, is_lower_better)}"
 
     # Set only the main title
     ax.set_title(
@@ -262,6 +260,8 @@ def render_single_plot(
     try:
         x_coords = np.arange(n_points)
         plotted_legend_items = False
+        min_y_overall = float("inf")
+        max_y_overall = float("-inf")
 
         # Plot Raw Data
         raw_data_rank = total_ranks - 1
@@ -274,7 +274,6 @@ def render_single_plot(
             MIN_DATA_AVG_LINEWIDTH,
             MAX_DATA_AVG_LINEWIDTH,
         )
-        # Updated label for legend (removed Best)
         raw_label = f"Raw: {_format_value(current_val, is_lower_better)}"
         ax.plot(
             x_coords,
@@ -284,6 +283,8 @@ def render_single_plot(
             label=raw_label,
             alpha=raw_data_alpha,
         )
+        min_y_overall = min(min_y_overall, np.min(valid_data))
+        max_y_overall = max(max_y_overall, np.max(valid_data))
         plotted_legend_items = True
 
         # Plot Rolling Averages
@@ -304,7 +305,6 @@ def render_single_plot(
             linestyle = "-"
             if len(avg_x_coords) == len(rolling_avg):
                 last_avg_val = rolling_avg[-1] if len(rolling_avg) > 0 else np.nan
-                # Updated label for legend
                 avg_label = (
                     f"Avg {avg_window}: {_format_value(last_avg_val, is_lower_better)}"
                 )
@@ -317,6 +317,9 @@ def render_single_plot(
                     linestyle=linestyle,
                     label=avg_label,
                 )
+                if len(rolling_avg) > 0:
+                    min_y_overall = min(min_y_overall, np.min(rolling_avg))
+                    max_y_overall = max(max_y_overall, np.max(rolling_avg))
                 plotted_legend_items = True
 
         # Plot Trend Line
@@ -324,7 +327,6 @@ def render_single_plot(
             slope, intercept = trend_params
             x_trend = np.array([0, n_points - 1])
             y_trend = slope * x_trend + intercept
-            # Updated label for legend
             trend_label = f"Trend: {_format_slope(slope)}"
             ax.plot(
                 x_trend,
@@ -336,35 +338,27 @@ def render_single_plot(
                 label=trend_label,
                 zorder=TREND_LINE_ZORDER,
             )
+            # Don't include trend line in min/max calculation for ylim
             plotted_legend_items = True
 
-        # Removed Best Value Text Inside Plot
-
         ax.tick_params(axis="both", which="major")
-        # Removed ax.set_xlabel(xlabel)
-
         ax.grid(
             True,
             linestyle=plt.rcParams["grid.linestyle"],
             alpha=plt.rcParams["grid.alpha"],
         )
 
-        # --- Adjust Y-axis limits for more padding ---
-        min_val_plot = np.min(valid_data)
-        max_val_plot = np.max(valid_data)
-        range_val = max_val_plot - min_val_plot
-        if abs(range_val) < 1e-6:  # Handle case where all values are the same
-            padding = (
-                max(abs(max_val_plot * Y_PADDING_FACTOR), 0.5)
-                if max_val_plot != 0
-                else 0.5
-            )
-        else:
-            padding = range_val * Y_PADDING_FACTOR  # Use increased padding factor
-        padding = max(padding, 1e-6)  # Ensure padding is positive
-        ax.set_ylim(min_val_plot - padding, max_val_plot + padding)
+        # --- Adjust Y-axis limits WITHOUT padding ---
+        if np.isfinite(min_y_overall) and np.isfinite(max_y_overall):
+            if abs(max_y_overall - min_y_overall) < 1e-6:  # Handle constant data
+                # Add a tiny epsilon to avoid zero range
+                epsilon = max(abs(min_y_overall * 0.01), 1e-6)
+                ax.set_ylim(min_y_overall - epsilon, max_y_overall + epsilon)
+            else:
+                ax.set_ylim(min_y_overall, max_y_overall)
+        # else: Keep default limits if min/max calculation failed
 
-        if y_log_scale and min_val_plot > 1e-9:
+        if y_log_scale and min_y_overall > 1e-9:
             ax.set_yscale("log")
             # Adjust log scale limits if needed, ensuring bottom is positive
             current_bottom, current_top = ax.get_ylim()
@@ -399,11 +393,10 @@ def render_single_plot(
 
         # --- Legend ---
         if plotted_legend_items:
-            # Place legend at the center-left of the axes and add Best value as title
             ax.legend(
                 loc="center left",
                 bbox_to_anchor=(0, 0.5),
-                title=best_val_str,  # Use Best value as legend title
+                title=best_val_str,
                 fontsize=plt.rcParams["legend.fontsize"],
             )
 

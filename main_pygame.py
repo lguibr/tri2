@@ -1,3 +1,4 @@
+# File: main_pygame.py
 import sys
 import pygame
 import os
@@ -5,25 +6,110 @@ import time
 import traceback
 from typing import List, Tuple, Optional, Dict, Any, Deque
 
+# --- Early imports for config and device detection ---
 from utils.helpers import set_random_seeds, get_device
-from config.general import set_device as set_config_device
+from config.general import (
+    set_device as set_config_device,
+    set_run_id,
+    get_run_id,
+    get_run_checkpoint_dir,
+    get_run_log_dir,
+    get_console_log_dir,
+    BASE_CHECKPOINT_DIR,
+    BASE_LOG_DIR,
+)
+from config import TrainConfig  # Needed early for LOAD_CHECKPOINT_PATH check
+from training.checkpoint_manager import find_latest_run_and_checkpoint  # Needed early
 
+# --- Determine Device ---
 determined_device = get_device()
 set_config_device(determined_device)
 
+# --- Determine Run ID and Checkpoint Path ---
+# This happens *before* setting up logging based on run ID
+train_config_instance = TrainConfig()
+explicit_load_path = train_config_instance.LOAD_CHECKPOINT_PATH
+run_id_to_use: Optional[str] = None
+checkpoint_path_to_load: Optional[str] = None
+
+if explicit_load_path:
+    print(f"[Startup] Explicit checkpoint path provided: {explicit_load_path}")
+    if os.path.isfile(explicit_load_path):
+        checkpoint_path_to_load = explicit_load_path
+        # Attempt to extract run_id from the explicit path
+        try:
+            parent_dir = os.path.dirname(explicit_load_path)
+            potential_run_id = os.path.basename(parent_dir)
+            if potential_run_id.startswith("run_"):
+                run_id_to_use = potential_run_id
+                print(f"[Startup] Using run_id '{run_id_to_use}' from explicit path.")
+            else:
+                print(
+                    "[Startup] Could not determine run_id from explicit path structure."
+                )
+        except Exception:
+            print("[Startup] Error determining run_id from explicit path.")
+    else:
+        print(
+            f"[Startup] WARNING: Explicit checkpoint path not found: {explicit_load_path}. Starting new run."
+        )
+else:
+    print(
+        f"[Startup] No explicit checkpoint path. Searching for latest run in: {BASE_CHECKPOINT_DIR}"
+    )
+    latest_run_id, latest_checkpoint_path = find_latest_run_and_checkpoint(
+        BASE_CHECKPOINT_DIR
+    )
+    if latest_run_id and latest_checkpoint_path:
+        print(
+            f"[Startup] Found latest run '{latest_run_id}' with checkpoint. Resuming."
+        )
+        run_id_to_use = latest_run_id
+        checkpoint_path_to_load = latest_checkpoint_path
+    elif latest_run_id:
+        print(
+            f"[Startup] Found latest run directory '{latest_run_id}' but no checkpoint. Starting new run."
+        )
+    else:
+        print("[Startup] No previous runs found. Starting new run.")
+
+# Set the run_id (either new or resumed) in the config module
+if run_id_to_use:
+    set_run_id(run_id_to_use)
+else:
+    run_id_to_use = get_run_id()  # Generate a new one if none was found/set
+
+# --- Now setup logging and directories using the determined run_id ---
+current_run_checkpoint_dir = get_run_checkpoint_dir()
+current_run_log_dir = get_run_log_dir()
+current_console_log_dir = get_console_log_dir()
+
+os.makedirs(current_run_checkpoint_dir, exist_ok=True)
+os.makedirs(current_run_log_dir, exist_ok=True)
+# Ensure console log dir exists (might be same as run_log_dir)
+os.makedirs(current_console_log_dir, exist_ok=True)
+
+log_filepath = os.path.join(current_console_log_dir, "console_output.log")
+# --- TeeLogger Import ---
+# Import TeeLogger *after* directories are ensured to exist
 from logger import TeeLogger
+
+original_stdout, original_stderr = sys.stdout, sys.stderr
+logger = TeeLogger(log_filepath, original_stdout)
+sys.stdout, sys.stderr = logger, logger
+
+# --- Remaining imports (after logging is setup) ---
 from app_setup import (
     initialize_pygame,
-    initialize_directories,
+    initialize_directories,  # Will now use getters from config.general
     load_and_validate_configs,
 )
-
 from config import (
     VisConfig,
     EnvConfig,
     PPOConfig,
     RNNConfig,
-    TrainConfig,
+    # TrainConfig already imported
     ModelConfig,
     StatsConfig,
     RewardConfig,
@@ -32,17 +118,13 @@ from config import (
     ObsNormConfig,
     TransformerConfig,
     RANDOM_SEED,
-    MODEL_SAVE_PATH,
-    BASE_CHECKPOINT_DIR,
-    BASE_LOG_DIR,
-    RUN_LOG_DIR,
+    # MODEL_SAVE_PATH, # Removed import - handled internally
     TOTAL_TRAINING_STEPS,
 )
-from config.general import DEVICE
+from config.general import DEVICE  # Already imported and set
 
 from environment.game_state import GameState, StateType
 from agent.ppo_agent import PPOAgent
-
 from training.trainer import Trainer
 from stats.stats_recorder import StatsRecorderBase
 from ui.renderer import UIRenderer
@@ -59,7 +141,7 @@ from init.rl_components_ppo import (
 class MainApp:
     """Main application class orchestrating the Pygame UI and RL training."""
 
-    def __init__(self):
+    def __init__(self, checkpoint_to_load: Optional[str]):  # Pass the determined path
         print("Initializing Application...")
         set_random_seeds(RANDOM_SEED)
 
@@ -67,7 +149,7 @@ class MainApp:
         self.env_config = EnvConfig()
         self.ppo_config = PPOConfig()
         self.rnn_config = RNNConfig()
-        self.train_config = TrainConfig()
+        self.train_config = TrainConfig()  # Use instance created earlier
         self.model_config = ModelConfig()
         self.stats_config = StatsConfig()
         self.tensorboard_config = TensorBoardConfig()
@@ -75,6 +157,9 @@ class MainApp:
         self.reward_config = RewardConfig()
         self.obs_norm_config = ObsNormConfig()
         self.transformer_config = TransformerConfig()
+
+        # Store the checkpoint path determined before app init
+        self.checkpoint_to_load = checkpoint_to_load
 
         self.device = DEVICE
         if self.device is None:
@@ -84,7 +169,7 @@ class MainApp:
         self.config_dict = load_and_validate_configs()
         self.num_envs = self.env_config.NUM_ENVS
 
-        initialize_directories()
+        initialize_directories()  # Uses getters, ensures current run dirs exist
         self.screen, self.clock = initialize_pygame(self.vis_config)
 
         self.app_state = "Initializing"
@@ -106,9 +191,20 @@ class MainApp:
         self._initialize_core_components(is_reinit=False)
 
         self.app_state = "MainMenu"
-        self.status = "Ready"
-        print("Initialization Complete. Ready.")
-        print(f"--- tensorboard --logdir {os.path.abspath(BASE_LOG_DIR)} ---")
+        self.status = "Ready"  # Default status
+        # Check if training was already complete from loaded state
+        if self.trainer and self.trainer.global_step >= TOTAL_TRAINING_STEPS:
+            self.status = "Training Complete"
+            print(
+                f"Training already completed ({self.trainer.global_step}/{TOTAL_TRAINING_STEPS} steps). Ready to continue or exit."
+            )
+        else:
+            print("Initialization Complete. Ready.")
+
+        # Use the getter for the log directory path
+        print(
+            f"--- tensorboard --logdir {os.path.abspath(BASE_LOG_DIR)} ---"
+        )  # Point to base logs dir
 
     def _initialize_core_components(self, is_reinit: bool = False):
         """Initializes Renderer, RL components, Demo Env, and Input Handler."""
@@ -136,7 +232,10 @@ class MainApp:
                 pygame.time.delay(100)
 
             # Initialize RL components
-            self._initialize_rl_components(is_reinit=is_reinit)
+            # Pass the checkpoint path determined during startup to the trainer init
+            self._initialize_rl_components(
+                is_reinit=is_reinit, checkpoint_to_load=self.checkpoint_to_load
+            )
 
             if not is_reinit:
                 # Initialize Demo Env
@@ -152,8 +251,8 @@ class MainApp:
                     exit_app_cb=self._exit_app,
                     start_demo_mode_cb=self._start_demo_mode,
                     exit_demo_mode_cb=self._exit_demo_mode,
-                    handle_demo_mouse_motion_cb=self._handle_demo_mouse_motion,  # New
-                    handle_demo_mouse_button_down_cb=self._handle_demo_mouse_button_down,  # New
+                    handle_demo_mouse_motion_cb=self._handle_demo_mouse_motion,
+                    handle_demo_mouse_button_down_cb=self._handle_demo_mouse_button_down,
                     start_debug_mode_cb=self._start_debug_mode,
                     exit_debug_mode_cb=self._exit_debug_mode,
                     handle_debug_input_cb=self._handle_debug_input,
@@ -177,7 +276,9 @@ class MainApp:
             pygame.quit()
             sys.exit(1)
 
-    def _initialize_rl_components(self, is_reinit: bool = False):
+    def _initialize_rl_components(
+        self, is_reinit: bool = False, checkpoint_to_load: Optional[str] = None
+    ):
         """Initializes RL components using helper functions (now for PPO)."""
         print(f"Initializing RL components (PPO)... Re-init: {is_reinit}")
         start_time = time.time()
@@ -191,33 +292,37 @@ class MainApp:
                 transformer_config=self.transformer_config,
                 device=self.device,
             )
+            # Initialize StatsRecorder (which contains the aggregator)
+            # Pass is_reinit=True only if doing a cleanup, not on initial load
             self.stats_recorder = initialize_stats_recorder(
                 stats_config=self.stats_config,
-                tb_config=self.tensorboard_config,
+                tb_config=self.tensorboard_config,  # TensorBoardConfig now uses getter for LOG_DIR
                 config_dict=self.config_dict,
                 agent=self.agent,
                 env_config=self.env_config,
                 rnn_config=self.rnn_config,
                 transformer_config=self.transformer_config,
-                is_reinit=is_reinit,
+                is_reinit=is_reinit,  # Pass reinit flag
             )
             if self.stats_recorder is None:
                 raise RuntimeError("Stats Recorder init failed.")
 
+            # Initialize Trainer, passing the already initialized StatsRecorder
+            # Pass the checkpoint_to_load path determined during startup
             self.trainer = initialize_trainer(
                 envs=self.envs,
                 agent=self.agent,
-                stats_recorder=self.stats_recorder,
+                stats_recorder=self.stats_recorder,  # Pass the recorder instance
                 env_config=self.env_config,
                 ppo_config=self.ppo_config,
                 rnn_config=self.rnn_config,
-                train_config=self.train_config,
+                train_config=self.train_config,  # Use the instance
                 model_config=self.model_config,
                 obs_norm_config=self.obs_norm_config,
                 transformer_config=self.transformer_config,
                 device=self.device,
-                model_save_path=MODEL_SAVE_PATH,
-                load_checkpoint_path=self.train_config.LOAD_CHECKPOINT_PATH,
+                # model_save_path is now handled internally by CheckpointManager using getters
+                load_checkpoint_path=checkpoint_to_load,  # Pass the path determined at startup
             )
             print(f"RL components initialized in {time.time() - start_time:.2f}s")
         except Exception as e:
@@ -248,22 +353,20 @@ class MainApp:
             return
 
         if not self.is_process_running:
-            if self.trainer.global_step >= TOTAL_TRAINING_STEPS:
-                print(
-                    f"Training already completed ({self.trainer.global_step}/{TOTAL_TRAINING_STEPS} steps). Cannot restart."
-                )
-                self.status = "Training Complete"
-                return
-
+            # Allow starting even if training was previously completed
+            print("Starting process...")
             self.is_process_running = True
-            self.status = "Collecting Experience"
-
+            self.status = "Collecting Experience"  # Reset status
         else:
             print("Stopping process...")
             self.is_process_running = False
-            self._try_save_checkpoint()
+            self._try_save_checkpoint()  # Save progress on manual stop
+            # Check if training is complete *after* stopping
+            if self.trainer.global_step >= TOTAL_TRAINING_STEPS:
+                self.status = "Training Complete"
+            else:
+                self.status = "Ready"
             self.app_state = "MainMenu"
-            self.status = "Ready"
 
     def _request_cleanup(self):
         if self.is_process_running:
@@ -557,7 +660,8 @@ class MainApp:
                 print(f"Error closing stats recorder: {e}")
         print("[Cleanup] Deleting agent checkpoint file/dir...")
         try:
-            save_dir = os.path.dirname(MODEL_SAVE_PATH)
+            # Use getter for the current run's checkpoint directory
+            save_dir = get_run_checkpoint_dir()
             if os.path.isdir(save_dir):
                 import shutil
 
@@ -574,7 +678,9 @@ class MainApp:
         time.sleep(0.1)
         print("[Cleanup] Re-initializing RL components...")
         try:
-            self._initialize_rl_components(is_reinit=True)
+            # Pass is_reinit=True to ensure stats recorder is re-initialized correctly
+            # Pass None for checkpoint_to_load to ensure it starts fresh
+            self._initialize_rl_components(is_reinit=True, checkpoint_to_load=None)
             if self.demo_env:
                 self.demo_env.reset()
             print("[Cleanup] RL components re-initialized successfully.")
@@ -622,29 +728,38 @@ class MainApp:
 
         if self.is_process_running:
             try:
-                if self.trainer.global_step >= TOTAL_TRAINING_STEPS:
-                    print(
-                        f"\n--- Training Complete ({self.trainer.global_step}/{TOTAL_TRAINING_STEPS} steps) ---"
-                    )
-                    self.is_process_running = False
-                    self.app_state = "MainMenu"
-                    self.status = "Training Complete"
-                    self._try_save_checkpoint()
-                    return
+                # --- Removed automatic stop based on TOTAL_TRAINING_STEPS ---
+                # The training will now continue until manually stopped,
+                # even if the initial goal is reached.
+                # if self.trainer.global_step >= TOTAL_TRAINING_STEPS:
+                #     print(
+                #         f"\n--- Training Complete ({self.trainer.global_step}/{TOTAL_TRAINING_STEPS} steps) ---"
+                #     )
+                #     self.is_process_running = False
+                #     self.app_state = "MainMenu"
+                #     self.status = "Training Complete"
+                #     self._try_save_checkpoint()
+                #     return
+                # --- End of removed block ---
 
                 self.trainer.perform_training_iteration()
 
-                if self.trainer.global_step >= TOTAL_TRAINING_STEPS:
-                    print(
-                        f"\n--- Training Complete ({self.trainer.global_step}/{TOTAL_TRAINING_STEPS} steps) ---"
-                    )
-                    self.is_process_running = False
-                    self.app_state = "MainMenu"
+                # Check completion status *after* iteration for UI display, but don't stop automatically
+                if (
+                    self.trainer.global_step >= TOTAL_TRAINING_STEPS
+                    and self.status != "Training Complete"
+                ):
+                    # Update status only if it wasn't already set (e.g., by loading a completed run)
+                    # This allows the UI to show "Training Complete" but doesn't stop the process here.
                     self.status = "Training Complete"
-                    self._try_save_checkpoint()
-                    return
+                    print(
+                        f"--- Target steps reached ({self.trainer.global_step}/{TOTAL_TRAINING_STEPS}). Training continues until stopped. ---"
+                    )
+                elif (
+                    self.status != "Training Complete"
+                ):  # Don't overwrite "Training Complete" status
+                    self.status = self.trainer.get_current_phase()
 
-                self.status = self.trainer.get_current_phase()
                 self.update_progress_details = (
                     self.trainer.get_update_progress_details()
                 )
@@ -670,10 +785,13 @@ class MainApp:
             elif self.app_state == "MainMenu":
                 if self.cleanup_confirmation_active:
                     self.status = "Confirm Cleanup"
-                elif self.status != "Error" and self.status != "Training Complete":
+                # Check if training is complete when returning to main menu
+                elif self.trainer and self.trainer.global_step >= TOTAL_TRAINING_STEPS:
+                    self.status = "Training Complete"
+                elif self.status != "Error":  # Don't overwrite error status
                     self.status = "Ready"
             elif self.app_state == "Error":
-                pass
+                pass  # Keep error status
 
     def _render(self):
         """Renders the UI based on the current application state."""
@@ -712,7 +830,7 @@ class MainApp:
                 cleanup_message=self.cleanup_message,
                 last_cleanup_message_time=self.last_cleanup_message_time,
                 tensorboard_log_dir=(
-                    self.tensorboard_config.LOG_DIR
+                    self.tensorboard_config.LOG_DIR  # Use property which uses getter
                     if self.tensorboard_config.LOG_DIR
                     else None
                 ),
@@ -740,13 +858,15 @@ class MainApp:
         if self.trainer:
             print("Performing final trainer cleanup...")
             try:
+                # Save checkpoint on exit unless cleanup was active or error occurred
+                # Also save if training was completed.
                 save_on_exit = (
                     self.status != "Cleaning" and self.app_state != "Error"
                 ) or self.status == "Training Complete"
                 self.trainer.cleanup(save_final=save_on_exit)
             except Exception as final_cleanup_err:
                 print(f"Error during final trainer cleanup: {final_cleanup_err}")
-        elif self.stats_recorder:
+        elif self.stats_recorder:  # Close recorder even if trainer failed
             print("Closing stats recorder...")
             try:
                 if hasattr(self.stats_recorder, "close"):
@@ -845,17 +965,86 @@ class MainApp:
 
 # --- Main Execution Block ---
 if __name__ == "__main__":
-    os.makedirs(BASE_CHECKPOINT_DIR, exist_ok=True)
+    # --- Determine Run ID and Checkpoint Path BEFORE setting up logging ---
+    train_config_instance = TrainConfig()
+    explicit_load_path = train_config_instance.LOAD_CHECKPOINT_PATH
+    run_id_to_use: Optional[str] = None
+    checkpoint_path_to_load: Optional[str] = None
+
+    if explicit_load_path:
+        print(f"[Startup] Explicit checkpoint path provided: {explicit_load_path}")
+        if os.path.isfile(explicit_load_path):
+            checkpoint_path_to_load = explicit_load_path
+            try:
+                parent_dir = os.path.dirname(explicit_load_path)
+                potential_run_id = os.path.basename(parent_dir)
+                if potential_run_id.startswith("run_"):
+                    run_id_to_use = potential_run_id
+                    print(
+                        f"[Startup] Using run_id '{run_id_to_use}' from explicit path."
+                    )
+                else:
+                    print(
+                        "[Startup] Could not determine run_id from explicit path structure."
+                    )
+            except Exception:
+                print("[Startup] Error determining run_id from explicit path.")
+        else:
+            print(
+                f"[Startup] WARNING: Explicit checkpoint path not found: {explicit_load_path}. Starting new run."
+            )
+    else:
+        print(
+            f"[Startup] No explicit checkpoint path. Searching for latest run in: {BASE_CHECKPOINT_DIR}"
+        )
+        latest_run_id, latest_checkpoint_path = find_latest_run_and_checkpoint(
+            BASE_CHECKPOINT_DIR
+        )
+        if latest_run_id and latest_checkpoint_path:
+            print(
+                f"[Startup] Found latest run '{latest_run_id}' with checkpoint. Resuming."
+            )
+            run_id_to_use = latest_run_id
+            checkpoint_path_to_load = latest_checkpoint_path
+        elif latest_run_id:
+            print(
+                f"[Startup] Found latest run directory '{latest_run_id}' but no checkpoint. Starting new run."
+            )
+        else:
+            print("[Startup] No previous runs found. Starting new run.")
+
+    # Set the run_id (either new or resumed) in the config module
+    if run_id_to_use:
+        set_run_id(run_id_to_use)
+    else:
+        run_id_to_use = get_run_id()  # Generate a new one if none was found/set
+
+    # --- Now setup logging and directories using the determined run_id ---
+    current_run_checkpoint_dir = get_run_checkpoint_dir()
+    current_run_log_dir = get_run_log_dir()
+    current_console_log_dir = get_console_log_dir()
+
+    os.makedirs(BASE_CHECKPOINT_DIR, exist_ok=True)  # Ensure base dirs exist
     os.makedirs(BASE_LOG_DIR, exist_ok=True)
-    os.makedirs(RUN_LOG_DIR, exist_ok=True)
-    log_filepath = os.path.join(RUN_LOG_DIR, "console_output.log")
+    os.makedirs(current_run_checkpoint_dir, exist_ok=True)
+    os.makedirs(current_run_log_dir, exist_ok=True)
+    os.makedirs(current_console_log_dir, exist_ok=True)  # Ensure console log dir exists
+
+    log_filepath = os.path.join(current_console_log_dir, "console_output.log")
+    # --- TeeLogger Import ---
+    # Import TeeLogger *after* directories are ensured to exist
+    from logger import TeeLogger
+
     original_stdout, original_stderr = sys.stdout, sys.stderr
     logger = TeeLogger(log_filepath, original_stdout)
     sys.stdout, sys.stderr = logger, logger
+
+    # --- Start Application ---
     app_instance, exit_code = None, 0
     try:
         if run_pre_checks():
-            app_instance = MainApp()
+            # Pass the determined checkpoint path to the MainApp constructor
+            app_instance = MainApp(checkpoint_to_load=checkpoint_path_to_load)
             app_instance.run()
     except SystemExit as exit_err:
         print(f"Exiting due to SystemExit (Code: {getattr(exit_err, 'code', 'N/A')}).")

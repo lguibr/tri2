@@ -1,24 +1,8 @@
+# File: ui/panels/left_panel_components/pretrain_status_renderer.py
 import pygame
 from typing import Dict, Any, Tuple, Optional
 from config import YELLOW, LIGHTG, GOOGLE_COLORS
-
-
-def format_eta(seconds: Optional[float]) -> str:
-    """Formats seconds into a human-readable HH:MM:SS or MM:SS string."""
-    if seconds is None or seconds < 0:
-        return "N/A"
-    if seconds == float("inf") or seconds > 3600 * 24 * 30:
-        return ">1 month" 
-    seconds = int(seconds)
-    hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
-    secs = seconds % 60
-    if hours > 0:
-        return f"{hours}h {minutes:02d}m {secs:02d}s"
-    elif minutes > 0:
-        return f"{minutes}m {secs:02d}s"
-    else:
-        return f"{secs}s"
+from utils.helpers import format_eta  # Import from new location
 
 
 class PretrainStatusRenderer:
@@ -53,7 +37,7 @@ class PretrainStatusRenderer:
 
         overall_eta_str = format_eta(
             pretrain_info.get("overall_eta_seconds", pretrain_info.get("eta_seconds"))
-        ) 
+        )
         if phase == "Random Play":
             games = pretrain_info.get("games_played", 0)
             target = pretrain_info.get("target_games", 0)
@@ -111,6 +95,5 @@ class PretrainStatusRenderer:
                 self.screen.blit(detail_surface, detail_rect)
             current_y += line_height_detail
         current_y += 5  # Add final padding
-
 
         return current_y, stat_rects

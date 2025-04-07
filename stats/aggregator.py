@@ -1,3 +1,4 @@
+# File: stats/aggregator.py
 import time
 from collections import deque
 from typing import Deque, Dict, Any, Optional, List
@@ -30,6 +31,7 @@ class StatsAggregator:
 
         self.summary_avg_window = self.avg_windows[0]
 
+        # --- Deques for Plotting ---
         self.policy_losses: Deque[float] = deque(maxlen=plot_window)
         self.value_losses: Deque[float] = deque(maxlen=plot_window)
         self.entropies: Deque[float] = deque(maxlen=plot_window)
@@ -47,6 +49,7 @@ class StatsAggregator:
         self.lr_values: Deque[float] = deque(maxlen=plot_window)
         self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
 
+        # --- Scalar State Variables ---
         self.total_episodes = 0
         self.total_triangles_cleared = 0
         self.current_epsilon: float = 0.0
@@ -55,7 +58,9 @@ class StatsAggregator:
         self.current_global_step: int = 0
         self.current_sps: float = 0.0
         self.current_lr: float = 0.0
+        self.start_time: float = time.time()  # Initialize start time
 
+        # --- Best Value Tracking ---
         self.best_score: float = -float("inf")
         self.previous_best_score: float = -float("inf")
         self.best_score_step: int = 0
@@ -79,7 +84,7 @@ class StatsAggregator:
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
-        triangles_cleared: Optional[int] = None, 
+        triangles_cleared: Optional[int] = None,
     ) -> Dict[str, Any]:
         current_step = (
             global_step if global_step is not None else self.current_global_step
@@ -93,7 +98,7 @@ class StatsAggregator:
         if triangles_cleared is not None:
             self.episode_triangles_cleared.append(triangles_cleared)
             self.total_triangles_cleared += triangles_cleared
-        self.total_episodes = episode_num
+        self.total_episodes = episode_num  # Use the provided episode_num directly
 
         if episode_score > self.best_score:
             self.previous_best_score = self.best_score
@@ -198,9 +203,7 @@ class StatsAggregator:
             "entropy": safe_mean(self.entropies),
             "avg_max_q_window": safe_mean(self.avg_max_qs),
             "avg_game_score_window": safe_mean(self.game_scores),
-            "avg_triangles_cleared_window": safe_mean(
-                self.episode_triangles_cleared
-            ),  # Renamed key
+            "avg_triangles_cleared_window": safe_mean(self.episode_triangles_cleared),
             "avg_sps_window": safe_mean(self.sps_values, default=self.current_sps),
             "avg_lr_window": safe_mean(self.lr_values, default=self.current_lr),
             "total_episodes": self.total_episodes,
@@ -221,6 +224,7 @@ class StatsAggregator:
             "num_ep_scores": len(self.episode_scores),
             "num_losses": len(self.value_losses),
             "summary_avg_window_size": summary_window,
+            "start_time": self.start_time,  # Include start time in summary
         }
         return summary
 
@@ -233,7 +237,7 @@ class StatsAggregator:
             "entropy": self.entropies.copy(),
             "avg_max_qs": self.avg_max_qs.copy(),
             "game_scores": self.game_scores.copy(),
-            "episode_triangles_cleared": self.episode_triangles_cleared.copy(), 
+            "episode_triangles_cleared": self.episode_triangles_cleared.copy(),
             "sps_values": self.sps_values.copy(),
             "buffer_sizes": self.buffer_sizes.copy(),
             "beta_values": self.beta_values.copy(),
@@ -243,3 +247,150 @@ class StatsAggregator:
             "epsilon_values": self.epsilon_values.copy(),
         }
 
+    def state_dict(self) -> Dict[str, Any]:
+        """Returns the state of the aggregator for saving."""
+        state = {
+            # Deques (convert to list for saving)
+            "policy_losses": list(self.policy_losses),
+            "value_losses": list(self.value_losses),
+            "entropies": list(self.entropies),
+            "grad_norms": list(self.grad_norms),
+            "avg_max_qs": list(self.avg_max_qs),
+            "episode_scores": list(self.episode_scores),
+            "episode_lengths": list(self.episode_lengths),
+            "game_scores": list(self.game_scores),
+            "episode_triangles_cleared": list(self.episode_triangles_cleared),
+            "sps_values": list(self.sps_values),
+            "buffer_sizes": list(self.buffer_sizes),
+            "beta_values": list(self.beta_values),
+            "best_rl_score_history": list(self.best_rl_score_history),
+            "best_game_score_history": list(self.best_game_score_history),
+            "lr_values": list(self.lr_values),
+            "epsilon_values": list(self.epsilon_values),
+            # Scalar State Variables
+            "total_episodes": self.total_episodes,
+            "total_triangles_cleared": self.total_triangles_cleared,
+            "current_epsilon": self.current_epsilon,
+            "current_beta": self.current_beta,
+            "current_buffer_size": self.current_buffer_size,
+            "current_global_step": self.current_global_step,
+            "current_sps": self.current_sps,
+            "current_lr": self.current_lr,
+            "start_time": self.start_time,  # Save start time
+            # Best Value Tracking
+            "best_score": self.best_score,
+            "previous_best_score": self.previous_best_score,
+            "best_score_step": self.best_score_step,
+            "best_game_score": self.best_game_score,
+            "previous_best_game_score": self.previous_best_game_score,
+            "best_game_score_step": self.best_game_score_step,
+            "best_value_loss": self.best_value_loss,
+            "previous_best_value_loss": self.previous_best_value_loss,
+            "best_value_loss_step": self.best_value_loss_step,
+            # Config (optional, but useful for consistency check)
+            "plot_window": self.plot_window,
+            "avg_windows": self.avg_windows,
+        }
+        return state
+
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        """Loads the state of the aggregator from a dictionary."""
+        print("[StatsAggregator] Loading state...")
+        # Restore Deques (recreate with maxlen)
+        self.plot_window = state_dict.get("plot_window", self.plot_window)
+        deque_keys = [
+            "policy_losses",
+            "value_losses",
+            "entropies",
+            "grad_norms",
+            "avg_max_qs",
+            "episode_scores",
+            "episode_lengths",
+            "game_scores",
+            "episode_triangles_cleared",
+            "sps_values",
+            "buffer_sizes",
+            "beta_values",
+            "best_rl_score_history",
+            "best_game_score_history",
+            "lr_values",
+            "epsilon_values",
+        ]
+        for key in deque_keys:
+            if key in state_dict:
+                try:
+                    # Ensure data is list or tuple before creating deque
+                    data = state_dict[key]
+                    if isinstance(data, (list, tuple)):
+                        setattr(self, key, deque(data, maxlen=self.plot_window))
+                    else:
+                        print(
+                            f"  -> Warning: Invalid type for deque '{key}' in state_dict: {type(data)}. Skipping."
+                        )
+                except Exception as e:
+                    print(f"  -> Error loading deque '{key}': {e}. Resetting.")
+                    setattr(self, key, deque(maxlen=self.plot_window))
+            else:
+                print(
+                    f"  -> Warning: Deque '{key}' not found in state_dict. Resetting."
+                )
+                setattr(self, key, deque(maxlen=self.plot_window))
+
+        # Restore Scalar State Variables
+        scalar_keys = [
+            "total_episodes",
+            "total_triangles_cleared",
+            "current_epsilon",
+            "current_beta",
+            "current_buffer_size",
+            "current_global_step",
+            "current_sps",
+            "current_lr",
+            "start_time",  # Load start time
+        ]
+        # Use current time as default for start_time if not found
+        default_values = {"start_time": time.time()}
+        for key in scalar_keys:
+            if key in state_dict:
+                setattr(self, key, state_dict[key])
+            else:
+                default_val = default_values.get(
+                    key, 0.0 if isinstance(getattr(self, key, 0.0), float) else 0
+                )
+                setattr(self, key, default_val)
+                print(
+                    f"  -> Warning: Scalar '{key}' not found in state_dict. Using default ({default_val})."
+                )
+
+        # Restore Best Value Tracking
+        best_value_keys = [
+            "best_score",
+            "previous_best_score",
+            "best_score_step",
+            "best_game_score",
+            "previous_best_game_score",
+            "best_game_score_step",
+            "best_value_loss",
+            "previous_best_value_loss",
+            "best_value_loss_step",
+        ]
+        for key in best_value_keys:
+            if key in state_dict:
+                setattr(self, key, state_dict[key])
+            else:
+                print(
+                    f"  -> Warning: Best value key '{key}' not found in state_dict. Using default."
+                )
+
+        # Restore config (optional)
+        self.avg_windows = state_dict.get("avg_windows", self.avg_windows)
+        self.summary_avg_window = self.avg_windows[0] if self.avg_windows else 100
+
+        print("[StatsAggregator] State loaded.")
+        # Ensure current_global_step is consistent if loaded elsewhere (e.g., CheckpointManager)
+        # This value might be overwritten by CheckpointManager's global_step later.
+        print(f"  -> Loaded total_episodes: {self.total_episodes}")
+        print(f"  -> Loaded best_score: {self.best_score}")
+        print(
+            f"  -> Loaded start_time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.start_time))}"
+        )

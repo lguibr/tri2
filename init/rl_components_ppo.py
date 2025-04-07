@@ -1,3 +1,4 @@
+# File: init/rl_components_ppo.py
 import traceback
 import numpy as np
 import torch
@@ -13,6 +14,7 @@ from config import (
     TensorBoardConfig,
     ObsNormConfig,
     TransformerConfig,
+    get_run_log_dir,  # Import getter for TB log dir
 )
 from environment.game_state import GameState, StateType
 from agent.ppo_agent import PPOAgent
@@ -130,12 +132,14 @@ def initialize_stats_recorder(
     model_for_graph_cpu = None
     dummy_input_tuple = None
     print("[Stats Init] Model graph logging DISABLED.")
-    print(f"Using TensorBoard Logger (Log Dir: {tb_config.LOG_DIR})")
+    # Use the getter for the log directory
+    current_run_log_dir = get_run_log_dir()
+    print(f"Using TensorBoard Logger (Log Dir: {current_run_log_dir})")
     try:
         tb_recorder = TensorBoardStatsRecorder(
             aggregator=stats_aggregator,
             console_recorder=console_recorder,
-            log_dir=tb_config.LOG_DIR,
+            log_dir=current_run_log_dir,  # Pass the dynamically obtained log dir
             hparam_dict=(config_dict if not is_reinit else None),
             model_for_graph=model_for_graph_cpu,
             dummy_input_for_graph=dummy_input_tuple,
@@ -168,7 +172,7 @@ def initialize_trainer(
     obs_norm_config: ObsNormConfig,
     transformer_config: TransformerConfig,
     device: torch.device,
-    model_save_path: str,
+    # model_save_path: str, # Removed parameter
     load_checkpoint_path: Optional[str],
 ) -> Trainer:
     """Initializes the PPO Trainer."""
@@ -184,7 +188,7 @@ def initialize_trainer(
         model_config=model_config,
         obs_norm_config=obs_norm_config,
         transformer_config=transformer_config,
-        model_save_path=model_save_path,
+        # model_save_path=model_save_path, # Removed argument
         load_checkpoint_path=load_checkpoint_path,
         device=device,
     )

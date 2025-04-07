@@ -1,4 +1,6 @@
+# File: ui/panels/left_panel_components/info_text_renderer.py
 import pygame
+import time  # Added for time formatting
 from typing import Dict, Any, Tuple
 
 from config import (
@@ -50,9 +52,22 @@ class InfoTextRenderer:
             device_type_str = DEVICE.type.upper()
 
         network_desc = self._get_network_description()
+
+        # Get start time from summary
+        start_time_unix = stats_summary.get("start_time", 0.0)
+        start_time_str = "N/A"
+        if start_time_unix > 0:
+            try:
+                start_time_str = time.strftime(
+                    "%Y-%m-%d %H:%M:%S", time.localtime(start_time_unix)
+                )
+            except ValueError:  # Handle potential invalid timestamp
+                start_time_str = "Invalid Date"
+
         info_lines = [
             ("Device", device_type_str),
             ("Network", network_desc),
+            ("Run Started", start_time_str),  # Add run start time
         ]
 
         last_y = y_start
@@ -85,7 +100,7 @@ class InfoTextRenderer:
                 combined_rect.width = min(
                     combined_rect.width, panel_width - x_pos_key - 10
                 )
-                stat_rects[key] = combined_rect
+                stat_rects[key] = combined_rect  # Use key for tooltip lookup
                 last_y = combined_rect.bottom
             except Exception as e:
                 print(f"Error rendering stat line '{key}': {e}")

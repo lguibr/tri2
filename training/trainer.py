@@ -1,3 +1,4 @@
+# File: training/trainer.py
 import time
 import torch
 import numpy as np
@@ -21,10 +22,13 @@ from config import (
     VisConfig,
     RewardConfig,
     TOTAL_TRAINING_STEPS,
+    BASE_CHECKPOINT_DIR,  # Import base checkpoint dir
+    get_run_checkpoint_dir,  # Import getter for run-specific dir
 )
 from environment.game_state import GameState
 from agent.ppo_agent import PPOAgent
 from stats.stats_recorder import StatsRecorderBase
+from stats.aggregator import StatsAggregator
 from .rollout_collector import RolloutCollector
 from .checkpoint_manager import CheckpointManager
 from .training_utils import get_env_image_as_numpy
@@ -45,14 +49,26 @@ class Trainer:
         model_config: ModelConfig,
         obs_norm_config: ObsNormConfig,
         transformer_config: TransformerConfig,
-        model_save_path: str,
+        # model_save_path: str, # Removed - handled by CheckpointManager
         device: torch.device,
-        load_checkpoint_path: Optional[str] = None,
+        load_checkpoint_path: Optional[
+            str
+        ] = None,  # Explicit path from config or auto-detected
     ):
         print("[Trainer-PPO] Initializing...")
         self.envs = envs
         self.agent = agent
         self.stats_recorder = stats_recorder
+        # --- Get the StatsAggregator instance from the recorder ---
+        if not hasattr(stats_recorder, "aggregator") or not isinstance(
+            stats_recorder.aggregator, StatsAggregator
+        ):
+            raise TypeError(
+                "StatsRecorder provided to Trainer must have a 'aggregator' attribute of type StatsAggregator."
+            )
+        self.stats_aggregator: StatsAggregator = stats_recorder.aggregator
+        # ---
+
         self.num_envs = env_config.NUM_ENVS
         self.device = device
         self.env_config = env_config
@@ -66,6 +82,7 @@ class Trainer:
         self.tb_config = TensorBoardConfig()
         self.vis_config = VisConfig()
 
+        # Initialize RolloutCollector first, as CheckpointManager needs its obs_rms_dict
         self.rollout_collector = RolloutCollector(
             envs=self.envs,
             agent=self.agent,
@@ -80,17 +97,35 @@ class Trainer:
         )
         self.rollout_storage = self.rollout_collector.rollout_storage
 
+        # Initialize CheckpointManager - pass the StatsAggregator instance
+        # Pass base checkpoint dir and the specific dir for the current run
         self.checkpoint_manager = CheckpointManager(
             agent=self.agent,
-            model_save_path=model_save_path,
-            load_checkpoint_path=load_checkpoint_path,
+            stats_aggregator=self.stats_aggregator,
+            base_checkpoint_dir=BASE_CHECKPOINT_DIR,  # Pass base dir for searching
+            run_checkpoint_dir=get_run_checkpoint_dir(),  # Pass current run's dir for saving
+            load_checkpoint_path_config=load_checkpoint_path,  # Pass explicit/auto path
             device=self.device,
             obs_rms_dict=self.rollout_collector.get_obs_rms_dict(),
         )
+
+        # --- Load Checkpoint ---
+        # CheckpointManager determines the path, now we explicitly call load
+        if self.checkpoint_manager.get_checkpoint_path_to_load():
+            self.checkpoint_manager.load_checkpoint()
+        else:
+            print("[Trainer] No checkpoint found or specified to load.")
+            # Ensure aggregator start time is current time if starting fresh
+            self.stats_aggregator.start_time = time.time()
+
+        # Get initial state AFTER CheckpointManager has potentially loaded a checkpoint
         self.global_step, initial_episode_count = (
             self.checkpoint_manager.get_initial_state()
         )
+        # Set the episode count in the collector based on loaded state
         self.rollout_collector.episode_count = initial_episode_count
+        # Ensure aggregator's internal step counter is also synced if loaded
+        self.stats_aggregator.current_global_step = self.global_step
 
         self.current_update_epoch = 0
         self.current_minibatch_index = 0
@@ -107,11 +142,10 @@ class Trainer:
         self.last_checkpoint_step = self.global_step
         self.rollouts_completed_since_last_checkpoint = 0
         self.steps_collected_this_rollout = 0
-        self.current_phase = "Collecting"  # Start directly in collecting phase
+        self.current_phase = "Collecting"
 
         self._log_initial_state()
         print("[Trainer-PPO] Initialization complete.")
-
 
     def get_current_phase(self) -> str:
         """Returns the current phase ('Collecting' or 'Updating')."""
@@ -129,13 +163,15 @@ class Trainer:
             "epoch_progress": 0.0,
             "current_epoch": 0,
             "total_epochs": 0,
-            "phase": "Idle", 
+            "phase": "Idle",
+            "update_start_time": 0.0,
+            "num_minibatches_per_epoch": 0,
+            "current_minibatch_index": 0,
         }
         if self.current_phase == "Updating":
             total_epochs = self.ppo_config.PPO_EPOCHS
             total_steps_in_epoch = self.num_minibatches_per_epoch
             current_step_in_epoch = self.current_minibatch_index
-            # Ensure total_update_steps is calculated correctly
             if self.total_update_steps == 0 and total_steps_in_epoch > 0:
                 self.total_update_steps = total_steps_in_epoch * total_epochs
 
@@ -148,10 +184,12 @@ class Trainer:
                 {
                     "overall_progress": overall_progress,
                     "epoch_progress": epoch_progress,
-                    "current_epoch": self.current_update_epoch
-                    + 1,  # 1-based for display
+                    "current_epoch": self.current_update_epoch + 1,
                     "total_epochs": total_epochs,
                     "phase": "Train Update",
+                    "update_start_time": self.update_start_time,
+                    "num_minibatches_per_epoch": self.num_minibatches_per_epoch,
+                    "current_minibatch_index": self.current_minibatch_index,
                 }
             )
         elif self.current_phase == "Collecting":
@@ -193,13 +231,13 @@ class Trainer:
 
         if schedule_type == "linear":
             end_fraction = getattr(self.ppo_config, "LR_LINEAR_END_FRACTION", 0.0)
-            decay_fraction = max(0.0, 1.0 - current_progress)
+            decay_fraction = max(0.0, 1.0 - min(1.0, current_progress))
             new_lr = initial_lr * (end_fraction + (1.0 - end_fraction) * decay_fraction)
         elif schedule_type == "cosine":
             min_factor = getattr(self.ppo_config, "LR_COSINE_MIN_FACTOR", 0.01)
             min_lr = initial_lr * min_factor
             new_lr = min_lr + 0.5 * (initial_lr - min_lr) * (
-                1 + math.cos(math.pi * current_progress)
+                1 + math.cos(math.pi * min(1.0, current_progress))
             )
         else:
             new_lr = self._get_current_lr()
@@ -209,8 +247,9 @@ class Trainer:
 
         try:
             if hasattr(self.agent, "optimizer") and self.agent.optimizer.param_groups:
-                for param_group in self.agent.optimizer.param_groups:
-                    param_group["lr"] = new_lr
+                if abs(self.agent.optimizer.param_groups[0]["lr"] - new_lr) > 1e-9:
+                    for param_group in self.agent.optimizer.param_groups:
+                        param_group["lr"] = new_lr
         except Exception as e:
             print(f"Warning: Unexpected error updating LR: {e}")
 
@@ -219,7 +258,7 @@ class Trainer:
     def _prepare_regular_update(self):
         """Prepares data and state for the regular PPO update phase."""
         self.current_phase = "Updating"
-        self.update_start_time = time.time()  # Start timer here
+        self.update_start_time = time.time()
         self.rollout_collector.compute_advantages_for_storage()
         self.rollout_storage.to(self.agent.device)
         self.current_update_data = self.rollout_storage.get_data_for_update()
@@ -230,7 +269,6 @@ class Trainer:
             self.steps_collected_this_rollout = 0
             return False
 
-        # Normalize advantages (do it once per rollout)
         advantages = self.current_update_data["advantages"]
         self.current_update_data["advantages"] = (advantages - advantages.mean()) / (
             advantages.std() + 1e-8
@@ -238,14 +276,12 @@ class Trainer:
 
         num_samples = self.current_update_data["actions"].shape[0]
         batch_size = self.ppo_config.MINIBATCH_SIZE
-        # Calculate effective number of minibatches, excluding those < 2
         self.num_minibatches_per_epoch = 0
         for i in range(0, num_samples, batch_size):
-            if i + batch_size <= num_samples:  # Full minibatch
+            if i + batch_size <= num_samples:
                 self.num_minibatches_per_epoch += 1
-            elif num_samples - i >= 2:  # Partial minibatch with size >= 2
+            elif num_samples - i >= 2:
                 self.num_minibatches_per_epoch += 1
-            # else: skip last minibatch if size < 2
 
         self.total_update_steps = (
             self.num_minibatches_per_epoch * self.ppo_config.PPO_EPOCHS
@@ -264,54 +300,24 @@ class Trainer:
             self.current_phase = "Collecting"
             return
 
-        # Check if starting a new epoch
         if self.current_minibatch_index == 0:
             np.random.shuffle(self.update_indices)
             self.update_metrics_accumulator = defaultdict(float)
             self.num_updates_this_epoch = 0
 
-        # Get minibatch indices
         start_idx = self.current_minibatch_index * self.ppo_config.MINIBATCH_SIZE
         end_idx = start_idx + self.ppo_config.MINIBATCH_SIZE
         minibatch_indices = self.update_indices[start_idx:end_idx]
 
         if len(minibatch_indices) < 2:
-            # print(f"Skipping regular minibatch {self.current_minibatch_index} (size {len(minibatch_indices)} < 2)")
-            self.current_minibatch_index += 1  # Still increment index
-            # Check if this skipped minibatch finishes the epoch
+            self.current_minibatch_index += 1
             if self.current_minibatch_index >= self.num_minibatches_per_epoch:
                 self.current_update_epoch += 1
                 self.current_minibatch_index = 0
                 if self.current_update_epoch >= self.ppo_config.PPO_EPOCHS:
-                    # Update finished even if last mb was skipped
-                    update_duration = time.time() - self.update_start_time
-                    # Average metrics over all minibatches processed in the update phase
-                    total_updates_in_phase = (
-                        self.num_updates_this_epoch
-                    )  # Use actual count
-                    avg_metrics = {
-                        k: v / max(1, total_updates_in_phase)
-                        for k, v in self.update_metrics_accumulator.items()
-                    }
-                    step_record_data_update = {
-                        "update_time": update_duration,
-                        "lr": self._get_current_lr(),
-                        "global_step": self.global_step,
-                    }
-                    step_record_data_update.update(avg_metrics)
-                    self.stats_recorder.record_step(step_record_data_update)
-                    self.rollout_storage.after_update()
-                    self.steps_collected_this_rollout = 0
-                    self.rollouts_completed_since_last_checkpoint += 1
-                    self.current_phase = "Collecting"
-                    self._update_learning_rate()
-                    self.maybe_save_checkpoint()
-                    self._maybe_log_image()
-                    self.current_update_data = None
-                    gc.collect()
-            return  # Skip the rest of the loop for this small minibatch
+                    self._finalize_update_phase()
+            return
 
-        # Extract minibatch data
         minibatch_tensors = {
             key: self.current_update_data[key][minibatch_indices]
             for key in [
@@ -326,7 +332,6 @@ class Trainer:
             ]
         }
 
-        # Perform one minibatch update
         try:
             minibatch_metrics = self.agent.update_minibatch(minibatch_tensors)
             for k, v in minibatch_metrics.items():
@@ -337,47 +342,49 @@ class Trainer:
                 f"CRITICAL ERROR during agent.update_minibatch (Epoch {self.current_update_epoch+1}, MB {self.current_minibatch_index}): {e}"
             )
             traceback.print_exc()
-            self.current_phase = "Collecting"
-            self.steps_collected_this_rollout = 0
-            self.current_update_data = None
-            self.rollout_storage.after_update()
+            self._handle_update_error()
             return
 
-        # Increment minibatch index
         self.current_minibatch_index += 1
 
-        # Check if epoch is finished
         if self.current_minibatch_index >= self.num_minibatches_per_epoch:
             self.current_update_epoch += 1
             self.current_minibatch_index = 0
-
-            # Check if all epochs are done
             if self.current_update_epoch >= self.ppo_config.PPO_EPOCHS:
-                # --- Update finished ---
-                update_duration = time.time() - self.update_start_time
-                # Average metrics over all minibatches processed in the update phase
-                total_updates_in_phase = self.num_updates_this_epoch  # Use actual count
-                avg_metrics = {
-                    k: v / max(1, total_updates_in_phase)
-                    for k, v in self.update_metrics_accumulator.items()
-                }
-                step_record_data_update = {
-                    "update_time": update_duration,
-                    "lr": self._get_current_lr(),
-                    "global_step": self.global_step,
-                }
-                step_record_data_update.update(avg_metrics)
-                self.stats_recorder.record_step(step_record_data_update)
+                self._finalize_update_phase()
 
-                self.rollout_storage.after_update()
-                self.steps_collected_this_rollout = 0
-                self.rollouts_completed_since_last_checkpoint += 1
-                self.current_phase = "Collecting"
-                self._update_learning_rate()
-                self.maybe_save_checkpoint()
-                self._maybe_log_image()
-                self.current_update_data = None
-                gc.collect()
+    def _finalize_update_phase(self):
+        """Handles logic after all update epochs are completed."""
+        update_duration = time.time() - self.update_start_time
+        total_updates_in_phase = self.num_updates_this_epoch
+        avg_metrics = {
+            k: v / max(1, total_updates_in_phase)
+            for k, v in self.update_metrics_accumulator.items()
+        }
+        step_record_data_update = {
+            "update_time": update_duration,
+            "lr": self._get_current_lr(),
+            "global_step": self.global_step,
+        }
+        step_record_data_update.update(avg_metrics)
+        self.stats_recorder.record_step(step_record_data_update)
+
+        self.rollout_storage.after_update()
+        self.steps_collected_this_rollout = 0
+        self.rollouts_completed_since_last_checkpoint += 1
+        self.current_phase = "Collecting"
+        self._update_learning_rate()
+        self.maybe_save_checkpoint()
+        self._maybe_log_image()
+        self.current_update_data = None
+        gc.collect()
+
+    def _handle_update_error(self):
+        """Handles errors during the update phase."""
+        self.current_phase = "Collecting"
+        self.steps_collected_this_rollout = 0
+        self.current_update_data = None
+        self.rollout_storage.after_update()  # Reset storage even on error
 
     # --- Main Loop Logic ---
 
@@ -385,7 +392,6 @@ class Trainer:
         """Performs one iteration: one step of collection OR one minibatch of update."""
         step_start_time = time.time()
 
-        # --- Regular Training Logic ---
         if self.current_phase == "Collecting":
             steps_collected_this_iter = self.rollout_collector.collect_one_step(
                 self.global_step
@@ -399,7 +405,6 @@ class Trainer:
             ):
                 if not self._prepare_regular_update():
                     self.steps_collected_this_rollout = 0
-                # else: update_start_time is set in _prepare_regular_update
 
             step_duration = time.time() - step_start_time
             step_record_data_timing = {
@@ -425,7 +430,7 @@ class Trainer:
                 f"[Trainer] Saving checkpoint. Force: {force_save}, FreqMet: {should_save_freq}, Rollouts Since Last: {self.rollouts_completed_since_last_checkpoint}"
             )
             self.checkpoint_manager.save_checkpoint(
-                self.global_step, self.rollout_collector.get_episode_count()
+                self.global_step, self.stats_aggregator.total_episodes
             )
             self.rollouts_completed_since_last_checkpoint = 0
             self.last_checkpoint_step = self.global_step
@@ -471,7 +476,7 @@ class Trainer:
             print("[Trainer-PPO] Saving final checkpoint...")
             self.checkpoint_manager.save_checkpoint(
                 self.global_step,
-                self.rollout_collector.get_episode_count(),
+                self.stats_aggregator.total_episodes,
                 is_final=True,
             )
         else:

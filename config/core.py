@@ -1,3 +1,4 @@
+# File: config/core.py
 import torch
 from typing import List, Tuple, Optional
 
@@ -87,9 +88,9 @@ class RewardConfig:
 class PPOConfig:
     LEARNING_RATE = 2.5e-4
     ADAM_EPS = 1e-5
-    NUM_STEPS_PER_ROLLOUT = 2048  # Reduced for faster updates
-    PPO_EPOCHS = 6
-    NUM_MINIBATCHES = 512  # Adjusted to give minibatch size 512 (128*2048/512=512)
+    NUM_STEPS_PER_ROLLOUT = 256  # Reduced significantly for short run
+    PPO_EPOCHS = 4  # Slightly reduced epochs
+    NUM_MINIBATCHES = 64  # Adjusted for 128 envs * 256 steps / 64 = 512 MB size
     CLIP_PARAM = 0.2
     GAMMA = 0.995
     GAE_LAMBDA = 0.95
@@ -154,7 +155,7 @@ class TransformerConfig:
 
 
 class TrainConfig:
-    CHECKPOINT_SAVE_FREQ = 10  # Save every 10 rollouts (more frequent)
+    CHECKPOINT_SAVE_FREQ = 3  # Save every 3 rollouts (very frequent for short run)
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
 
@@ -193,21 +194,19 @@ class ModelConfig:
 
 class StatsConfig:
     STATS_AVG_WINDOW: List[int] = [
-        50,
-        100,
-        500,
-        1000,
-        2000,  # Adjusted for shorter training
+        10,
+        25,
+        50,  # Reduced windows for short run
     ]
-    CONSOLE_LOG_FREQ = 5  # Log every 5 rollouts (more frequent)
-    PLOT_DATA_WINDOW = 100_000
+    CONSOLE_LOG_FREQ = 2  # Log every 2 rollouts (very frequent)
+    PLOT_DATA_WINDOW = 10_000  # Reduced plot window slightly
 
 
 class TensorBoardConfig:
     LOG_HISTOGRAMS = False
-    HISTOGRAM_LOG_FREQ = 50  # Log every 50 rollouts
+    HISTOGRAM_LOG_FREQ = 10  # Log every 10 rollouts
     LOG_IMAGES = False
-    IMAGE_LOG_FREQ = 50  # Log every 50 rollouts
+    IMAGE_LOG_FREQ = 10  # Log every 10 rollouts
     LOG_DIR: Optional[str] = None
     LOG_SHAPE_PLACEMENT_Q_VALUES = False
 

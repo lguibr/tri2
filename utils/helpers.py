@@ -1,10 +1,12 @@
+# File: utils/helpers.py
 import torch
 import numpy as np
 import random
 import os
 import pickle
 import cloudpickle
-from typing import Union, Any
+import math  # Added for format_eta
+from typing import Union, Any, Optional  # Added Optional for format_eta
 
 
 def get_device() -> torch.device:
@@ -29,9 +31,11 @@ def get_device() -> torch.device:
         # This line should execute once fixed
         print(f"CUDA Device Name: {torch.cuda.get_device_name(0)}")
     elif device_str == "mps":
-        print("MPS device found on MacOS.") # Won't execute on PC
+        print("MPS device found on MacOS.")  # Won't execute on PC
     else:
-        print("No CUDA or MPS device found, falling back to CPU.") # This is what's happening now
+        print(
+            "No CUDA or MPS device found, falling back to CPU."
+        )  # This is what's happening now
 
     return torch.device(device_str)
 
@@ -98,3 +102,21 @@ def load_object(filepath: str) -> Any:
     except Exception as e:
         print(f"Error loading object from {filepath}: {e}")
         raise e  # Re-raise after logging
+
+
+def format_eta(seconds: Optional[float]) -> str:
+    """Formats seconds into a human-readable HH:MM:SS or MM:SS string."""
+    if seconds is None or not np.isfinite(seconds) or seconds < 0:
+        return "N/A"
+    if seconds > 3600 * 24 * 30:  # Cap at roughly a month
+        return ">1 month"
+    seconds = int(seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m {secs:02d}s"
+    elif minutes > 0:
+        return f"{minutes}m {secs:02d}s"
+    else:
+        return f"{secs}s"
