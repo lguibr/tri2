@@ -44,48 +44,37 @@ except Exception as e:
 
 
 File: app_init.py
-# File: app_init.py
-# File: app_init.py
 import pygame
 import time
 import traceback
 import sys
 import torch
 import torch.optim as optim
-import queue
-from typing import TYPE_CHECKING, List, Optional, Dict, Any
+from typing import TYPE_CHECKING, List, Optional
 
 from config import (
-    VisConfig,
-    EnvConfig,
-    RNNConfig,
     ModelConfig,
     StatsConfig,
-    TrainConfig,
-    TensorBoardConfig,
     DemoConfig,
-    TransformerConfig,
     MCTSConfig,
-    RANDOM_SEED,
     BASE_CHECKPOINT_DIR,
     get_run_checkpoint_dir,
-    DEVICE,
 )
 from environment.game_state import GameState
 from stats.stats_recorder import StatsRecorderBase
 from stats.aggregator import StatsAggregator
+from stats.simple_stats_recorder import SimpleStatsRecorder
 from ui.renderer import UIRenderer
 from ui.input_handler import InputHandler
 from training.checkpoint_manager import CheckpointManager
 from app_state import AppState
-from mcts import MCTS  # Import MCTS
+from mcts import MCTS
 from agent.alphazero_net import AlphaZeroNet
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
-    from mcts.node import MCTSNode
 
 
 class AppInitializer:
@@ -96,17 +85,13 @@ class AppInitializer:
         # Config instances
         self.vis_config = app.vis_config
         self.env_config = app.env_config
-        self.rnn_config = RNNConfig()
         self.train_config = app.train_config_instance
         self.model_config = ModelConfig()
         self.stats_config = StatsConfig()
-        self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
-        self.transformer_config = TransformerConfig()
         self.mcts_config = MCTSConfig()
 
         # Components to be initialized
-        self.envs: List[GameState] = []
         self.agent: Optional[AlphaZeroNet] = None
         self.optimizer: Optional[optim.Optimizer] = None
         self.stats_recorder: Optional[StatsRecorderBase] = None
@@ -114,54 +99,16 @@ class AppInitializer:
         self.demo_env: Optional[GameState] = None
         self.agent_param_count: int = 0
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.mcts: Optional[MCTS] = None  # Added MCTS instance
-        # self.mcts_root_node: Optional["MCTSNode"] = None # MCTS Vis removed
-        self.self_play_worker: Optional[SelfPlayWorker] = None
+        self.mcts: Optional[MCTS] = None
+        self.self_play_workers: List[SelfPlayWorker] = []
         self.training_worker: Optional[TrainingWorker] = None
 
     def initialize_all(self, is_reinit: bool = False):
         """Initializes all core components."""
         try:
-            if self.app.device.type == "cuda":
-                try:
-                    self.app.total_gpu_memory_bytes = torch.cuda.get_device_properties(
-                        self.app.device
-                    ).total_memory
-                    print(
-                        f"Total GPU Memory: {self.app.total_gpu_memory_bytes / (1024**3):.2f} GB"
-                    )
-                except Exception as e:
-                    print(f"Warning: Could not get total GPU memory: {e}")
-
+            self._check_gpu_memory()
             if not is_reinit:
-                self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
-                # MCTS Visualizer removed
-                # if self.app.renderer.mcts_visualizer and self.app.renderer.game_area:
-                #     self.app.renderer.mcts_visualizer.set_game_area_renderer(
-                #         self.app.renderer.game_area
-                #     )
-
-                self.app.renderer.render_all(
-                    app_state=self.app.app_state.value,
-                    is_process_running=False,
-                    status=self.app.status,
-                    stats_summary={},
-                    envs=[],
-                    num_envs=0,
-                    env_config=self.env_config,
-                    cleanup_confirmation_active=False,
-                    cleanup_message="",
-                    last_cleanup_message_time=0,
-                    tensorboard_log_dir=None,
-                    plot_data={},
-                    demo_env=None,
-                    update_progress_details={},
-                    agent_param_count=0,
-                    worker_counts={},
-                    # mcts_root_node=None, # MCTS Vis removed
-                )
-                pygame.display.flip()
-                pygame.time.delay(100)
+                self._initialize_ui_early()
 
             self.initialize_rl_components(
                 is_reinit=is_reinit, checkpoint_to_load=self.app.checkpoint_to_load
@@ -171,31 +118,72 @@ class AppInitializer:
                 self.initialize_demo_env()
                 self.initialize_input_handler()
 
-            if self.agent:
-                try:
-                    self.agent_param_count = sum(
-                        p.numel() for p in self.agent.parameters() if p.requires_grad
-                    )
-                except Exception as e:
-                    print(f"Warning: Could not calculate agent parameters: {e}")
-                    self.agent_param_count = 0
-
+            self._calculate_agent_params()
             self.initialize_workers()
 
         except Exception as init_err:
-            print(f"FATAL ERROR during component initialization: {init_err}")
-            traceback.print_exc()
-            if self.app.renderer:
-                try:
-                    self.app.app_state = AppState.ERROR
-                    self.app.status = "Initialization Failed"
-                    self.app.renderer._render_error_screen(self.app.status)
-                    pygame.display.flip()
-                    time.sleep(5)
-                except Exception:
-                    pass
-            pygame.quit()
-            sys.exit(1)
+            self._handle_init_error(init_err)
+
+    def _check_gpu_memory(self):
+        """Checks and prints total GPU memory if available."""
+        if self.app.device.type == "cuda":
+            try:
+                props = torch.cuda.get_device_properties(self.app.device)
+                self.app.total_gpu_memory_bytes = props.total_memory
+                print(f"Total GPU Memory: {props.total_memory / (1024**3):.2f} GB")
+            except Exception as e:
+                print(f"Warning: Could not get total GPU memory: {e}")
+
+    def _initialize_ui_early(self):
+        """Initializes the renderer and performs an initial render."""
+        self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
+        self.app.renderer.render_all(
+            app_state=self.app.app_state.value,
+            is_process_running=False,
+            status=self.app.status,
+            stats_summary={},
+            envs=[],
+            num_envs=0,
+            env_config=self.env_config,
+            cleanup_confirmation_active=False,
+            cleanup_message="",
+            last_cleanup_message_time=0,
+            plot_data={},
+            demo_env=None,
+            update_progress_details={},
+            agent_param_count=0,
+            worker_counts={},
+            best_game_state_data=None,
+        )
+        pygame.display.flip()
+        pygame.time.delay(100)  # Allow UI to update
+
+    def _calculate_agent_params(self):
+        """Calculates the number of trainable parameters in the agent."""
+        if self.agent:
+            try:
+                self.agent_param_count = sum(
+                    p.numel() for p in self.agent.parameters() if p.requires_grad
+                )
+            except Exception as e:
+                print(f"Warning: Could not calculate agent parameters: {e}")
+                self.agent_param_count = 0
+
+    def _handle_init_error(self, error: Exception):
+        """Handles fatal errors during initialization."""
+        print(f"FATAL ERROR during component initialization: {error}")
+        traceback.print_exc()
+        if self.app.renderer:
+            try:
+                self.app.app_state = AppState.ERROR
+                self.app.status = "Initialization Failed"
+                self.app.renderer._render_error_screen(self.app.status)
+                pygame.display.flip()
+                time.sleep(5)
+            except Exception:
+                pass
+        pygame.quit()
+        sys.exit(1)
 
     def initialize_rl_components(
         self, is_reinit: bool = False, checkpoint_to_load: Optional[str] = None
@@ -204,90 +192,74 @@ class AppInitializer:
         print(f"Initializing AlphaZero components... Re-init: {is_reinit}")
         start_time = time.time()
         try:
-            self.envs = []
-            self.agent = AlphaZeroNet(
-                env_config=self.env_config, model_config=self.model_config.Network()
-            ).to(self.app.device)
-            print(f"AlphaZeroNet initialized on device: {self.app.device}.")
-
-            self.optimizer = optim.Adam(
-                self.agent.parameters(),
-                lr=self.train_config.LEARNING_RATE,
-                weight_decay=self.train_config.WEIGHT_DECAY,
-            )
-            print(
-                f"Optimizer initialized (Adam, LR={self.train_config.LEARNING_RATE})."
-            )
-
-            if self.agent is None:
-                raise RuntimeError("Agent (NN) must be initialized before MCTS.")
-            # Instantiate MCTS with the agent's predict method
-            self.mcts = MCTS(
-                network_predictor=self.agent.predict,
-                config=self.mcts_config,
-                env_config=self.env_config,
-            )
-            print("MCTS initialized with AlphaZeroNet predictor.")
-
-            self.stats_recorder = None
-            self.stats_aggregator = None
-            try:
-                from init.stats_init import initialize_stats_recorder
-
-                self.stats_recorder = initialize_stats_recorder(
-                    stats_config=self.stats_config,
-                    tb_config=self.tensorboard_config,
-                    config_dict=self.app.config_dict,
-                    agent=self.agent,
-                    env_config=self.env_config,
-                    rnn_config=self.rnn_config,
-                    transformer_config=self.transformer_config,
-                    is_reinit=is_reinit,
-                )
-                if self.stats_recorder and hasattr(self.stats_recorder, "aggregator"):
-                    self.stats_aggregator = self.stats_recorder.aggregator
-                    print("StatsRecorder initialized, using its aggregator.")
-                else:
-                    print("StatsRecorder initialized but has no aggregator attribute.")
-            except ImportError:
-                print(
-                    "Warning: init.stats_init not found. Skipping full stats recorder."
-                )
-            except Exception as stats_init_err:
-                print(f"Error initializing stats recorder: {stats_init_err}")
-                traceback.print_exc()
-
-            if self.stats_aggregator is None:
-                print("Creating standalone StatsAggregator as fallback.")
-                self.stats_aggregator = StatsAggregator(
-                    avg_windows=self.stats_config.STATS_AVG_WINDOW,
-                    plot_window=self.stats_config.PLOT_DATA_WINDOW,
-                )
-
-            self.checkpoint_manager = CheckpointManager(
-                agent=self.agent,
-                optimizer=self.optimizer,
-                stats_aggregator=self.stats_aggregator,
-                base_checkpoint_dir=BASE_CHECKPOINT_DIR,
-                run_checkpoint_dir=get_run_checkpoint_dir(),
-                load_checkpoint_path_config=checkpoint_to_load,
-                device=self.app.device,
-            )
-
-            if self.checkpoint_manager.get_checkpoint_path_to_load():
-                self.checkpoint_manager.load_checkpoint()
-                loaded_global_step, initial_episode_count = (
-                    self.checkpoint_manager.get_initial_state()
-                )
-
+            self._init_agent()
+            self._init_optimizer()
+            self._init_mcts()
+            self._init_stats()
+            self._init_checkpoint_manager(checkpoint_to_load)
             print(
                 f"AlphaZero components initialized in {time.time() - start_time:.2f}s"
             )
-
         except Exception as e:
             print(f"Error during AlphaZero component initialization: {e}")
             traceback.print_exc()
             raise e
+
+    def _init_agent(self):
+        self.agent = AlphaZeroNet(
+            env_config=self.env_config, model_config=self.model_config.Network()
+        ).to(self.app.device)
+        print(f"AlphaZeroNet initialized on device: {self.app.device}.")
+
+    def _init_optimizer(self):
+        if not self.agent:
+            raise RuntimeError("Agent must be initialized before Optimizer.")
+        self.optimizer = optim.Adam(
+            self.agent.parameters(),
+            lr=self.train_config.LEARNING_RATE,
+            weight_decay=self.train_config.WEIGHT_DECAY,
+        )
+        print(f"Optimizer initialized (Adam, LR={self.train_config.LEARNING_RATE}).")
+
+    def _init_mcts(self):
+        if not self.agent:
+            raise RuntimeError("Agent must be initialized before MCTS.")
+        self.mcts = MCTS(
+            network_predictor=self.agent.predict,
+            config=self.mcts_config,
+            env_config=self.env_config,
+        )
+        print("MCTS initialized with AlphaZeroNet predictor.")
+
+    def _init_stats(self):
+        print("Initializing StatsAggregator and SimpleStatsRecorder...")
+        self.stats_aggregator = StatsAggregator(
+            avg_windows=self.stats_config.STATS_AVG_WINDOW,
+            plot_window=self.stats_config.PLOT_DATA_WINDOW,
+        )
+        self.stats_recorder = SimpleStatsRecorder(
+            aggregator=self.stats_aggregator,
+            console_log_interval=self.stats_config.CONSOLE_LOG_FREQ,
+            train_config=self.train_config,
+        )
+        print("StatsAggregator and SimpleStatsRecorder initialized.")
+
+    def _init_checkpoint_manager(self, checkpoint_to_load: Optional[str]):
+        if not self.agent or not self.optimizer or not self.stats_aggregator:
+            raise RuntimeError(
+                "Agent, Optimizer, StatsAggregator needed for CheckpointManager."
+            )
+        self.checkpoint_manager = CheckpointManager(
+            agent=self.agent,
+            optimizer=self.optimizer,
+            stats_aggregator=self.stats_aggregator,
+            base_checkpoint_dir=BASE_CHECKPOINT_DIR,
+            run_checkpoint_dir=get_run_checkpoint_dir(),
+            load_checkpoint_path_config=checkpoint_to_load,
+            device=self.app.device,
+        )
+        if self.checkpoint_manager.get_checkpoint_path_to_load():
+            self.checkpoint_manager.load_checkpoint()
 
     def initialize_workers(self):
         """Initializes worker threads (Self-Play, Training). Does NOT start them."""
@@ -301,21 +273,31 @@ class AppInitializer:
             print("ERROR: Cannot initialize workers, core RL components missing.")
             return
 
-        # Instantiate SelfPlayWorker
-        self.self_play_worker = SelfPlayWorker(
-            worker_id=0,
-            agent=self.agent,
-            mcts=self.mcts,
-            experience_queue=self.app.experience_queue,
-            stats_aggregator=self.stats_aggregator,
-            stop_event=self.app.stop_event,
-            env_config=self.env_config,
-            mcts_config=self.mcts_config,
-            device=self.app.device,
-        )
-        print("SelfPlayWorker initialized.")
+        self._init_self_play_workers()
+        self._init_training_worker()
+        num_sp = len(self.self_play_workers)
+        print(f"Worker threads initialized ({num_sp} Self-Play, 1 Training).")
 
-        # Instantiate TrainingWorker
+    def _init_self_play_workers(self):
+        self.self_play_workers = []
+        num_sp_workers = self.train_config.NUM_SELF_PLAY_WORKERS
+        print(f"Initializing {num_sp_workers} SelfPlayWorker(s)...")
+        for i in range(num_sp_workers):
+            worker = SelfPlayWorker(
+                worker_id=i,
+                agent=self.agent,
+                mcts=self.mcts,
+                experience_queue=self.app.experience_queue,
+                stats_aggregator=self.stats_aggregator,
+                stop_event=self.app.stop_event,
+                env_config=self.env_config,
+                mcts_config=self.mcts_config,
+                device=self.app.device,
+            )
+            self.self_play_workers.append(worker)
+            print(f"  SelfPlayWorker-{i} initialized.")
+
+    def _init_training_worker(self):
         self.training_worker = TrainingWorker(
             agent=self.agent,
             optimizer=self.optimizer,
@@ -326,7 +308,6 @@ class AppInitializer:
             device=self.app.device,
         )
         print("TrainingWorker initialized.")
-        print("Worker threads initialized.")
 
     def initialize_demo_env(self):
         """Initializes the separate environment for demo/debug mode."""
@@ -345,72 +326,51 @@ class AppInitializer:
         if not self.app.renderer:
             print("ERROR: Cannot initialize InputHandler before Renderer.")
             return
-
         self.app.input_handler = InputHandler(
             screen=self.app.screen,
             renderer=self.app.renderer,
-            # Basic Callbacks
             request_cleanup_cb=self.app.logic.request_cleanup,
             cancel_cleanup_cb=self.app.logic.cancel_cleanup,
             confirm_cleanup_cb=self.app.logic.confirm_cleanup,
             exit_app_cb=self.app.logic.exit_app,
-            # Demo Mode Callbacks
             start_demo_mode_cb=self.app.logic.start_demo_mode,
             exit_demo_mode_cb=self.app.logic.exit_demo_mode,
             handle_demo_mouse_motion_cb=self.app.logic.handle_demo_mouse_motion,
             handle_demo_mouse_button_down_cb=self.app.logic.handle_demo_mouse_button_down,
-            # Debug Mode Callbacks
             start_debug_mode_cb=self.app.logic.start_debug_mode,
             exit_debug_mode_cb=self.app.logic.exit_debug_mode,
             handle_debug_input_cb=self.app.logic.handle_debug_input,
-            # MCTS Vis Callbacks (Removed)
-            # start_mcts_visualization_cb=self.app.logic.start_mcts_visualization,
-            # exit_mcts_visualization_cb=self.app.logic.exit_mcts_visualization,
-            # handle_mcts_pan_cb=self.app.logic.handle_mcts_pan,
-            # handle_mcts_zoom_cb=self.app.logic.handle_mcts_zoom,
-            # Combined Worker Control Callbacks
             start_run_cb=self.app.logic.start_run,
             stop_run_cb=self.app.logic.stop_run,
         )
-        # Provide app reference to input handler AFTER it's created
         if self.app.input_handler:
             self.app.input_handler.app_ref = self.app
-
         if self.app.renderer and self.app.renderer.left_panel:
             self.app.renderer.left_panel.input_handler = self.app.input_handler
             if hasattr(self.app.renderer.left_panel, "button_status_renderer"):
-                self.app.renderer.left_panel.button_status_renderer.input_handler_ref = (
-                    self.app.input_handler
-                )
-                # Also provide app_ref to button renderer if needed
-                self.app.renderer.left_panel.button_status_renderer.app_ref = self.app
+                btn_renderer = self.app.renderer.left_panel.button_status_renderer
+                btn_renderer.input_handler_ref = self.app.input_handler
+                btn_renderer.app_ref = self.app
 
     def close_stats_recorder(self, is_cleanup: bool = False):
         """Safely closes the stats recorder (if it exists)."""
         print(
             f"[AppInitializer] close_stats_recorder called (is_cleanup={is_cleanup})..."
         )
-        if self.stats_recorder:
+        if self.stats_recorder and hasattr(self.stats_recorder, "close"):
             print("[AppInitializer] Stats recorder exists, attempting close...")
             try:
-                if hasattr(self.stats_recorder, "close"):
-                    self.stats_recorder.close(is_cleanup=is_cleanup)
-                    print("[AppInitializer] stats_recorder.close() executed.")
-                else:
-                    print("[AppInitializer] stats_recorder has no close method.")
+                self.stats_recorder.close(is_cleanup=is_cleanup)
+                print("[AppInitializer] stats_recorder.close() executed.")
             except Exception as log_e:
                 print(f"[AppInitializer] Error closing stats recorder on exit: {log_e}")
                 traceback.print_exc()
         else:
-            print(
-                "[AppInitializer] No stats recorder instance to close (might be using standalone aggregator)."
-            )
+            print("[AppInitializer] No stats recorder instance or close method.")
         print("[AppInitializer] close_stats_recorder finished.")
 
 
 File: app_logic.py
-# File: app_logic.py
-# File: app_logic.py
 import pygame
 import time
 import traceback
@@ -419,6 +379,7 @@ import shutil
 from typing import TYPE_CHECKING, Tuple
 
 from app_state import AppState
+from config.general import get_run_checkpoint_dir 
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
@@ -432,40 +393,33 @@ class AppLogic:
 
     def check_initial_completion_status(self):
         """Checks if training target was met upon loading (placeholder)."""
-        pass
+        pass 
 
     def update_status_and_check_completion(self):
         """Updates the status text based on application state."""
-        # Determine worker status
         is_running = self.app.worker_manager.is_any_worker_running()
-
-        if self.app.app_state == AppState.MAIN_MENU:
-            if self.app.cleanup_confirmation_active:
-                self.app.status = "Confirm Cleanup"
-            elif is_running:
-                self.app.status = "Running AlphaZero"  # Combined status
-            else:
-                self.app.status = "Ready"
-        elif self.app.app_state == AppState.PLAYING:
+        state = self.app.app_state
+        if state == AppState.MAIN_MENU:
+            self.app.status = (
+                "Confirm Cleanup"
+                if self.app.cleanup_confirmation_active
+                else "Running AlphaZero" if is_running else "Ready"
+            )
+        elif state == AppState.PLAYING:
             self.app.status = "Playing Demo"
-        elif self.app.app_state == AppState.DEBUG:
+        elif state == AppState.DEBUG:
             self.app.status = "Debugging Grid"
-        # MCTS_VISUALIZE state removed
-        # elif self.app.app_state == AppState.MCTS_VISUALIZE:
-        #     self.app.status = "Visualizing MCTS"
-        elif self.app.app_state == AppState.INITIALIZING:
+        elif state == AppState.INITIALIZING:
             self.app.status = "Initializing..."
-        elif self.app.app_state == AppState.ERROR:
-            pass
 
-    # --- Combined Worker Control ---
+    # --- Worker Control ---
     def start_run(self):
         """Starts both self-play and training workers."""
-        if self.app.app_state != AppState.MAIN_MENU:
-            print("Can only start run from Main Menu.")
-            return
-        if self.app.worker_manager.is_any_worker_running():
-            print("Run already in progress.")
+        if (
+            self.app.app_state != AppState.MAIN_MENU
+            or self.app.worker_manager.is_any_worker_running()
+        ):
+            print("Cannot start run: Not in Main Menu or already running.")
             return
         print("Starting AlphaZero Run (Self-Play & Training)...")
         self.app.worker_manager.start_all_workers()
@@ -480,80 +434,69 @@ class AppLogic:
         self.app.worker_manager.stop_all_workers()
         self.update_status_and_check_completion()
 
-    # --- End Combined Worker Control ---
-
+    # --- Mode Transitions & Cleanup ---
     def request_cleanup(self):
         if self.app.app_state != AppState.MAIN_MENU:
-            print("Cannot request cleanup outside MainMenu.")
             return
-        # Prevent cleanup if workers are running
         if self.app.worker_manager.is_any_worker_running():
-            print("Cannot cleanup while run is active. Stop the run first.")
-            self.app.cleanup_message = "Stop Run before Cleanup!"
-            self.app.last_cleanup_message_time = time.time()
+            self._set_temp_message("Stop Run before Cleanup!")
             return
         self.app.cleanup_confirmation_active = True
         self.app.status = "Confirm Cleanup"
         print("Cleanup requested. Confirm action.")
 
     def start_demo_mode(self):
-        if self.app.initializer.demo_env is None:
-            print("Cannot start demo: Demo env not initialized.")
-            return
-        if self.app.app_state != AppState.MAIN_MENU:
-            print("Cannot start demo mode outside MainMenu.")
-            return
-        if self.app.worker_manager.is_any_worker_running():
-            print("Cannot start demo while run is active. Stop the run first.")
-            self.app.cleanup_message = "Stop Run before Demo!"
-            self.app.last_cleanup_message_time = time.time()
-            return
-        print("Entering Demo Mode...")
-        self.try_save_checkpoint()
-        self.app.app_state = AppState.PLAYING
-        self.app.status = "Playing Demo"
-        self.app.initializer.demo_env.reset()
+        if self._can_start_mode("Demo"):
+            print("Entering Demo Mode...")
+            self.try_save_checkpoint()
+            self.app.app_state = AppState.PLAYING
+            self.app.status = "Playing Demo"
+            if self.app.initializer.demo_env:
+                self.app.initializer.demo_env.reset()
 
     def start_debug_mode(self):
-        if self.app.initializer.demo_env is None:
-            print("Cannot start debug: Demo env not initialized.")
-            return
-        if self.app.app_state != AppState.MAIN_MENU:
-            print("Cannot start debug mode outside MainMenu.")
-            return
-        if self.app.worker_manager.is_any_worker_running():
-            print("Cannot start debug while run is active. Stop the run first.")
-            self.app.cleanup_message = "Stop Run before Debug!"
-            self.app.last_cleanup_message_time = time.time()
-            return
-        print("Entering Debug Mode...")
-        self.try_save_checkpoint()
-        self.app.app_state = AppState.DEBUG
-        self.app.status = "Debugging Grid"
-        self.app.initializer.demo_env.reset()
+        if self._can_start_mode("Debug"):
+            print("Entering Debug Mode...")
+            self.try_save_checkpoint()
+            self.app.app_state = AppState.DEBUG
+            self.app.status = "Debugging Grid"
+            if self.app.initializer.demo_env:
+                self.app.initializer.demo_env.reset()
 
-    # --- MCTS Visualization Logic Removed ---
-    # def start_mcts_visualization(self):
-    #     pass
-    # def exit_mcts_visualization(self):
-    #     pass
-    # def handle_mcts_pan(self, delta_x: int, delta_y: int):
-    #     pass
-    # def handle_mcts_zoom(self, zoom_factor: float, mouse_pos: Tuple[int, int]):
-    #     pass
-    # --- End MCTS Visualization Logic Removal ---
+    def _can_start_mode(self, mode_name: str) -> bool:
+        """Checks if demo/debug mode can be started."""
+        if self.app.initializer.demo_env is None:
+            print(f"Cannot start {mode_name}: Env not initialized.")
+            return False
+        if self.app.app_state != AppState.MAIN_MENU:
+            print(f"Cannot start {mode_name} mode outside MainMenu.")
+            return False
+        if self.app.worker_manager.is_any_worker_running():
+            self._set_temp_message(f"Stop Run before {mode_name}!")
+            return False
+        return True
+
+    def exit_demo_mode(self):
+        if self.app.app_state == AppState.PLAYING:
+            print("Exiting Demo Mode...")
+            if self.app.initializer.demo_env:
+                self.app.initializer.demo_env.deselect_dragged_shape()
+            self._return_to_main_menu()
 
     def exit_debug_mode(self):
         if self.app.app_state == AppState.DEBUG:
             print("Exiting Debug Mode...")
-            self.app.app_state = AppState.MAIN_MENU
-            self.check_initial_completion_status()
-            self.update_status_and_check_completion()
+            self._return_to_main_menu()
+
+    def _return_to_main_menu(self):
+        """Helper to transition back to the main menu state."""
+        self.app.app_state = AppState.MAIN_MENU
+        self.check_initial_completion_status()
+        self.update_status_and_check_completion()
 
     def cancel_cleanup(self):
         self.app.cleanup_confirmation_active = False
-        self.app.cleanup_message = "Cleanup cancelled."
-        self.app.last_cleanup_message_time = time.time()
+        self._set_temp_message("Cleanup cancelled.")
         self.update_status_and_check_completion()
         print("Cleanup cancelled by user.")
 
@@ -576,22 +519,11 @@ class AppLogic:
         print("Exit requested.")
         self.app.stop_event.set()
         self.app.worker_manager.stop_all_workers()
-        return False
+        return False  # Signal main loop to stop
 
-    def exit_demo_mode(self):
-        if self.app.app_state == AppState.PLAYING:
-            print("Exiting Demo Mode...")
-            if self.app.initializer.demo_env:
-                self.app.initializer.demo_env.deselect_dragged_shape()
-            self.app.app_state = AppState.MAIN_MENU
-            self.check_initial_completion_status()
-            self.update_status_and_check_completion()
-
+    # --- Input Handling Callbacks ---
     def handle_demo_mouse_motion(self, mouse_pos: Tuple[int, int]):
-        if (
-            self.app.app_state != AppState.PLAYING
-            or self.app.initializer.demo_env is None
-        ):
+        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
             return
         demo_env = self.app.initializer.demo_env
         if demo_env.is_frozen() or demo_env.is_over():
@@ -602,64 +534,98 @@ class AppLogic:
         demo_env.update_snapped_position(grid_coords)
 
     def handle_demo_mouse_button_down(self, event: pygame.event.Event):
-        if (
-            self.app.app_state != AppState.PLAYING
-            or self.app.initializer.demo_env is None
-        ):
+        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
             return
         demo_env = self.app.initializer.demo_env
-        if demo_env.is_frozen() or demo_env.is_over():
+        if demo_env.is_frozen() or demo_env.is_over() or event.button != 1:
             return
-        if event.button != 1:
-            return
+
         mouse_pos = event.pos
-        clicked_preview_index = self.app.ui_utils.map_screen_to_preview(mouse_pos)
-        if clicked_preview_index is not None:
-            if clicked_preview_index == demo_env.demo_dragged_shape_idx:
-                demo_env.deselect_dragged_shape()
-            else:
-                demo_env.select_shape_for_drag(clicked_preview_index)
+        clicked_preview = self.app.ui_utils.map_screen_to_preview(mouse_pos)
+        if clicked_preview is not None:
+            action = (
+                demo_env.deselect_dragged_shape
+                if clicked_preview == demo_env.demo_dragged_shape_idx
+                else lambda: demo_env.select_shape_for_drag(clicked_preview)
+            )
+            action()
             return
+
         grid_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
-        if grid_coords is not None:
-            if (
-                demo_env.demo_dragged_shape_idx is not None
-                and demo_env.demo_snapped_position == grid_coords
-            ):
-                placed = demo_env.place_dragged_shape()
-                if placed and demo_env.is_over():
-                    print("[Demo] Game Over! Press ESC to exit.")
-            else:
-                demo_env.deselect_dragged_shape()
-            return
-        demo_env.deselect_dragged_shape()
+        if (
+            grid_coords is not None
+            and demo_env.demo_dragged_shape_idx is not None
+            and demo_env.demo_snapped_position == grid_coords
+        ):
+            placed = demo_env.place_dragged_shape()
+            if placed and demo_env.is_over():
+                print("[Demo] Game Over! Press ESC to exit.")
+        else:
+            demo_env.deselect_dragged_shape()
 
     def handle_debug_input(self, event: pygame.event.Event):
-        if (
-            self.app.app_state != AppState.DEBUG
-            or self.app.initializer.demo_env is None
-        ):
+        if self.app.app_state != AppState.DEBUG or not self.app.initializer.demo_env:
             return
         demo_env = self.app.initializer.demo_env
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_r:
-                print("[Debug] Resetting grid...")
-                demo_env.reset()
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+            print("[Debug] Resetting grid...")
+            demo_env.reset()
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            mouse_pos = event.pos
-            clicked_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
+            clicked_coords = self.app.ui_utils.map_screen_to_grid(event.pos)
             if clicked_coords:
-                row, col = clicked_coords
-                demo_env.toggle_triangle_debug(row, col)
+                demo_env.toggle_triangle_debug(*clicked_coords)
+
+    # --- Internal Helpers ---
+    def _set_temp_message(self, message: str):
+        """Sets a temporary message to be displayed."""
+        self.app.cleanup_message = message
+        self.app.last_cleanup_message_time = time.time()
 
     def _cleanup_data(self):
         """Deletes current run's checkpoint and re-initializes components."""
-        from config.general import get_run_checkpoint_dir
-
         print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
         self.app.app_state = AppState.INITIALIZING
         self.app.status = "Cleaning"
         messages = []
+        self._render_during_cleanup()
+
+        print("[Cleanup] Stopping existing worker threads (if any)...")
+        self.app.worker_manager.stop_all_workers()
+        print("[Cleanup] Existing worker threads stopped.")
+        print("[Cleanup] Closing stats recorder...")
+        self.app.initializer.close_stats_recorder(is_cleanup=True)
+        print("[Cleanup] Stats recorder closed.")
+
+        messages.append(self._delete_checkpoint_dir())
+        time.sleep(0.1)
+
+        print("[Cleanup] Re-initializing components...")
+        try:
+            self.app.initializer.initialize_rl_components(
+                is_reinit=True, checkpoint_to_load=None
+            )
+            print("[Cleanup] Components re-initialized.")
+            if self.app.initializer.demo_env:
+                self.app.initializer.demo_env.reset()
+            self.app.initializer.initialize_workers()
+            print("[Cleanup] Workers re-initialized (not started).")
+            messages.append("Components re-initialized.")
+            self.app.status = "Ready"
+            self.app.app_state = AppState.MAIN_MENU
+        except Exception as e:
+            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
+            traceback.print_exc()
+            self.app.status = "Error: Re-init Failed"
+            self.app.app_state = AppState.ERROR
+            messages.append("ERROR RE-INITIALIZING COMPONENTS!")
+            if self.app.renderer:
+                self.app.renderer._render_error_screen(self.app.status)
+
+        self._set_temp_message("\n".join(messages))
+        print(f"--- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}) ---")
+
+    def _render_during_cleanup(self):
+        """Renders the screen while cleanup is in progress."""
         if self.app.renderer:
             try:
                 self.app.renderer.render_all(
@@ -673,7 +639,6 @@ class AppLogic:
                     cleanup_confirmation_active=False,
                     cleanup_message="",
                     last_cleanup_message_time=0,
-                    tensorboard_log_dir=None,
                     plot_data={},
                     demo_env=self.app.initializer.demo_env,
                     update_progress_details={},
@@ -681,20 +646,17 @@ class AppLogic:
                         self.app.initializer, "agent_param_count", 0
                     ),
                     worker_counts={},
-                    # mcts_root_node=None, # MCTS Vis removed
+                    best_game_state_data=None,
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
             except Exception as render_err:
                 print(f"Warning: Error rendering during cleanup start: {render_err}")
 
-        print("[Cleanup] Stopping existing worker threads (if any)...")
-        self.app.worker_manager.stop_all_workers()
-        print("[Cleanup] Existing worker threads stopped.")
-        print("[Cleanup] Closing stats recorder...")
-        self.app.initializer.close_stats_recorder(is_cleanup=True)
-        print("[Cleanup] Stats recorder closed.")
+    def _delete_checkpoint_dir(self) -> str:
+        """Deletes the checkpoint directory and returns a status message."""
         print("[Cleanup] Deleting agent checkpoint file/dir...")
+        msg = ""
         try:
             save_dir = get_run_checkpoint_dir()
             if os.path.isdir(save_dir):
@@ -702,56 +664,55 @@ class AppLogic:
                 msg = f"Run checkpoint directory deleted: {save_dir}"
             else:
                 msg = f"Run checkpoint directory not found: {save_dir}"
-            print(f"  - {msg}")
-            messages.append(msg)
         except OSError as e:
             msg = f"Error deleting checkpoint dir: {e}"
-            print(f"  - {msg}")
-            messages.append(msg)
+        print(f"  - {msg}")
         print("[Cleanup] Checkpoint deletion attempt finished.")
-        time.sleep(0.1)
-        print("[Cleanup] Re-initializing components...")
-        try:
-            self.app.initializer.initialize_rl_components(
-                is_reinit=True, checkpoint_to_load=None
-            )
-            print("[Cleanup] Components re-initialized.")
-            if self.app.initializer.demo_env:
-                self.app.initializer.demo_env.reset()
-                print("[Cleanup] Demo env reset.")
-            self.app.initializer.initialize_workers()  # Re-init workers
-            print("[Cleanup] Workers re-initialized (not started).")
-            print("[Cleanup] Component re-initialization successful.")
-            messages.append("Components re-initialized.")
-            self.app.status = "Ready"
-            self.app.app_state = AppState.MAIN_MENU
-            print("[Cleanup] Application state set to MAIN_MENU.")
-        except Exception as e:
-            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
-            traceback.print_exc()
-            self.app.status = "Error: Re-init Failed"
-            self.app.app_state = AppState.ERROR
-            messages.append("ERROR RE-INITIALIZING COMPONENTS!")
-            if self.app.renderer:
-                try:
-                    self.app.renderer._render_error_screen(self.app.status)
-                except Exception as render_err_final:
-                    print(f"Warning: Failed to render error screen: {render_err_final}")
-        self.app.cleanup_message = "\n".join(messages)
-        self.app.last_cleanup_message_time = time.time()
-        print(
-            f"--- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}, Status: {self.app.status}) ---"
-        )
+        return msg
 
     def try_save_checkpoint(self):
         """Saves checkpoint if in main menu and workers are not running."""
         if (
-            self.app.app_state == AppState.MAIN_MENU
-            and not self.app.worker_manager.is_any_worker_running()  # Only save if stopped
-            and self.app.initializer.checkpoint_manager
-            and self.app.initializer.stats_aggregator
+            self.app.app_state != AppState.MAIN_MENU
+            or self.app.worker_manager.is_any_worker_running()
         ):
-            print("Saving checkpoint...")
+            return
+        if (
+            not self.app.initializer.checkpoint_manager
+            or not self.app.initializer.stats_aggregator
+        ):
+            return
+
+        print("Saving checkpoint...")
+        try:
+            agg_storage = self.app.initializer.stats_aggregator.storage
+            current_step = getattr(agg_storage, "current_global_step", 0)
+            episode_count = getattr(agg_storage, "total_episodes", 0)
+            target_step = getattr(
+                self.app.initializer.checkpoint_manager, "training_target_step", 0
+            )
+            self.app.initializer.checkpoint_manager.save_checkpoint(
+                current_step,
+                episode_count,
+                training_target_step=target_step,
+                is_final=False,
+            )
+        except Exception as e:
+            print(f"Error saving checkpoint: {e}")
+            traceback.print_exc()
+
+    def save_final_checkpoint(self):
+        """Saves the final checkpoint."""
+        if (
+            not self.app.initializer.checkpoint_manager
+            or not self.app.initializer.stats_aggregator
+        ):
+            return
+        save_on_exit = (
+            self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
+        )
+        if save_on_exit:
+            print("Performing final checkpoint save...")
             try:
                 agg_storage = self.app.initializer.stats_aggregator.storage
                 current_step = getattr(agg_storage, "current_global_step", 0)
@@ -763,47 +724,16 @@ class AppLogic:
                     current_step,
                     episode_count,
                     training_target_step=target_step,
-                    is_final=False,
+                    is_final=True,
                 )
-            except Exception as e:
-                print(f"Error saving checkpoint: {e}")
+            except Exception as final_save_err:
+                print(f"Error during final checkpoint save: {final_save_err}")
                 traceback.print_exc()
-
-    def save_final_checkpoint(self):
-        """Saves the final checkpoint."""
-        if (
-            self.app.initializer.checkpoint_manager
-            and self.app.initializer.stats_aggregator
-        ):
-            save_on_exit = (
-                self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
-            )
-            if save_on_exit:
-                print("Performing final checkpoint save...")
-                try:
-                    agg_storage = self.app.initializer.stats_aggregator.storage
-                    current_step = getattr(agg_storage, "current_global_step", 0)
-                    episode_count = getattr(agg_storage, "total_episodes", 0)
-                    target_step = getattr(
-                        self.app.initializer.checkpoint_manager,
-                        "training_target_step",
-                        0,
-                    )
-                    self.app.initializer.checkpoint_manager.save_checkpoint(
-                        current_step,
-                        episode_count,
-                        training_target_step=target_step,
-                        is_final=True,
-                    )
-                except Exception as final_save_err:
-                    print(f"Error during final checkpoint save: {final_save_err}")
-                    traceback.print_exc()
-            else:
-                print("Skipping final checkpoint save.")
+        else:
+            print("Skipping final checkpoint save.")
 
 
 File: app_setup.py
-# File: app_setup.py
 import os
 import pygame
 from typing import Tuple, Dict, Any
@@ -852,16 +782,14 @@ def load_and_validate_configs() -> Dict[str, Any]:
 
 
 File: app_state.py
-# File: app_state.py
-from enum import Enum, auto
+from enum import Enum
 
 
 class AppState(Enum):
     INITIALIZING = "Initializing"
     MAIN_MENU = "MainMenu"
-    PLAYING = "Playing"  # Demo Mode
+    PLAYING = "Playing" 
     DEBUG = "Debug"
-    MCTS_VISUALIZE = "MCTS Visualize"  # New state for MCTS view
     CLEANUP_CONFIRM = "Confirm Cleanup"
     CLEANING = "Cleaning"
     ERROR = "Error"
@@ -869,8 +797,6 @@ class AppState(Enum):
 
 
 File: app_ui_utils.py
-# File: app_ui_utils.py
-import pygame
 from typing import TYPE_CHECKING, Tuple, Optional
 
 if TYPE_CHECKING:
@@ -972,12 +898,10 @@ class AppUIUtils:
 
 
 File: app_workers.py
-# File: app_workers.py
 import threading
 import queue
 import time
-import traceback
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, List, Dict
 
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
@@ -992,15 +916,20 @@ class AppWorkerManager:
     def __init__(self, app: "MainApp"):
         self.app = app
         # Keep references to the worker *instances* from AppInitializer
-        self.self_play_worker_thread: Optional[SelfPlayWorker] = None
+        self.self_play_worker_threads: List[SelfPlayWorker] = []  # Now a list
         self.training_worker_thread: Optional[TrainingWorker] = None
         print("[AppWorkerManager] Initialized.")
 
+    def get_active_worker_counts(self) -> Dict[str, int]:
+        """Returns the count of currently active workers by type."""
+        sp_count = sum(1 for w in self.self_play_worker_threads if w and w.is_alive())
+        tr_count = 1 if self.is_training_running() else 0
+        return {"SelfPlay": sp_count, "Training": tr_count}
+
     def is_self_play_running(self) -> bool:
-        """Checks if the self-play worker thread is active."""
-        return (
-            self.self_play_worker_thread is not None
-            and self.self_play_worker_thread.is_alive()
+        """Checks if *any* self-play worker thread is active."""
+        return any(
+            w is not None and w.is_alive() for w in self.self_play_worker_threads
         )
 
     def is_training_running(self) -> bool:
@@ -1015,7 +944,7 @@ class AppWorkerManager:
         return self.is_self_play_running() or self.is_training_running()
 
     def start_all_workers(self):
-        """Starts both worker threads if they are initialized and not running."""
+        """Starts all initialized worker threads if they are not already running."""
         if self.is_any_worker_running():
             print("[AppWorkerManager] Workers already running.")
             return
@@ -1034,9 +963,9 @@ class AppWorkerManager:
             self.app.status = "Worker Init Failed"
             return
 
-        # Check worker instances
+        # Check worker instances from initializer
         if (
-            not self.app.initializer.self_play_worker
+            not self.app.initializer.self_play_workers
             or not self.app.initializer.training_worker
         ):
             print(
@@ -1049,36 +978,59 @@ class AppWorkerManager:
         print("[AppWorkerManager] Starting all worker threads...")
         self.app.stop_event.clear()  # Clear stop event before starting
 
-        # Start Self-Play
-        self.self_play_worker_thread = self.app.initializer.self_play_worker
-        if self.self_play_worker_thread:
-            # Need to create a new thread instance if the old one was joined
-            if not self.self_play_worker_thread.is_alive():
-                self.self_play_worker_thread = SelfPlayWorker(
-                    **self.self_play_worker_thread.get_init_args()
-                )  # Recreate
-                self.app.initializer.self_play_worker = (
-                    self.self_play_worker_thread
-                )  # Update initializer ref
-            self.self_play_worker_thread.start()
-            print("SelfPlayWorker thread started.")
-        else:
-            print(
-                "[AppWorkerManager] ERROR: SelfPlayWorker instance is None during start."
-            )
+        # --- Start Self-Play Workers ---
+        self.self_play_worker_threads = []  # Reset the list of active threads
+        for i, worker_instance in enumerate(self.app.initializer.self_play_workers):
+            if worker_instance:
+                # Need to create a new thread instance if the old one was joined
+                if not worker_instance.is_alive():
+                    try:
+                        # Recreate worker with original args
+                        recreated_worker = SelfPlayWorker(
+                            **worker_instance.get_init_args()
+                        )
+                        self.app.initializer.self_play_workers[i] = (
+                            recreated_worker  # Update initializer ref
+                        )
+                        worker_to_start = recreated_worker
+                        print(f"  Recreated SelfPlayWorker-{i}.")
+                    except Exception as e:
+                        print(f"  ERROR recreating SelfPlayWorker-{i}: {e}")
+                        continue  # Skip starting this worker
+                else:
+                    worker_to_start = worker_instance  # Start existing instance
 
-        # Start Training
+                self.self_play_worker_threads.append(
+                    worker_to_start
+                )  # Add to active list
+                worker_to_start.start()
+                print(f"  SelfPlayWorker-{i} thread started.")
+            else:
+                print(
+                    f"[AppWorkerManager] ERROR: SelfPlayWorker instance {i} is None during start."
+                )
+
+        # --- Start Training Worker ---
         self.training_worker_thread = self.app.initializer.training_worker
         if self.training_worker_thread:
             if not self.training_worker_thread.is_alive():
-                self.training_worker_thread = TrainingWorker(
-                    **self.training_worker_thread.get_init_args()
-                )  # Recreate
-                self.app.initializer.training_worker = (
-                    self.training_worker_thread
-                )  # Update initializer ref
-            self.training_worker_thread.start()
-            print("TrainingWorker thread started.")
+                try:
+                    # Recreate worker with original args
+                    recreated_worker = TrainingWorker(
+                        **self.training_worker_thread.get_init_args()
+                    )
+                    self.app.initializer.training_worker = (
+                        recreated_worker  # Update initializer ref
+                    )
+                    self.training_worker_thread = recreated_worker
+                    print("  Recreated TrainingWorker.")
+                except Exception as e:
+                    print(f"  ERROR recreating TrainingWorker: {e}")
+                    self.training_worker_thread = None  # Failed to recreate
+
+            if self.training_worker_thread:  # Check again if recreation was successful
+                self.training_worker_thread.start()
+                print("  TrainingWorker thread started.")
         else:
             print(
                 "[AppWorkerManager] ERROR: TrainingWorker instance is None during start."
@@ -1086,19 +1038,26 @@ class AppWorkerManager:
 
         if self.is_any_worker_running():
             self.app.status = "Running AlphaZero"
+            num_sp = len(self.self_play_worker_threads)
+            num_tr = 1 if self.is_training_running() else 0
+            print(f"[AppWorkerManager] Workers started ({num_sp} SP, {num_tr} TR).")
 
     def stop_all_workers(self, join_timeout: float = 5.0):
         """Signals ALL worker threads to stop and waits for them to join."""
         if not self.is_any_worker_running():
-            # print("[AppWorkerManager] No workers running to stop.")
             return
 
         print("[AppWorkerManager] Stopping ALL worker threads...")
         self.app.stop_event.set()  # Signal stop
 
-        threads_to_join = []
-        if self.self_play_worker_thread and self.self_play_worker_thread.is_alive():
-            threads_to_join.append(("SelfPlayWorker", self.self_play_worker_thread))
+        threads_to_join: List[Tuple[str, threading.Thread]] = []
+
+        # Add active self-play workers
+        for i, worker in enumerate(self.self_play_worker_threads):
+            if worker and worker.is_alive():
+                threads_to_join.append((f"SelfPlayWorker-{i}", worker))
+
+        # Add active training worker
         if self.training_worker_thread and self.training_worker_thread.is_alive():
             threads_to_join.append(("TrainingWorker", self.training_worker_thread))
 
@@ -1117,7 +1076,7 @@ class AppWorkerManager:
                 print(f"[AppWorkerManager] {name} joined.")
 
         # Clear references after joining
-        self.self_play_worker_thread = None
+        self.self_play_worker_threads = []
         self.training_worker_thread = None
 
         # Clear experience queue after stopping workers
@@ -1137,9 +1096,6 @@ class AppWorkerManager:
         )
 
         print("[AppWorkerManager] All worker threads stopped.")
-        # Keep stop_event set after stopping all workers? Or clear it?
-        # Let's clear it so they can be restarted individually if needed later.
-        # self.app.stop_event.clear() # Decide if this should be cleared
 
 
 File: check_gpu.py
@@ -1174,8 +1130,7 @@ else:
 
 File: logger.py
 import os
-import sys
-from typing import TextIO
+from typing import TextIO, Optional
 
 
 class TeeLogger:
@@ -1228,7 +1183,6 @@ class TeeLogger:
 
 
 File: main_pygame.py
-# File: main_pygame.py
 import pygame
 import sys
 import time
@@ -1237,32 +1191,22 @@ import logging
 import argparse
 import os
 import traceback
-from typing import Optional, List, Dict, Any
-import torch
-import torch.optim as optim
+from typing import Optional, Dict, Any
 import queue
-
-try:
-    import psutil
-except ImportError:
-    print("Warning: psutil not found.")
-    psutil = None
+import numpy as np
+from collections import deque
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
+
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
+# --- Config and Utils Imports ---
 try:
     from config import (
         VisConfig,
         EnvConfig,
-        RNNConfig,
-        ModelConfig,
-        StatsConfig,
         TrainConfig,
-        TensorBoardConfig,
-        DemoConfig,
-        TransformerConfig,
         MCTSConfig,
         RANDOM_SEED,
         BASE_CHECKPOINT_DIR,
@@ -1277,25 +1221,15 @@ try:
     from logger import TeeLogger
     from utils.init_checks import run_pre_checks
 except ImportError as e:
-    print(f"Error importing config/utils: {e}")
-    traceback.print_exc()
-    sys.exit(1)
-except Exception as e:
-    print(f"Unexpected error during import: {e}")
-    traceback.print_exc()
+    print(f"Error importing config/utils: {e}\n{traceback.format_exc()}")
     sys.exit(1)
 
+# --- App Component Imports ---
 try:
     from environment.game_state import GameState
     from ui.renderer import UIRenderer
-    from stats import (
-        StatsRecorderBase,
-        SimpleStatsRecorder,
-        TensorBoardStatsRecorder,
-        StatsAggregator,
-    )
+    from stats import  StatsAggregator
     from training.checkpoint_manager import (
-        CheckpointManager,
         find_latest_run_and_checkpoint,
     )
     from app_state import AppState
@@ -1305,14 +1239,12 @@ try:
     from app_setup import (
         initialize_pygame,
         initialize_directories,
-        load_and_validate_configs,
     )
     from app_ui_utils import AppUIUtils
     from ui.input_handler import InputHandler
     from agent.alphazero_net import AlphaZeroNet
 except ImportError as e:
-    print(f"Error importing app components: {e}")
-    traceback.print_exc()
+    print(f"Error importing app components: {e}\n{traceback.format_exc()}")
     sys.exit(1)
 
 logging.basicConfig(
@@ -1320,51 +1252,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Constants ---
+LOOP_TIMING_INTERVAL = 60  # Log loop timing every N frames
+
 
 class MainApp:
     """Main application class orchestrating Pygame UI and AlphaZero components."""
 
     def __init__(self, checkpoint_to_load: Optional[str] = None):
-        # --- Configuration ---
+        # Config Instances (Keep essential ones)
         self.vis_config = VisConfig()
         self.env_config = EnvConfig()
-        self.rnn_config = RNNConfig()
         self.train_config_instance = TrainConfig()
-        self.model_config = ModelConfig()
-        self.stats_config = StatsConfig()
-        self.tensorboard_config = TensorBoardConfig()
-        self.demo_config = DemoConfig()
-        self.transformer_config = TransformerConfig()
         self.mcts_config = MCTSConfig()
-        self.config_dict = get_config_dict()
 
-        # --- Core Components ---
+        # Core Components
         self.screen: Optional[pygame.Surface] = None
         self.clock: Optional[pygame.time.Clock] = None
         self.renderer: Optional[UIRenderer] = None
         self.input_handler: Optional[InputHandler] = None
 
-        # --- State ---
+        # State
         self.app_state: AppState = AppState.INITIALIZING
         self.status: str = "Initializing..."
         self.running: bool = True
         self.update_progress_details: Dict[str, Any] = {}
 
-        # --- Threading & Communication ---
+        # Threading & Communication
         self.stop_event = threading.Event()
-        self.experience_queue: queue.Queue = queue.Queue(
+        self.experience_queue: queue.Queue[ProcessedExperienceBatch] = queue.Queue(
             maxsize=self.train_config_instance.BUFFER_CAPACITY
         )
 
-        # --- RL Components (Managed by Initializer) ---
-        self.envs: List[GameState] = []
+        # RL Components (Managed by Initializer)
         self.agent: Optional[AlphaZeroNet] = None
-        self.optimizer: Optional[optim.Optimizer] = None
-        self.stats_recorder: Optional[StatsRecorderBase] = None
-        self.checkpoint_manager: Optional[CheckpointManager] = None
+        self.stats_aggregator: Optional[StatsAggregator] = None
         self.demo_env: Optional[GameState] = None
 
-        # --- Helper Classes ---
+        # Helper Classes
         self.device = get_torch_device()
         set_device(self.device)
         self.checkpoint_to_load = checkpoint_to_load
@@ -1373,15 +1298,15 @@ class MainApp:
         self.worker_manager = AppWorkerManager(self)
         self.ui_utils = AppUIUtils(self)
 
-        # --- UI State ---
+        # UI State
         self.cleanup_confirmation_active: bool = False
         self.cleanup_message: str = ""
         self.last_cleanup_message_time: float = 0.0
         self.total_gpu_memory_bytes: Optional[int] = None
 
-        # --- Resource Monitoring ---
-        self.last_resource_update_time: float = 0.0
-        self.resource_update_interval: float = 1.0
+        # Timing
+        self.frame_count = 0
+        self.loop_times = deque(maxlen=LOOP_TIMING_INTERVAL)
 
     def initialize(self):
         """Initializes Pygame, directories, configs, and core components."""
@@ -1392,145 +1317,126 @@ class MainApp:
         run_pre_checks()
 
         self.app_state = AppState.INITIALIZING
-        self.initializer.initialize_all()
+        self.initializer.initialize_all()  # Delegates complex init
 
-        self.optimizer = self.initializer.optimizer
+        # Get references after initialization
+        self.agent = self.initializer.agent
+        self.stats_aggregator = self.initializer.stats_aggregator
+        self.demo_env = self.initializer.demo_env
 
-        if self.renderer and self.initializer.app.input_handler:
-            self.renderer.set_input_handler(self.initializer.app.input_handler)
+        if self.renderer and self.input_handler:
+            self.renderer.set_input_handler(self.input_handler)
 
         self.logic.check_initial_completion_status()
         self.status = "Ready"
         self.app_state = AppState.MAIN_MENU
         logger.info("--- Initialization Complete ---")
-        if self.tensorboard_config.LOG_DIR:
-            tb_path = os.path.abspath(get_run_log_dir())
-            logger.info(f"--- TensorBoard logs: tensorboard --logdir {tb_path} ---")
 
-    def _update_resource_stats(self):
-        """Updates CPU, Memory, and GPU usage in the StatsAggregator."""
-        current_time = time.time()
-        if (
-            current_time - self.last_resource_update_time
-            < self.resource_update_interval
-        ):
-            return
-        aggregator = self.initializer.stats_aggregator
-        if not aggregator:
-            return
+    def _handle_input(self) -> bool:
+        """Handles user input."""
+        if self.input_handler:
+            return self.input_handler.handle_input(
+                self.app_state.value, self.cleanup_confirmation_active
+            )
+        else:
+            # Basic quit handling if input handler fails
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.stop_event.set()
+                    self.worker_manager.stop_all_workers()
+                    return False
+            return True
 
-        storage = aggregator.storage
-        cpu_percent, mem_percent, gpu_mem_percent = 0.0, 0.0, 0.0
-        if psutil:
-            try:
-                cpu_percent = psutil.cpu_percent()
-                mem_percent = psutil.virtual_memory().percent
-            except Exception as e:
-                logger.warning(f"Error getting CPU/Mem usage: {e}")
-        if self.device.type == "cuda" and self.total_gpu_memory_bytes:
-            try:
-                allocated = torch.cuda.memory_allocated(self.device)
-                gpu_mem_percent = (allocated / self.total_gpu_memory_bytes) * 100.0
-            except Exception as e:
-                logger.warning(f"Error getting GPU memory usage: {e}")
-                gpu_mem_percent = 0.0
-        with aggregator._lock:
-            storage.current_cpu_usage = cpu_percent
-            storage.current_memory_usage = mem_percent
-            storage.current_gpu_memory_usage_percent = gpu_mem_percent
-            if hasattr(storage, "cpu_usage"):
-                storage.cpu_usage.append(cpu_percent)
-            if hasattr(storage, "memory_usage"):
-                storage.memory_usage.append(mem_percent)
-            if hasattr(storage, "gpu_memory_usage_percent"):
-                storage.gpu_memory_usage_percent.append(gpu_mem_percent)
-        self.last_resource_update_time = current_time
+    def _update_state(self):
+        """Updates application logic and status."""
+        self.update_progress_details = {}  # Reset progress details
+        self.logic.update_status_and_check_completion()
+
+    def _prepare_render_data(self) -> Dict[str, Any]:
+        """Gathers data needed for rendering."""
+        render_data = {
+            "plot_data": {},
+            "stats_summary": {},
+            "agent_params": 0,
+            "best_game_state_data": None,
+            "worker_counts": {},
+            "is_process_running": False,
+        }
+        if self.stats_aggregator:
+            render_data["plot_data"] = self.stats_aggregator.get_plot_data()
+            current_step = self.stats_aggregator.storage.current_global_step
+            render_data["stats_summary"] = self.stats_aggregator.get_summary(
+                current_step
+            )
+            render_data["best_game_state_data"] = (
+                self.stats_aggregator.get_best_game_state_data()
+            )
+
+        if self.agent:
+            render_data["agent_params"] = self.initializer.agent_param_count
+
+        render_data["worker_counts"] = self.worker_manager.get_active_worker_counts()
+        render_data["is_process_running"] = self.worker_manager.is_any_worker_running()
+        return render_data
+
+    def _render_frame(self, render_data: Dict[str, Any]):
+        """Renders the UI frame."""
+        if self.renderer:
+            self.renderer.render_all(
+                app_state=self.app_state.value,
+                is_process_running=render_data["is_process_running"],
+                status=self.status,
+                stats_summary=render_data["stats_summary"],
+                envs=[],  # envs list is not actively used for rendering AZ
+                num_envs=self.train_config_instance.NUM_SELF_PLAY_WORKERS,
+                env_config=self.env_config,
+                cleanup_confirmation_active=self.cleanup_confirmation_active,
+                cleanup_message=self.cleanup_message,
+                last_cleanup_message_time=self.last_cleanup_message_time,
+                plot_data=render_data["plot_data"],
+                demo_env=self.demo_env,
+                update_progress_details=self.update_progress_details,
+                agent_param_count=render_data["agent_params"],
+                worker_counts=render_data["worker_counts"],
+                best_game_state_data=render_data["best_game_state_data"],
+            )
+        else:  # Fallback rendering
+            self.screen.fill((20, 0, 0))
+            font = pygame.font.Font(None, 30)
+            text_surf = font.render("Renderer Error", True, (255, 50, 50))
+            self.screen.blit(
+                text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
+            )
+            pygame.display.flip()
+
+    def _log_loop_timing(self, loop_start_time: float):
+        """Logs average loop time periodically."""
+        self.loop_times.append(time.monotonic() - loop_start_time)
+        self.frame_count += 1
+        if self.frame_count % LOOP_TIMING_INTERVAL == 0:
+            avg_loop_time_ms = np.mean(self.loop_times) * 1000
+            logger.info(
+                f"[Timing] Avg main loop time ({LOOP_TIMING_INTERVAL} frames): {avg_loop_time_ms:.2f} ms"
+            )
 
     def run_main_loop(self):
         """The main application loop."""
         logger.info("Starting main application loop...")
         while self.running:
+            loop_start_time = time.monotonic()
+            if not self.clock:
+                break  # Exit if clock not initialized
             dt = self.clock.tick(self.vis_config.FPS) / 1000.0
 
-            if self.input_handler:
-                self.running = self.input_handler.handle_input(
-                    self.app_state.value, self.cleanup_confirmation_active
-                )
-                if not self.running:
-                    break
-            else:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        self.running = False
-                        self.stop_event.set()
-                        self.worker_manager.stop_all_workers()
-                        break
-                if not self.running:
-                    break
+            self.running = self._handle_input()
+            if not self.running:
+                break
 
-            self.update_progress_details = {}
-            self.logic.update_status_and_check_completion()
-            self._update_resource_stats()
-            if self.initializer.demo_env:
-                try:
-                    pass
-                except Exception as timer_err:
-                    logger.error(
-                        f"Error updating demo env timers: {timer_err}", exc_info=False
-                    )
+            self._update_state()
+            render_data = self._prepare_render_data()
+            self._render_frame(render_data)
+            self._log_loop_timing(loop_start_time)
 
-            if self.renderer:
-                plot_data = {}
-                stats_summary = {}
-                tb_log_dir = None
-                agent_params = 0
-                best_game_state_data = None  # Initialize
-
-                aggregator = self.initializer.stats_aggregator
-                if aggregator:
-                    plot_data = aggregator.get_plot_data()
-                    current_step = getattr(aggregator.storage, "current_global_step", 0)
-                    stats_summary = aggregator.get_summary(current_step)
-                    best_game_state_data = stats_summary.get(
-                        "best_game_state_data"
-                    )  # Fetch best state data
-
-                    if self.initializer.stats_recorder and isinstance(
-                        self.initializer.stats_recorder, TensorBoardStatsRecorder
-                    ):
-                        tb_log_dir = self.initializer.stats_recorder.log_dir
-                if self.initializer.agent:
-                    agent_params = self.initializer.agent_param_count
-
-                is_process_running = self.worker_manager.is_any_worker_running()
-
-                self.renderer.render_all(
-                    app_state=self.app_state.value,
-                    is_process_running=is_process_running,
-                    status=self.status,
-                    stats_summary=stats_summary,
-                    envs=self.initializer.envs,  # Pass empty list when running
-                    num_envs=self.env_config.NUM_ENVS,
-                    env_config=self.env_config,
-                    cleanup_confirmation_active=self.cleanup_confirmation_active,
-                    cleanup_message=self.cleanup_message,
-                    last_cleanup_message_time=self.last_cleanup_message_time,
-                    tensorboard_log_dir=tb_log_dir,
-                    plot_data=plot_data,
-                    demo_env=self.initializer.demo_env,
-                    update_progress_details=self.update_progress_details,
-                    agent_param_count=agent_params,
-                    worker_counts={},
-                    best_game_state_data=best_game_state_data,  # Pass best state data
-                )
-            else:
-                self.screen.fill((20, 0, 0))
-                font = pygame.font.Font(None, 30)
-                text_surf = font.render("Renderer Error", True, (255, 50, 50))
-                self.screen.blit(
-                    text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
-                )
-                pygame.display.flip()
         logger.info("Main application loop exited.")
 
     def shutdown(self):
@@ -1548,25 +1454,13 @@ class MainApp:
         logger.info("Shutdown complete.")
 
 
+# --- Main Execution ---
 tee_logger_instance: Optional[TeeLogger] = None
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AlphaTri Trainer")
-    parser.add_argument(
-        "--load-checkpoint",
-        type=str,
-        default=None,
-        help="Path to a specific checkpoint file to load.",
-    )
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set logging level.",
-    )
-    args = parser.parse_args()
 
+def setup_logging_and_run_id(args: argparse.Namespace):
+    """Sets up logging and determines the run ID."""
+    global tee_logger_instance
     if args.load_checkpoint:
         try:
             run_id_from_path = os.path.basename(os.path.dirname(args.load_checkpoint))
@@ -1574,7 +1468,7 @@ if __name__ == "__main__":
                 set_run_id(run_id_from_path)
                 print(f"Using Run ID from checkpoint path: {get_run_id()}")
             else:
-                get_run_id()
+                get_run_id()  # Generate new if path doesn't contain valid ID
         except Exception:
             get_run_id()
     else:
@@ -1583,7 +1477,7 @@ if __name__ == "__main__":
             set_run_id(latest_run_id)
             print(f"Resuming Run ID: {get_run_id()}")
         else:
-            get_run_id()
+            get_run_id()  # Generate new if no runs found
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
@@ -1602,6 +1496,44 @@ if __name__ == "__main__":
     logger.info(f"Using Run ID: {get_run_id()}")
     if args.load_checkpoint:
         logger.info(f"Attempting to load checkpoint: {args.load_checkpoint}")
+    return original_stdout, original_stderr
+
+
+def cleanup_logging(original_stdout, original_stderr, exit_code):
+    """Restores standard output/error and closes logger."""
+    print("[Main Finally] Restoring stdout/stderr and closing logger...")
+    if tee_logger_instance:
+        try:
+            if isinstance(sys.stdout, TeeLogger):
+                sys.stdout.flush()
+            if isinstance(sys.stderr, TeeLogger):
+                sys.stderr.flush()
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+            tee_logger_instance.close()
+            print("[Main Finally] TeeLogger closed and streams restored.")
+        except Exception as log_close_err:
+            original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
+            traceback.print_exc(file=original_stderr)
+    print(f"[Main Finally] Exiting with code {exit_code}.")
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AlphaTri Trainer")
+    parser.add_argument(
+        "--load-checkpoint", type=str, default=None, help="Path to checkpoint."
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level.",
+    )
+    args = parser.parse_args()
+
+    original_stdout, original_stderr = setup_logging_and_run_id(args)
 
     app = None
     exit_code = 0
@@ -1618,7 +1550,7 @@ if __name__ == "__main__":
             pygame.quit()
         exit_code = 130
     except Exception as e:
-        logger.critical(f"An unhandled exception occurred in main: {e}", exc_info=True)
+        logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
         if app:
             app.logic.exit_app()
             app.shutdown()
@@ -1626,22 +1558,7 @@ if __name__ == "__main__":
             pygame.quit()
         exit_code = 1
     finally:
-        print("[Main Finally] Restoring stdout/stderr and closing logger...")
-        if tee_logger_instance:
-            try:
-                if isinstance(sys.stdout, TeeLogger):
-                    sys.stdout.flush()
-                if isinstance(sys.stderr, TeeLogger):
-                    sys.stderr.flush()
-                sys.stdout = original_stdout
-                sys.stderr = original_stderr
-                tee_logger_instance.close()
-                print("[Main Finally] TeeLogger closed and streams restored.")
-            except Exception as log_close_err:
-                original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
-                traceback.print_exc(file=original_stderr)
-        print(f"[Main Finally] Exiting with code {exit_code}.")
-        sys.exit(exit_code)
+        cleanup_logging(original_stdout, original_stderr, exit_code)
 
 
 File: out.md
@@ -1691,48 +1608,37 @@ except Exception as e:
 
 
 File: app_init.py
-# File: app_init.py
-# File: app_init.py
 import pygame
 import time
 import traceback
 import sys
 import torch
 import torch.optim as optim
-import queue
-from typing import TYPE_CHECKING, List, Optional, Dict, Any
+from typing import TYPE_CHECKING, List, Optional
 
 from config import (
-    VisConfig,
-    EnvConfig,
-    RNNConfig,
     ModelConfig,
     StatsConfig,
-    TrainConfig,
-    TensorBoardConfig,
     DemoConfig,
-    TransformerConfig,
     MCTSConfig,
-    RANDOM_SEED,
     BASE_CHECKPOINT_DIR,
     get_run_checkpoint_dir,
-    DEVICE,
 )
 from environment.game_state import GameState
 from stats.stats_recorder import StatsRecorderBase
 from stats.aggregator import StatsAggregator
+from stats.simple_stats_recorder import SimpleStatsRecorder
 from ui.renderer import UIRenderer
 from ui.input_handler import InputHandler
 from training.checkpoint_manager import CheckpointManager
 from app_state import AppState
-from mcts import MCTS  # Import MCTS
+from mcts import MCTS
 from agent.alphazero_net import AlphaZeroNet
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
-    from mcts.node import MCTSNode
 
 
 class AppInitializer:
@@ -1743,17 +1649,13 @@ class AppInitializer:
         # Config instances
         self.vis_config = app.vis_config
         self.env_config = app.env_config
-        self.rnn_config = RNNConfig()
         self.train_config = app.train_config_instance
         self.model_config = ModelConfig()
         self.stats_config = StatsConfig()
-        self.tensorboard_config = TensorBoardConfig()
         self.demo_config = DemoConfig()
-        self.transformer_config = TransformerConfig()
         self.mcts_config = MCTSConfig()
 
         # Components to be initialized
-        self.envs: List[GameState] = []
         self.agent: Optional[AlphaZeroNet] = None
         self.optimizer: Optional[optim.Optimizer] = None
         self.stats_recorder: Optional[StatsRecorderBase] = None
@@ -1761,54 +1663,16 @@ class AppInitializer:
         self.demo_env: Optional[GameState] = None
         self.agent_param_count: int = 0
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.mcts: Optional[MCTS] = None  # Added MCTS instance
-        # self.mcts_root_node: Optional["MCTSNode"] = None # MCTS Vis removed
-        self.self_play_worker: Optional[SelfPlayWorker] = None
+        self.mcts: Optional[MCTS] = None
+        self.self_play_workers: List[SelfPlayWorker] = []
         self.training_worker: Optional[TrainingWorker] = None
 
     def initialize_all(self, is_reinit: bool = False):
         """Initializes all core components."""
         try:
-            if self.app.device.type == "cuda":
-                try:
-                    self.app.total_gpu_memory_bytes = torch.cuda.get_device_properties(
-                        self.app.device
-                    ).total_memory
-                    print(
-                        f"Total GPU Memory: {self.app.total_gpu_memory_bytes / (1024**3):.2f} GB"
-                    )
-                except Exception as e:
-                    print(f"Warning: Could not get total GPU memory: {e}")
-
+            self._check_gpu_memory()
             if not is_reinit:
-                self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
-                # MCTS Visualizer removed
-                # if self.app.renderer.mcts_visualizer and self.app.renderer.game_area:
-                #     self.app.renderer.mcts_visualizer.set_game_area_renderer(
-                #         self.app.renderer.game_area
-                #     )
-
-                self.app.renderer.render_all(
-                    app_state=self.app.app_state.value,
-                    is_process_running=False,
-                    status=self.app.status,
-                    stats_summary={},
-                    envs=[],
-                    num_envs=0,
-                    env_config=self.env_config,
-                    cleanup_confirmation_active=False,
-                    cleanup_message="",
-                    last_cleanup_message_time=0,
-                    tensorboard_log_dir=None,
-                    plot_data={},
-                    demo_env=None,
-                    update_progress_details={},
-                    agent_param_count=0,
-                    worker_counts={},
-                    # mcts_root_node=None, # MCTS Vis removed
-                )
-                pygame.display.flip()
-                pygame.time.delay(100)
+                self._initialize_ui_early()
 
             self.initialize_rl_components(
                 is_reinit=is_reinit, checkpoint_to_load=self.app.checkpoint_to_load
@@ -1818,31 +1682,72 @@ class AppInitializer:
                 self.initialize_demo_env()
                 self.initialize_input_handler()
 
-            if self.agent:
-                try:
-                    self.agent_param_count = sum(
-                        p.numel() for p in self.agent.parameters() if p.requires_grad
-                    )
-                except Exception as e:
-                    print(f"Warning: Could not calculate agent parameters: {e}")
-                    self.agent_param_count = 0
-
+            self._calculate_agent_params()
             self.initialize_workers()
 
         except Exception as init_err:
-            print(f"FATAL ERROR during component initialization: {init_err}")
-            traceback.print_exc()
-            if self.app.renderer:
-                try:
-                    self.app.app_state = AppState.ERROR
-                    self.app.status = "Initialization Failed"
-                    self.app.renderer._render_error_screen(self.app.status)
-                    pygame.display.flip()
-                    time.sleep(5)
-                except Exception:
-                    pass
-            pygame.quit()
-            sys.exit(1)
+            self._handle_init_error(init_err)
+
+    def _check_gpu_memory(self):
+        """Checks and prints total GPU memory if available."""
+        if self.app.device.type == "cuda":
+            try:
+                props = torch.cuda.get_device_properties(self.app.device)
+                self.app.total_gpu_memory_bytes = props.total_memory
+                print(f"Total GPU Memory: {props.total_memory / (1024**3):.2f} GB")
+            except Exception as e:
+                print(f"Warning: Could not get total GPU memory: {e}")
+
+    def _initialize_ui_early(self):
+        """Initializes the renderer and performs an initial render."""
+        self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
+        self.app.renderer.render_all(
+            app_state=self.app.app_state.value,
+            is_process_running=False,
+            status=self.app.status,
+            stats_summary={},
+            envs=[],
+            num_envs=0,
+            env_config=self.env_config,
+            cleanup_confirmation_active=False,
+            cleanup_message="",
+            last_cleanup_message_time=0,
+            plot_data={},
+            demo_env=None,
+            update_progress_details={},
+            agent_param_count=0,
+            worker_counts={},
+            best_game_state_data=None,
+        )
+        pygame.display.flip()
+        pygame.time.delay(100)  # Allow UI to update
+
+    def _calculate_agent_params(self):
+        """Calculates the number of trainable parameters in the agent."""
+        if self.agent:
+            try:
+                self.agent_param_count = sum(
+                    p.numel() for p in self.agent.parameters() if p.requires_grad
+                )
+            except Exception as e:
+                print(f"Warning: Could not calculate agent parameters: {e}")
+                self.agent_param_count = 0
+
+    def _handle_init_error(self, error: Exception):
+        """Handles fatal errors during initialization."""
+        print(f"FATAL ERROR during component initialization: {error}")
+        traceback.print_exc()
+        if self.app.renderer:
+            try:
+                self.app.app_state = AppState.ERROR
+                self.app.status = "Initialization Failed"
+                self.app.renderer._render_error_screen(self.app.status)
+                pygame.display.flip()
+                time.sleep(5)
+            except Exception:
+                pass
+        pygame.quit()
+        sys.exit(1)
 
     def initialize_rl_components(
         self, is_reinit: bool = False, checkpoint_to_load: Optional[str] = None
@@ -1851,90 +1756,74 @@ class AppInitializer:
         print(f"Initializing AlphaZero components... Re-init: {is_reinit}")
         start_time = time.time()
         try:
-            self.envs = []
-            self.agent = AlphaZeroNet(
-                env_config=self.env_config, model_config=self.model_config.Network()
-            ).to(self.app.device)
-            print(f"AlphaZeroNet initialized on device: {self.app.device}.")
-
-            self.optimizer = optim.Adam(
-                self.agent.parameters(),
-                lr=self.train_config.LEARNING_RATE,
-                weight_decay=self.train_config.WEIGHT_DECAY,
-            )
-            print(
-                f"Optimizer initialized (Adam, LR={self.train_config.LEARNING_RATE})."
-            )
-
-            if self.agent is None:
-                raise RuntimeError("Agent (NN) must be initialized before MCTS.")
-            # Instantiate MCTS with the agent's predict method
-            self.mcts = MCTS(
-                network_predictor=self.agent.predict,
-                config=self.mcts_config,
-                env_config=self.env_config,
-            )
-            print("MCTS initialized with AlphaZeroNet predictor.")
-
-            self.stats_recorder = None
-            self.stats_aggregator = None
-            try:
-                from init.stats_init import initialize_stats_recorder
-
-                self.stats_recorder = initialize_stats_recorder(
-                    stats_config=self.stats_config,
-                    tb_config=self.tensorboard_config,
-                    config_dict=self.app.config_dict,
-                    agent=self.agent,
-                    env_config=self.env_config,
-                    rnn_config=self.rnn_config,
-                    transformer_config=self.transformer_config,
-                    is_reinit=is_reinit,
-                )
-                if self.stats_recorder and hasattr(self.stats_recorder, "aggregator"):
-                    self.stats_aggregator = self.stats_recorder.aggregator
-                    print("StatsRecorder initialized, using its aggregator.")
-                else:
-                    print("StatsRecorder initialized but has no aggregator attribute.")
-            except ImportError:
-                print(
-                    "Warning: init.stats_init not found. Skipping full stats recorder."
-                )
-            except Exception as stats_init_err:
-                print(f"Error initializing stats recorder: {stats_init_err}")
-                traceback.print_exc()
-
-            if self.stats_aggregator is None:
-                print("Creating standalone StatsAggregator as fallback.")
-                self.stats_aggregator = StatsAggregator(
-                    avg_windows=self.stats_config.STATS_AVG_WINDOW,
-                    plot_window=self.stats_config.PLOT_DATA_WINDOW,
-                )
-
-            self.checkpoint_manager = CheckpointManager(
-                agent=self.agent,
-                optimizer=self.optimizer,
-                stats_aggregator=self.stats_aggregator,
-                base_checkpoint_dir=BASE_CHECKPOINT_DIR,
-                run_checkpoint_dir=get_run_checkpoint_dir(),
-                load_checkpoint_path_config=checkpoint_to_load,
-                device=self.app.device,
-            )
-
-            if self.checkpoint_manager.get_checkpoint_path_to_load():
-                self.checkpoint_manager.load_checkpoint()
-                loaded_global_step, initial_episode_count = (
-                    self.checkpoint_manager.get_initial_state()
-                )
-
+            self._init_agent()
+            self._init_optimizer()
+            self._init_mcts()
+            self._init_stats()
+            self._init_checkpoint_manager(checkpoint_to_load)
             print(
                 f"AlphaZero components initialized in {time.time() - start_time:.2f}s"
             )
-
         except Exception as e:
             print(f"Error during AlphaZero component initialization: {e}")
             traceback.print_exc()
             raise e
+
+    def _init_agent(self):
+        self.agent = AlphaZeroNet(
+            env_config=self.env_config, model_config=self.model_config.Network()
+        ).to(self.app.device)
+        print(f"AlphaZeroNet initialized on device: {self.app.device}.")
+
+    def _init_optimizer(self):
+        if not self.agent:
+            raise RuntimeError("Agent must be initialized before Optimizer.")
+        self.optimizer = optim.Adam(
+            self.agent.parameters(),
+            lr=self.train_config.LEARNING_RATE,
+            weight_decay=self.train_config.WEIGHT_DECAY,
+        )
+        print(f"Optimizer initialized (Adam, LR={self.train_config.LEARNING_RATE}).")
+
+    def _init_mcts(self):
+        if not self.agent:
+            raise RuntimeError("Agent must be initialized before MCTS.")
+        self.mcts = MCTS(
+            network_predictor=self.agent.predict,
+            config=self.mcts_config,
+            env_config=self.env_config,
+        )
+        print("MCTS initialized with AlphaZeroNet predictor.")
+
+    def _init_stats(self):
+        print("Initializing StatsAggregator and SimpleStatsRecorder...")
+        self.stats_aggregator = StatsAggregator(
+            avg_windows=self.stats_config.STATS_AVG_WINDOW,
+            plot_window=self.stats_config.PLOT_DATA_WINDOW,
+        )
+        self.stats_recorder = SimpleStatsRecorder(
+            aggregator=self.stats_aggregator,
+            console_log_interval=self.stats_config.CONSOLE_LOG_FREQ,
+            train_config=self.train_config,
+        )
+        print("StatsAggregator and SimpleStatsRecorder initialized.")
+
+    def _init_checkpoint_manager(self, checkpoint_to_load: Optional[str]):
+        if not self.agent or not self.optimizer or not self.stats_aggregator:
+            raise RuntimeError(
+                "Agent, Optimizer, StatsAggregator needed for CheckpointManager."
+            )
+        self.checkpoint_manager = CheckpointManager(
+            agent=self.agent,
+            optimizer=self.optimizer,
+            stats_aggregator=self.stats_aggregator,
+            base_checkpoint_dir=BASE_CHECKPOINT_DIR,
+            run_checkpoint_dir=get_run_checkpoint_dir(),
+            load_checkpoint_path_config=checkpoint_to_load,
+            device=self.app.device,
+        )
+        if self.checkpoint_manager.get_checkpoint_path_to_load():
+            self.checkpoint_manager.load_checkpoint()
 
     def initialize_workers(self):
         """Initializes worker threads (Self-Play, Training). Does NOT start them."""
@@ -1948,21 +1837,31 @@ class AppInitializer:
             print("ERROR: Cannot initialize workers, core RL components missing.")
             return
 
-        # Instantiate SelfPlayWorker
-        self.self_play_worker = SelfPlayWorker(
-            worker_id=0,
-            agent=self.agent,
-            mcts=self.mcts,
-            experience_queue=self.app.experience_queue,
-            stats_aggregator=self.stats_aggregator,
-            stop_event=self.app.stop_event,
-            env_config=self.env_config,
-            mcts_config=self.mcts_config,
-            device=self.app.device,
-        )
-        print("SelfPlayWorker initialized.")
+        self._init_self_play_workers()
+        self._init_training_worker()
+        num_sp = len(self.self_play_workers)
+        print(f"Worker threads initialized ({num_sp} Self-Play, 1 Training).")
 
-        # Instantiate TrainingWorker
+    def _init_self_play_workers(self):
+        self.self_play_workers = []
+        num_sp_workers = self.train_config.NUM_SELF_PLAY_WORKERS
+        print(f"Initializing {num_sp_workers} SelfPlayWorker(s)...")
+        for i in range(num_sp_workers):
+            worker = SelfPlayWorker(
+                worker_id=i,
+                agent=self.agent,
+                mcts=self.mcts,
+                experience_queue=self.app.experience_queue,
+                stats_aggregator=self.stats_aggregator,
+                stop_event=self.app.stop_event,
+                env_config=self.env_config,
+                mcts_config=self.mcts_config,
+                device=self.app.device,
+            )
+            self.self_play_workers.append(worker)
+            print(f"  SelfPlayWorker-{i} initialized.")
+
+    def _init_training_worker(self):
         self.training_worker = TrainingWorker(
             agent=self.agent,
             optimizer=self.optimizer,
@@ -1973,7 +1872,6 @@ class AppInitializer:
             device=self.app.device,
         )
         print("TrainingWorker initialized.")
-        print("Worker threads initialized.")
 
     def initialize_demo_env(self):
         """Initializes the separate environment for demo/debug mode."""
@@ -1992,72 +1890,51 @@ class AppInitializer:
         if not self.app.renderer:
             print("ERROR: Cannot initialize InputHandler before Renderer.")
             return
-
         self.app.input_handler = InputHandler(
             screen=self.app.screen,
             renderer=self.app.renderer,
-            # Basic Callbacks
             request_cleanup_cb=self.app.logic.request_cleanup,
             cancel_cleanup_cb=self.app.logic.cancel_cleanup,
             confirm_cleanup_cb=self.app.logic.confirm_cleanup,
             exit_app_cb=self.app.logic.exit_app,
-            # Demo Mode Callbacks
             start_demo_mode_cb=self.app.logic.start_demo_mode,
             exit_demo_mode_cb=self.app.logic.exit_demo_mode,
             handle_demo_mouse_motion_cb=self.app.logic.handle_demo_mouse_motion,
             handle_demo_mouse_button_down_cb=self.app.logic.handle_demo_mouse_button_down,
-            # Debug Mode Callbacks
             start_debug_mode_cb=self.app.logic.start_debug_mode,
             exit_debug_mode_cb=self.app.logic.exit_debug_mode,
             handle_debug_input_cb=self.app.logic.handle_debug_input,
-            # MCTS Vis Callbacks (Removed)
-            # start_mcts_visualization_cb=self.app.logic.start_mcts_visualization,
-            # exit_mcts_visualization_cb=self.app.logic.exit_mcts_visualization,
-            # handle_mcts_pan_cb=self.app.logic.handle_mcts_pan,
-            # handle_mcts_zoom_cb=self.app.logic.handle_mcts_zoom,
-            # Combined Worker Control Callbacks
             start_run_cb=self.app.logic.start_run,
             stop_run_cb=self.app.logic.stop_run,
         )
-        # Provide app reference to input handler AFTER it's created
         if self.app.input_handler:
             self.app.input_handler.app_ref = self.app
-
         if self.app.renderer and self.app.renderer.left_panel:
             self.app.renderer.left_panel.input_handler = self.app.input_handler
             if hasattr(self.app.renderer.left_panel, "button_status_renderer"):
-                self.app.renderer.left_panel.button_status_renderer.input_handler_ref = (
-                    self.app.input_handler
-                )
-                # Also provide app_ref to button renderer if needed
-                self.app.renderer.left_panel.button_status_renderer.app_ref = self.app
+                btn_renderer = self.app.renderer.left_panel.button_status_renderer
+                btn_renderer.input_handler_ref = self.app.input_handler
+                btn_renderer.app_ref = self.app
 
     def close_stats_recorder(self, is_cleanup: bool = False):
         """Safely closes the stats recorder (if it exists)."""
         print(
             f"[AppInitializer] close_stats_recorder called (is_cleanup={is_cleanup})..."
         )
-        if self.stats_recorder:
+        if self.stats_recorder and hasattr(self.stats_recorder, "close"):
             print("[AppInitializer] Stats recorder exists, attempting close...")
             try:
-                if hasattr(self.stats_recorder, "close"):
-                    self.stats_recorder.close(is_cleanup=is_cleanup)
-                    print("[AppInitializer] stats_recorder.close() executed.")
-                else:
-                    print("[AppInitializer] stats_recorder has no close method.")
+                self.stats_recorder.close(is_cleanup=is_cleanup)
+                print("[AppInitializer] stats_recorder.close() executed.")
             except Exception as log_e:
                 print(f"[AppInitializer] Error closing stats recorder on exit: {log_e}")
                 traceback.print_exc()
         else:
-            print(
-                "[AppInitializer] No stats recorder instance to close (might be using standalone aggregator)."
-            )
+            print("[AppInitializer] No stats recorder instance or close method.")
         print("[AppInitializer] close_stats_recorder finished.")
 
 
 File: app_logic.py
-# File: app_logic.py
-# File: app_logic.py
 import pygame
 import time
 import traceback
@@ -2066,6 +1943,7 @@ import shutil
 from typing import TYPE_CHECKING, Tuple
 
 from app_state import AppState
+from config.general import get_run_checkpoint_dir 
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
@@ -2079,40 +1957,33 @@ class AppLogic:
 
     def check_initial_completion_status(self):
         """Checks if training target was met upon loading (placeholder)."""
-        pass
+        pass 
 
     def update_status_and_check_completion(self):
         """Updates the status text based on application state."""
-        # Determine worker status
         is_running = self.app.worker_manager.is_any_worker_running()
-
-        if self.app.app_state == AppState.MAIN_MENU:
-            if self.app.cleanup_confirmation_active:
-                self.app.status = "Confirm Cleanup"
-            elif is_running:
-                self.app.status = "Running AlphaZero"  # Combined status
-            else:
-                self.app.status = "Ready"
-        elif self.app.app_state == AppState.PLAYING:
+        state = self.app.app_state
+        if state == AppState.MAIN_MENU:
+            self.app.status = (
+                "Confirm Cleanup"
+                if self.app.cleanup_confirmation_active
+                else "Running AlphaZero" if is_running else "Ready"
+            )
+        elif state == AppState.PLAYING:
             self.app.status = "Playing Demo"
-        elif self.app.app_state == AppState.DEBUG:
+        elif state == AppState.DEBUG:
             self.app.status = "Debugging Grid"
-        # MCTS_VISUALIZE state removed
-        # elif self.app.app_state == AppState.MCTS_VISUALIZE:
-        #     self.app.status = "Visualizing MCTS"
-        elif self.app.app_state == AppState.INITIALIZING:
+        elif state == AppState.INITIALIZING:
             self.app.status = "Initializing..."
-        elif self.app.app_state == AppState.ERROR:
-            pass
 
-    # --- Combined Worker Control ---
+    # --- Worker Control ---
     def start_run(self):
         """Starts both self-play and training workers."""
-        if self.app.app_state != AppState.MAIN_MENU:
-            print("Can only start run from Main Menu.")
-            return
-        if self.app.worker_manager.is_any_worker_running():
-            print("Run already in progress.")
+        if (
+            self.app.app_state != AppState.MAIN_MENU
+            or self.app.worker_manager.is_any_worker_running()
+        ):
+            print("Cannot start run: Not in Main Menu or already running.")
             return
         print("Starting AlphaZero Run (Self-Play & Training)...")
         self.app.worker_manager.start_all_workers()
@@ -2127,80 +1998,69 @@ class AppLogic:
         self.app.worker_manager.stop_all_workers()
         self.update_status_and_check_completion()
 
-    # --- End Combined Worker Control ---
-
+    # --- Mode Transitions & Cleanup ---
     def request_cleanup(self):
         if self.app.app_state != AppState.MAIN_MENU:
-            print("Cannot request cleanup outside MainMenu.")
             return
-        # Prevent cleanup if workers are running
         if self.app.worker_manager.is_any_worker_running():
-            print("Cannot cleanup while run is active. Stop the run first.")
-            self.app.cleanup_message = "Stop Run before Cleanup!"
-            self.app.last_cleanup_message_time = time.time()
+            self._set_temp_message("Stop Run before Cleanup!")
             return
         self.app.cleanup_confirmation_active = True
         self.app.status = "Confirm Cleanup"
         print("Cleanup requested. Confirm action.")
 
     def start_demo_mode(self):
-        if self.app.initializer.demo_env is None:
-            print("Cannot start demo: Demo env not initialized.")
-            return
-        if self.app.app_state != AppState.MAIN_MENU:
-            print("Cannot start demo mode outside MainMenu.")
-            return
-        if self.app.worker_manager.is_any_worker_running():
-            print("Cannot start demo while run is active. Stop the run first.")
-            self.app.cleanup_message = "Stop Run before Demo!"
-            self.app.last_cleanup_message_time = time.time()
-            return
-        print("Entering Demo Mode...")
-        self.try_save_checkpoint()
-        self.app.app_state = AppState.PLAYING
-        self.app.status = "Playing Demo"
-        self.app.initializer.demo_env.reset()
+        if self._can_start_mode("Demo"):
+            print("Entering Demo Mode...")
+            self.try_save_checkpoint()
+            self.app.app_state = AppState.PLAYING
+            self.app.status = "Playing Demo"
+            if self.app.initializer.demo_env:
+                self.app.initializer.demo_env.reset()
 
     def start_debug_mode(self):
-        if self.app.initializer.demo_env is None:
-            print("Cannot start debug: Demo env not initialized.")
-            return
-        if self.app.app_state != AppState.MAIN_MENU:
-            print("Cannot start debug mode outside MainMenu.")
-            return
-        if self.app.worker_manager.is_any_worker_running():
-            print("Cannot start debug while run is active. Stop the run first.")
-            self.app.cleanup_message = "Stop Run before Debug!"
-            self.app.last_cleanup_message_time = time.time()
-            return
-        print("Entering Debug Mode...")
-        self.try_save_checkpoint()
-        self.app.app_state = AppState.DEBUG
-        self.app.status = "Debugging Grid"
-        self.app.initializer.demo_env.reset()
+        if self._can_start_mode("Debug"):
+            print("Entering Debug Mode...")
+            self.try_save_checkpoint()
+            self.app.app_state = AppState.DEBUG
+            self.app.status = "Debugging Grid"
+            if self.app.initializer.demo_env:
+                self.app.initializer.demo_env.reset()
 
-    # --- MCTS Visualization Logic Removed ---
-    # def start_mcts_visualization(self):
-    #     pass
-    # def exit_mcts_visualization(self):
-    #     pass
-    # def handle_mcts_pan(self, delta_x: int, delta_y: int):
-    #     pass
-    # def handle_mcts_zoom(self, zoom_factor: float, mouse_pos: Tuple[int, int]):
-    #     pass
-    # --- End MCTS Visualization Logic Removal ---
+    def _can_start_mode(self, mode_name: str) -> bool:
+        """Checks if demo/debug mode can be started."""
+        if self.app.initializer.demo_env is None:
+            print(f"Cannot start {mode_name}: Env not initialized.")
+            return False
+        if self.app.app_state != AppState.MAIN_MENU:
+            print(f"Cannot start {mode_name} mode outside MainMenu.")
+            return False
+        if self.app.worker_manager.is_any_worker_running():
+            self._set_temp_message(f"Stop Run before {mode_name}!")
+            return False
+        return True
+
+    def exit_demo_mode(self):
+        if self.app.app_state == AppState.PLAYING:
+            print("Exiting Demo Mode...")
+            if self.app.initializer.demo_env:
+                self.app.initializer.demo_env.deselect_dragged_shape()
+            self._return_to_main_menu()
 
     def exit_debug_mode(self):
         if self.app.app_state == AppState.DEBUG:
             print("Exiting Debug Mode...")
-            self.app.app_state = AppState.MAIN_MENU
-            self.check_initial_completion_status()
-            self.update_status_and_check_completion()
+            self._return_to_main_menu()
+
+    def _return_to_main_menu(self):
+        """Helper to transition back to the main menu state."""
+        self.app.app_state = AppState.MAIN_MENU
+        self.check_initial_completion_status()
+        self.update_status_and_check_completion()
 
     def cancel_cleanup(self):
         self.app.cleanup_confirmation_active = False
-        self.app.cleanup_message = "Cleanup cancelled."
-        self.app.last_cleanup_message_time = time.time()
+        self._set_temp_message("Cleanup cancelled.")
         self.update_status_and_check_completion()
         print("Cleanup cancelled by user.")
 
@@ -2223,22 +2083,11 @@ class AppLogic:
         print("Exit requested.")
         self.app.stop_event.set()
         self.app.worker_manager.stop_all_workers()
-        return False
+        return False  # Signal main loop to stop
 
-    def exit_demo_mode(self):
-        if self.app.app_state == AppState.PLAYING:
-            print("Exiting Demo Mode...")
-            if self.app.initializer.demo_env:
-                self.app.initializer.demo_env.deselect_dragged_shape()
-            self.app.app_state = AppState.MAIN_MENU
-            self.check_initial_completion_status()
-            self.update_status_and_check_completion()
-
+    # --- Input Handling Callbacks ---
     def handle_demo_mouse_motion(self, mouse_pos: Tuple[int, int]):
-        if (
-            self.app.app_state != AppState.PLAYING
-            or self.app.initializer.demo_env is None
-        ):
+        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
             return
         demo_env = self.app.initializer.demo_env
         if demo_env.is_frozen() or demo_env.is_over():
@@ -2249,64 +2098,98 @@ class AppLogic:
         demo_env.update_snapped_position(grid_coords)
 
     def handle_demo_mouse_button_down(self, event: pygame.event.Event):
-        if (
-            self.app.app_state != AppState.PLAYING
-            or self.app.initializer.demo_env is None
-        ):
+        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
             return
         demo_env = self.app.initializer.demo_env
-        if demo_env.is_frozen() or demo_env.is_over():
+        if demo_env.is_frozen() or demo_env.is_over() or event.button != 1:
             return
-        if event.button != 1:
-            return
+
         mouse_pos = event.pos
-        clicked_preview_index = self.app.ui_utils.map_screen_to_preview(mouse_pos)
-        if clicked_preview_index is not None:
-            if clicked_preview_index == demo_env.demo_dragged_shape_idx:
-                demo_env.deselect_dragged_shape()
-            else:
-                demo_env.select_shape_for_drag(clicked_preview_index)
+        clicked_preview = self.app.ui_utils.map_screen_to_preview(mouse_pos)
+        if clicked_preview is not None:
+            action = (
+                demo_env.deselect_dragged_shape
+                if clicked_preview == demo_env.demo_dragged_shape_idx
+                else lambda: demo_env.select_shape_for_drag(clicked_preview)
+            )
+            action()
             return
+
         grid_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
-        if grid_coords is not None:
-            if (
-                demo_env.demo_dragged_shape_idx is not None
-                and demo_env.demo_snapped_position == grid_coords
-            ):
-                placed = demo_env.place_dragged_shape()
-                if placed and demo_env.is_over():
-                    print("[Demo] Game Over! Press ESC to exit.")
-            else:
-                demo_env.deselect_dragged_shape()
-            return
-        demo_env.deselect_dragged_shape()
+        if (
+            grid_coords is not None
+            and demo_env.demo_dragged_shape_idx is not None
+            and demo_env.demo_snapped_position == grid_coords
+        ):
+            placed = demo_env.place_dragged_shape()
+            if placed and demo_env.is_over():
+                print("[Demo] Game Over! Press ESC to exit.")
+        else:
+            demo_env.deselect_dragged_shape()
 
     def handle_debug_input(self, event: pygame.event.Event):
-        if (
-            self.app.app_state != AppState.DEBUG
-            or self.app.initializer.demo_env is None
-        ):
+        if self.app.app_state != AppState.DEBUG or not self.app.initializer.demo_env:
             return
         demo_env = self.app.initializer.demo_env
-        if event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_r:
-                print("[Debug] Resetting grid...")
-                demo_env.reset()
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+            print("[Debug] Resetting grid...")
+            demo_env.reset()
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            mouse_pos = event.pos
-            clicked_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
+            clicked_coords = self.app.ui_utils.map_screen_to_grid(event.pos)
             if clicked_coords:
-                row, col = clicked_coords
-                demo_env.toggle_triangle_debug(row, col)
+                demo_env.toggle_triangle_debug(*clicked_coords)
+
+    # --- Internal Helpers ---
+    def _set_temp_message(self, message: str):
+        """Sets a temporary message to be displayed."""
+        self.app.cleanup_message = message
+        self.app.last_cleanup_message_time = time.time()
 
     def _cleanup_data(self):
         """Deletes current run's checkpoint and re-initializes components."""
-        from config.general import get_run_checkpoint_dir
-
         print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
         self.app.app_state = AppState.INITIALIZING
         self.app.status = "Cleaning"
         messages = []
+        self._render_during_cleanup()
+
+        print("[Cleanup] Stopping existing worker threads (if any)...")
+        self.app.worker_manager.stop_all_workers()
+        print("[Cleanup] Existing worker threads stopped.")
+        print("[Cleanup] Closing stats recorder...")
+        self.app.initializer.close_stats_recorder(is_cleanup=True)
+        print("[Cleanup] Stats recorder closed.")
+
+        messages.append(self._delete_checkpoint_dir())
+        time.sleep(0.1)
+
+        print("[Cleanup] Re-initializing components...")
+        try:
+            self.app.initializer.initialize_rl_components(
+                is_reinit=True, checkpoint_to_load=None
+            )
+            print("[Cleanup] Components re-initialized.")
+            if self.app.initializer.demo_env:
+                self.app.initializer.demo_env.reset()
+            self.app.initializer.initialize_workers()
+            print("[Cleanup] Workers re-initialized (not started).")
+            messages.append("Components re-initialized.")
+            self.app.status = "Ready"
+            self.app.app_state = AppState.MAIN_MENU
+        except Exception as e:
+            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
+            traceback.print_exc()
+            self.app.status = "Error: Re-init Failed"
+            self.app.app_state = AppState.ERROR
+            messages.append("ERROR RE-INITIALIZING COMPONENTS!")
+            if self.app.renderer:
+                self.app.renderer._render_error_screen(self.app.status)
+
+        self._set_temp_message("\n".join(messages))
+        print(f"--- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}) ---")
+
+    def _render_during_cleanup(self):
+        """Renders the screen while cleanup is in progress."""
         if self.app.renderer:
             try:
                 self.app.renderer.render_all(
@@ -2320,7 +2203,6 @@ class AppLogic:
                     cleanup_confirmation_active=False,
                     cleanup_message="",
                     last_cleanup_message_time=0,
-                    tensorboard_log_dir=None,
                     plot_data={},
                     demo_env=self.app.initializer.demo_env,
                     update_progress_details={},
@@ -2328,20 +2210,17 @@ class AppLogic:
                         self.app.initializer, "agent_param_count", 0
                     ),
                     worker_counts={},
-                    # mcts_root_node=None, # MCTS Vis removed
+                    best_game_state_data=None,
                 )
                 pygame.display.flip()
                 pygame.time.delay(100)
             except Exception as render_err:
                 print(f"Warning: Error rendering during cleanup start: {render_err}")
 
-        print("[Cleanup] Stopping existing worker threads (if any)...")
-        self.app.worker_manager.stop_all_workers()
-        print("[Cleanup] Existing worker threads stopped.")
-        print("[Cleanup] Closing stats recorder...")
-        self.app.initializer.close_stats_recorder(is_cleanup=True)
-        print("[Cleanup] Stats recorder closed.")
+    def _delete_checkpoint_dir(self) -> str:
+        """Deletes the checkpoint directory and returns a status message."""
         print("[Cleanup] Deleting agent checkpoint file/dir...")
+        msg = ""
         try:
             save_dir = get_run_checkpoint_dir()
             if os.path.isdir(save_dir):
@@ -2349,56 +2228,55 @@ class AppLogic:
                 msg = f"Run checkpoint directory deleted: {save_dir}"
             else:
                 msg = f"Run checkpoint directory not found: {save_dir}"
-            print(f"  - {msg}")
-            messages.append(msg)
         except OSError as e:
             msg = f"Error deleting checkpoint dir: {e}"
-            print(f"  - {msg}")
-            messages.append(msg)
+        print(f"  - {msg}")
         print("[Cleanup] Checkpoint deletion attempt finished.")
-        time.sleep(0.1)
-        print("[Cleanup] Re-initializing components...")
-        try:
-            self.app.initializer.initialize_rl_components(
-                is_reinit=True, checkpoint_to_load=None
-            )
-            print("[Cleanup] Components re-initialized.")
-            if self.app.initializer.demo_env:
-                self.app.initializer.demo_env.reset()
-                print("[Cleanup] Demo env reset.")
-            self.app.initializer.initialize_workers()  # Re-init workers
-            print("[Cleanup] Workers re-initialized (not started).")
-            print("[Cleanup] Component re-initialization successful.")
-            messages.append("Components re-initialized.")
-            self.app.status = "Ready"
-            self.app.app_state = AppState.MAIN_MENU
-            print("[Cleanup] Application state set to MAIN_MENU.")
-        except Exception as e:
-            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
-            traceback.print_exc()
-            self.app.status = "Error: Re-init Failed"
-            self.app.app_state = AppState.ERROR
-            messages.append("ERROR RE-INITIALIZING COMPONENTS!")
-            if self.app.renderer:
-                try:
-                    self.app.renderer._render_error_screen(self.app.status)
-                except Exception as render_err_final:
-                    print(f"Warning: Failed to render error screen: {render_err_final}")
-        self.app.cleanup_message = "\n".join(messages)
-        self.app.last_cleanup_message_time = time.time()
-        print(
-            f"--- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}, Status: {self.app.status}) ---"
-        )
+        return msg
 
     def try_save_checkpoint(self):
         """Saves checkpoint if in main menu and workers are not running."""
         if (
-            self.app.app_state == AppState.MAIN_MENU
-            and not self.app.worker_manager.is_any_worker_running()  # Only save if stopped
-            and self.app.initializer.checkpoint_manager
-            and self.app.initializer.stats_aggregator
+            self.app.app_state != AppState.MAIN_MENU
+            or self.app.worker_manager.is_any_worker_running()
         ):
-            print("Saving checkpoint...")
+            return
+        if (
+            not self.app.initializer.checkpoint_manager
+            or not self.app.initializer.stats_aggregator
+        ):
+            return
+
+        print("Saving checkpoint...")
+        try:
+            agg_storage = self.app.initializer.stats_aggregator.storage
+            current_step = getattr(agg_storage, "current_global_step", 0)
+            episode_count = getattr(agg_storage, "total_episodes", 0)
+            target_step = getattr(
+                self.app.initializer.checkpoint_manager, "training_target_step", 0
+            )
+            self.app.initializer.checkpoint_manager.save_checkpoint(
+                current_step,
+                episode_count,
+                training_target_step=target_step,
+                is_final=False,
+            )
+        except Exception as e:
+            print(f"Error saving checkpoint: {e}")
+            traceback.print_exc()
+
+    def save_final_checkpoint(self):
+        """Saves the final checkpoint."""
+        if (
+            not self.app.initializer.checkpoint_manager
+            or not self.app.initializer.stats_aggregator
+        ):
+            return
+        save_on_exit = (
+            self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
+        )
+        if save_on_exit:
+            print("Performing final checkpoint save...")
             try:
                 agg_storage = self.app.initializer.stats_aggregator.storage
                 current_step = getattr(agg_storage, "current_global_step", 0)
@@ -2410,47 +2288,16 @@ class AppLogic:
                     current_step,
                     episode_count,
                     training_target_step=target_step,
-                    is_final=False,
+                    is_final=True,
                 )
-            except Exception as e:
-                print(f"Error saving checkpoint: {e}")
+            except Exception as final_save_err:
+                print(f"Error during final checkpoint save: {final_save_err}")
                 traceback.print_exc()
-
-    def save_final_checkpoint(self):
-        """Saves the final checkpoint."""
-        if (
-            self.app.initializer.checkpoint_manager
-            and self.app.initializer.stats_aggregator
-        ):
-            save_on_exit = (
-                self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
-            )
-            if save_on_exit:
-                print("Performing final checkpoint save...")
-                try:
-                    agg_storage = self.app.initializer.stats_aggregator.storage
-                    current_step = getattr(agg_storage, "current_global_step", 0)
-                    episode_count = getattr(agg_storage, "total_episodes", 0)
-                    target_step = getattr(
-                        self.app.initializer.checkpoint_manager,
-                        "training_target_step",
-                        0,
-                    )
-                    self.app.initializer.checkpoint_manager.save_checkpoint(
-                        current_step,
-                        episode_count,
-                        training_target_step=target_step,
-                        is_final=True,
-                    )
-                except Exception as final_save_err:
-                    print(f"Error during final checkpoint save: {final_save_err}")
-                    traceback.print_exc()
-            else:
-                print("Skipping final checkpoint save.")
+        else:
+            print("Skipping final checkpoint save.")
 
 
 File: app_setup.py
-# File: app_setup.py
 import os
 import pygame
 from typing import Tuple, Dict, Any
@@ -2499,16 +2346,14 @@ def load_and_validate_configs() -> Dict[str, Any]:
 
 
 File: app_state.py
-# File: app_state.py
-from enum import Enum, auto
+from enum import Enum
 
 
 class AppState(Enum):
     INITIALIZING = "Initializing"
     MAIN_MENU = "MainMenu"
-    PLAYING = "Playing"  # Demo Mode
+    PLAYING = "Playing" 
     DEBUG = "Debug"
-    MCTS_VISUALIZE = "MCTS Visualize"  # New state for MCTS view
     CLEANUP_CONFIRM = "Confirm Cleanup"
     CLEANING = "Cleaning"
     ERROR = "Error"
@@ -2516,8 +2361,6 @@ class AppState(Enum):
 
 
 File: app_ui_utils.py
-# File: app_ui_utils.py
-import pygame
 from typing import TYPE_CHECKING, Tuple, Optional
 
 if TYPE_CHECKING:
@@ -2619,12 +2462,10 @@ class AppUIUtils:
 
 
 File: app_workers.py
-# File: app_workers.py
 import threading
 import queue
 import time
-import traceback
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, List, Dict
 
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
@@ -2639,15 +2480,20 @@ class AppWorkerManager:
     def __init__(self, app: "MainApp"):
         self.app = app
         # Keep references to the worker *instances* from AppInitializer
-        self.self_play_worker_thread: Optional[SelfPlayWorker] = None
+        self.self_play_worker_threads: List[SelfPlayWorker] = []  # Now a list
         self.training_worker_thread: Optional[TrainingWorker] = None
         print("[AppWorkerManager] Initialized.")
 
+    def get_active_worker_counts(self) -> Dict[str, int]:
+        """Returns the count of currently active workers by type."""
+        sp_count = sum(1 for w in self.self_play_worker_threads if w and w.is_alive())
+        tr_count = 1 if self.is_training_running() else 0
+        return {"SelfPlay": sp_count, "Training": tr_count}
+
     def is_self_play_running(self) -> bool:
-        """Checks if the self-play worker thread is active."""
-        return (
-            self.self_play_worker_thread is not None
-            and self.self_play_worker_thread.is_alive()
+        """Checks if *any* self-play worker thread is active."""
+        return any(
+            w is not None and w.is_alive() for w in self.self_play_worker_threads
         )
 
     def is_training_running(self) -> bool:
@@ -2662,7 +2508,7 @@ class AppWorkerManager:
         return self.is_self_play_running() or self.is_training_running()
 
     def start_all_workers(self):
-        """Starts both worker threads if they are initialized and not running."""
+        """Starts all initialized worker threads if they are not already running."""
         if self.is_any_worker_running():
             print("[AppWorkerManager] Workers already running.")
             return
@@ -2681,9 +2527,9 @@ class AppWorkerManager:
             self.app.status = "Worker Init Failed"
             return
 
-        # Check worker instances
+        # Check worker instances from initializer
         if (
-            not self.app.initializer.self_play_worker
+            not self.app.initializer.self_play_workers
             or not self.app.initializer.training_worker
         ):
             print(
@@ -2696,36 +2542,59 @@ class AppWorkerManager:
         print("[AppWorkerManager] Starting all worker threads...")
         self.app.stop_event.clear()  # Clear stop event before starting
 
-        # Start Self-Play
-        self.self_play_worker_thread = self.app.initializer.self_play_worker
-        if self.self_play_worker_thread:
-            # Need to create a new thread instance if the old one was joined
-            if not self.self_play_worker_thread.is_alive():
-                self.self_play_worker_thread = SelfPlayWorker(
-                    **self.self_play_worker_thread.get_init_args()
-                )  # Recreate
-                self.app.initializer.self_play_worker = (
-                    self.self_play_worker_thread
-                )  # Update initializer ref
-            self.self_play_worker_thread.start()
-            print("SelfPlayWorker thread started.")
-        else:
-            print(
-                "[AppWorkerManager] ERROR: SelfPlayWorker instance is None during start."
-            )
+        # --- Start Self-Play Workers ---
+        self.self_play_worker_threads = []  # Reset the list of active threads
+        for i, worker_instance in enumerate(self.app.initializer.self_play_workers):
+            if worker_instance:
+                # Need to create a new thread instance if the old one was joined
+                if not worker_instance.is_alive():
+                    try:
+                        # Recreate worker with original args
+                        recreated_worker = SelfPlayWorker(
+                            **worker_instance.get_init_args()
+                        )
+                        self.app.initializer.self_play_workers[i] = (
+                            recreated_worker  # Update initializer ref
+                        )
+                        worker_to_start = recreated_worker
+                        print(f"  Recreated SelfPlayWorker-{i}.")
+                    except Exception as e:
+                        print(f"  ERROR recreating SelfPlayWorker-{i}: {e}")
+                        continue  # Skip starting this worker
+                else:
+                    worker_to_start = worker_instance  # Start existing instance
 
-        # Start Training
+                self.self_play_worker_threads.append(
+                    worker_to_start
+                )  # Add to active list
+                worker_to_start.start()
+                print(f"  SelfPlayWorker-{i} thread started.")
+            else:
+                print(
+                    f"[AppWorkerManager] ERROR: SelfPlayWorker instance {i} is None during start."
+                )
+
+        # --- Start Training Worker ---
         self.training_worker_thread = self.app.initializer.training_worker
         if self.training_worker_thread:
             if not self.training_worker_thread.is_alive():
-                self.training_worker_thread = TrainingWorker(
-                    **self.training_worker_thread.get_init_args()
-                )  # Recreate
-                self.app.initializer.training_worker = (
-                    self.training_worker_thread
-                )  # Update initializer ref
-            self.training_worker_thread.start()
-            print("TrainingWorker thread started.")
+                try:
+                    # Recreate worker with original args
+                    recreated_worker = TrainingWorker(
+                        **self.training_worker_thread.get_init_args()
+                    )
+                    self.app.initializer.training_worker = (
+                        recreated_worker  # Update initializer ref
+                    )
+                    self.training_worker_thread = recreated_worker
+                    print("  Recreated TrainingWorker.")
+                except Exception as e:
+                    print(f"  ERROR recreating TrainingWorker: {e}")
+                    self.training_worker_thread = None  # Failed to recreate
+
+            if self.training_worker_thread:  # Check again if recreation was successful
+                self.training_worker_thread.start()
+                print("  TrainingWorker thread started.")
         else:
             print(
                 "[AppWorkerManager] ERROR: TrainingWorker instance is None during start."
@@ -2733,19 +2602,26 @@ class AppWorkerManager:
 
         if self.is_any_worker_running():
             self.app.status = "Running AlphaZero"
+            num_sp = len(self.self_play_worker_threads)
+            num_tr = 1 if self.is_training_running() else 0
+            print(f"[AppWorkerManager] Workers started ({num_sp} SP, {num_tr} TR).")
 
     def stop_all_workers(self, join_timeout: float = 5.0):
         """Signals ALL worker threads to stop and waits for them to join."""
         if not self.is_any_worker_running():
-            # print("[AppWorkerManager] No workers running to stop.")
             return
 
         print("[AppWorkerManager] Stopping ALL worker threads...")
         self.app.stop_event.set()  # Signal stop
 
-        threads_to_join = []
-        if self.self_play_worker_thread and self.self_play_worker_thread.is_alive():
-            threads_to_join.append(("SelfPlayWorker", self.self_play_worker_thread))
+        threads_to_join: List[Tuple[str, threading.Thread]] = []
+
+        # Add active self-play workers
+        for i, worker in enumerate(self.self_play_worker_threads):
+            if worker and worker.is_alive():
+                threads_to_join.append((f"SelfPlayWorker-{i}", worker))
+
+        # Add active training worker
         if self.training_worker_thread and self.training_worker_thread.is_alive():
             threads_to_join.append(("TrainingWorker", self.training_worker_thread))
 
@@ -2764,7 +2640,7 @@ class AppWorkerManager:
                 print(f"[AppWorkerManager] {name} joined.")
 
         # Clear references after joining
-        self.self_play_worker_thread = None
+        self.self_play_worker_threads = []
         self.training_worker_thread = None
 
         # Clear experience queue after stopping workers
@@ -2784,9 +2660,6 @@ class AppWorkerManager:
         )
 
         print("[AppWorkerManager] All worker threads stopped.")
-        # Keep stop_event set after stopping all workers? Or clear it?
-        # Let's clear it so they can be restarted individually if needed later.
-        # self.app.stop_event.clear() # Decide if this should be cleared
 
 
 File: check_gpu.py
@@ -2821,8 +2694,7 @@ else:
 
 File: logger.py
 import os
-import sys
-from typing import TextIO
+from typing import TextIO, Optional
 
 
 class TeeLogger:
@@ -2875,7 +2747,6 @@ class TeeLogger:
 
 
 File: main_pygame.py
-# File: main_pygame.py
 import pygame
 import sys
 import time
@@ -2884,32 +2755,22 @@ import logging
 import argparse
 import os
 import traceback
-from typing import Optional, List, Dict, Any
-import torch
-import torch.optim as optim
+from typing import Optional, Dict, Any
 import queue
-
-try:
-    import psutil
-except ImportError:
-    print("Warning: psutil not found.")
-    psutil = None
+import numpy as np
+from collections import deque
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
+
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
+# --- Config and Utils Imports ---
 try:
     from config import (
         VisConfig,
         EnvConfig,
-        RNNConfig,
-        ModelConfig,
-        StatsConfig,
         TrainConfig,
-        TensorBoardConfig,
-        DemoConfig,
-        TransformerConfig,
         MCTSConfig,
         RANDOM_SEED,
         BASE_CHECKPOINT_DIR,
@@ -2924,25 +2785,15 @@ try:
     from logger import TeeLogger
     from utils.init_checks import run_pre_checks
 except ImportError as e:
-    print(f"Error importing config/utils: {e}")
-    traceback.print_exc()
-    sys.exit(1)
-except Exception as e:
-    print(f"Unexpected error during import: {e}")
-    traceback.print_exc()
+    print(f"Error importing config/utils: {e}\n{traceback.format_exc()}")
     sys.exit(1)
 
+# --- App Component Imports ---
 try:
     from environment.game_state import GameState
     from ui.renderer import UIRenderer
-    from stats import (
-        StatsRecorderBase,
-        SimpleStatsRecorder,
-        TensorBoardStatsRecorder,
-        StatsAggregator,
-    )
+    from stats import  StatsAggregator
     from training.checkpoint_manager import (
-        CheckpointManager,
         find_latest_run_and_checkpoint,
     )
     from app_state import AppState
@@ -2952,14 +2803,12 @@ try:
     from app_setup import (
         initialize_pygame,
         initialize_directories,
-        load_and_validate_configs,
     )
     from app_ui_utils import AppUIUtils
     from ui.input_handler import InputHandler
     from agent.alphazero_net import AlphaZeroNet
 except ImportError as e:
-    print(f"Error importing app components: {e}")
-    traceback.print_exc()
+    print(f"Error importing app components: {e}\n{traceback.format_exc()}")
     sys.exit(1)
 
 logging.basicConfig(
@@ -2967,51 +2816,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# --- Constants ---
+LOOP_TIMING_INTERVAL = 60  # Log loop timing every N frames
+
 
 class MainApp:
     """Main application class orchestrating Pygame UI and AlphaZero components."""
 
     def __init__(self, checkpoint_to_load: Optional[str] = None):
-        # --- Configuration ---
+        # Config Instances (Keep essential ones)
         self.vis_config = VisConfig()
         self.env_config = EnvConfig()
-        self.rnn_config = RNNConfig()
         self.train_config_instance = TrainConfig()
-        self.model_config = ModelConfig()
-        self.stats_config = StatsConfig()
-        self.tensorboard_config = TensorBoardConfig()
-        self.demo_config = DemoConfig()
-        self.transformer_config = TransformerConfig()
         self.mcts_config = MCTSConfig()
-        self.config_dict = get_config_dict()
 
-        # --- Core Components ---
+        # Core Components
         self.screen: Optional[pygame.Surface] = None
         self.clock: Optional[pygame.time.Clock] = None
         self.renderer: Optional[UIRenderer] = None
         self.input_handler: Optional[InputHandler] = None
 
-        # --- State ---
+        # State
         self.app_state: AppState = AppState.INITIALIZING
         self.status: str = "Initializing..."
         self.running: bool = True
         self.update_progress_details: Dict[str, Any] = {}
 
-        # --- Threading & Communication ---
+        # Threading & Communication
         self.stop_event = threading.Event()
-        self.experience_queue: queue.Queue = queue.Queue(
+        self.experience_queue: queue.Queue[ProcessedExperienceBatch] = queue.Queue(
             maxsize=self.train_config_instance.BUFFER_CAPACITY
         )
 
-        # --- RL Components (Managed by Initializer) ---
-        self.envs: List[GameState] = []
+        # RL Components (Managed by Initializer)
         self.agent: Optional[AlphaZeroNet] = None
-        self.optimizer: Optional[optim.Optimizer] = None
-        self.stats_recorder: Optional[StatsRecorderBase] = None
-        self.checkpoint_manager: Optional[CheckpointManager] = None
+        self.stats_aggregator: Optional[StatsAggregator] = None
         self.demo_env: Optional[GameState] = None
 
-        # --- Helper Classes ---
+        # Helper Classes
         self.device = get_torch_device()
         set_device(self.device)
         self.checkpoint_to_load = checkpoint_to_load
@@ -3020,15 +2862,15 @@ class MainApp:
         self.worker_manager = AppWorkerManager(self)
         self.ui_utils = AppUIUtils(self)
 
-        # --- UI State ---
+        # UI State
         self.cleanup_confirmation_active: bool = False
         self.cleanup_message: str = ""
         self.last_cleanup_message_time: float = 0.0
         self.total_gpu_memory_bytes: Optional[int] = None
 
-        # --- Resource Monitoring ---
-        self.last_resource_update_time: float = 0.0
-        self.resource_update_interval: float = 1.0
+        # Timing
+        self.frame_count = 0
+        self.loop_times = deque(maxlen=LOOP_TIMING_INTERVAL)
 
     def initialize(self):
         """Initializes Pygame, directories, configs, and core components."""
@@ -3039,145 +2881,126 @@ class MainApp:
         run_pre_checks()
 
         self.app_state = AppState.INITIALIZING
-        self.initializer.initialize_all()
+        self.initializer.initialize_all()  # Delegates complex init
 
-        self.optimizer = self.initializer.optimizer
+        # Get references after initialization
+        self.agent = self.initializer.agent
+        self.stats_aggregator = self.initializer.stats_aggregator
+        self.demo_env = self.initializer.demo_env
 
-        if self.renderer and self.initializer.app.input_handler:
-            self.renderer.set_input_handler(self.initializer.app.input_handler)
+        if self.renderer and self.input_handler:
+            self.renderer.set_input_handler(self.input_handler)
 
         self.logic.check_initial_completion_status()
         self.status = "Ready"
         self.app_state = AppState.MAIN_MENU
         logger.info("--- Initialization Complete ---")
-        if self.tensorboard_config.LOG_DIR:
-            tb_path = os.path.abspath(get_run_log_dir())
-            logger.info(f"--- TensorBoard logs: tensorboard --logdir {tb_path} ---")
 
-    def _update_resource_stats(self):
-        """Updates CPU, Memory, and GPU usage in the StatsAggregator."""
-        current_time = time.time()
-        if (
-            current_time - self.last_resource_update_time
-            < self.resource_update_interval
-        ):
-            return
-        aggregator = self.initializer.stats_aggregator
-        if not aggregator:
-            return
+    def _handle_input(self) -> bool:
+        """Handles user input."""
+        if self.input_handler:
+            return self.input_handler.handle_input(
+                self.app_state.value, self.cleanup_confirmation_active
+            )
+        else:
+            # Basic quit handling if input handler fails
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    self.stop_event.set()
+                    self.worker_manager.stop_all_workers()
+                    return False
+            return True
 
-        storage = aggregator.storage
-        cpu_percent, mem_percent, gpu_mem_percent = 0.0, 0.0, 0.0
-        if psutil:
-            try:
-                cpu_percent = psutil.cpu_percent()
-                mem_percent = psutil.virtual_memory().percent
-            except Exception as e:
-                logger.warning(f"Error getting CPU/Mem usage: {e}")
-        if self.device.type == "cuda" and self.total_gpu_memory_bytes:
-            try:
-                allocated = torch.cuda.memory_allocated(self.device)
-                gpu_mem_percent = (allocated / self.total_gpu_memory_bytes) * 100.0
-            except Exception as e:
-                logger.warning(f"Error getting GPU memory usage: {e}")
-                gpu_mem_percent = 0.0
-        with aggregator._lock:
-            storage.current_cpu_usage = cpu_percent
-            storage.current_memory_usage = mem_percent
-            storage.current_gpu_memory_usage_percent = gpu_mem_percent
-            if hasattr(storage, "cpu_usage"):
-                storage.cpu_usage.append(cpu_percent)
-            if hasattr(storage, "memory_usage"):
-                storage.memory_usage.append(mem_percent)
-            if hasattr(storage, "gpu_memory_usage_percent"):
-                storage.gpu_memory_usage_percent.append(gpu_mem_percent)
-        self.last_resource_update_time = current_time
+    def _update_state(self):
+        """Updates application logic and status."""
+        self.update_progress_details = {}  # Reset progress details
+        self.logic.update_status_and_check_completion()
+
+    def _prepare_render_data(self) -> Dict[str, Any]:
+        """Gathers data needed for rendering."""
+        render_data = {
+            "plot_data": {},
+            "stats_summary": {},
+            "agent_params": 0,
+            "best_game_state_data": None,
+            "worker_counts": {},
+            "is_process_running": False,
+        }
+        if self.stats_aggregator:
+            render_data["plot_data"] = self.stats_aggregator.get_plot_data()
+            current_step = self.stats_aggregator.storage.current_global_step
+            render_data["stats_summary"] = self.stats_aggregator.get_summary(
+                current_step
+            )
+            render_data["best_game_state_data"] = (
+                self.stats_aggregator.get_best_game_state_data()
+            )
+
+        if self.agent:
+            render_data["agent_params"] = self.initializer.agent_param_count
+
+        render_data["worker_counts"] = self.worker_manager.get_active_worker_counts()
+        render_data["is_process_running"] = self.worker_manager.is_any_worker_running()
+        return render_data
+
+    def _render_frame(self, render_data: Dict[str, Any]):
+        """Renders the UI frame."""
+        if self.renderer:
+            self.renderer.render_all(
+                app_state=self.app_state.value,
+                is_process_running=render_data["is_process_running"],
+                status=self.status,
+                stats_summary=render_data["stats_summary"],
+                envs=[],  # envs list is not actively used for rendering AZ
+                num_envs=self.train_config_instance.NUM_SELF_PLAY_WORKERS,
+                env_config=self.env_config,
+                cleanup_confirmation_active=self.cleanup_confirmation_active,
+                cleanup_message=self.cleanup_message,
+                last_cleanup_message_time=self.last_cleanup_message_time,
+                plot_data=render_data["plot_data"],
+                demo_env=self.demo_env,
+                update_progress_details=self.update_progress_details,
+                agent_param_count=render_data["agent_params"],
+                worker_counts=render_data["worker_counts"],
+                best_game_state_data=render_data["best_game_state_data"],
+            )
+        else:  # Fallback rendering
+            self.screen.fill((20, 0, 0))
+            font = pygame.font.Font(None, 30)
+            text_surf = font.render("Renderer Error", True, (255, 50, 50))
+            self.screen.blit(
+                text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
+            )
+            pygame.display.flip()
+
+    def _log_loop_timing(self, loop_start_time: float):
+        """Logs average loop time periodically."""
+        self.loop_times.append(time.monotonic() - loop_start_time)
+        self.frame_count += 1
+        if self.frame_count % LOOP_TIMING_INTERVAL == 0:
+            avg_loop_time_ms = np.mean(self.loop_times) * 1000
+            logger.info(
+                f"[Timing] Avg main loop time ({LOOP_TIMING_INTERVAL} frames): {avg_loop_time_ms:.2f} ms"
+            )
 
     def run_main_loop(self):
         """The main application loop."""
         logger.info("Starting main application loop...")
         while self.running:
+            loop_start_time = time.monotonic()
+            if not self.clock:
+                break  # Exit if clock not initialized
             dt = self.clock.tick(self.vis_config.FPS) / 1000.0
 
-            if self.input_handler:
-                self.running = self.input_handler.handle_input(
-                    self.app_state.value, self.cleanup_confirmation_active
-                )
-                if not self.running:
-                    break
-            else:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT:
-                        self.running = False
-                        self.stop_event.set()
-                        self.worker_manager.stop_all_workers()
-                        break
-                if not self.running:
-                    break
+            self.running = self._handle_input()
+            if not self.running:
+                break
 
-            self.update_progress_details = {}
-            self.logic.update_status_and_check_completion()
-            self._update_resource_stats()
-            if self.initializer.demo_env:
-                try:
-                    pass
-                except Exception as timer_err:
-                    logger.error(
-                        f"Error updating demo env timers: {timer_err}", exc_info=False
-                    )
+            self._update_state()
+            render_data = self._prepare_render_data()
+            self._render_frame(render_data)
+            self._log_loop_timing(loop_start_time)
 
-            if self.renderer:
-                plot_data = {}
-                stats_summary = {}
-                tb_log_dir = None
-                agent_params = 0
-                best_game_state_data = None  # Initialize
-
-                aggregator = self.initializer.stats_aggregator
-                if aggregator:
-                    plot_data = aggregator.get_plot_data()
-                    current_step = getattr(aggregator.storage, "current_global_step", 0)
-                    stats_summary = aggregator.get_summary(current_step)
-                    best_game_state_data = stats_summary.get(
-                        "best_game_state_data"
-                    )  # Fetch best state data
-
-                    if self.initializer.stats_recorder and isinstance(
-                        self.initializer.stats_recorder, TensorBoardStatsRecorder
-                    ):
-                        tb_log_dir = self.initializer.stats_recorder.log_dir
-                if self.initializer.agent:
-                    agent_params = self.initializer.agent_param_count
-
-                is_process_running = self.worker_manager.is_any_worker_running()
-
-                self.renderer.render_all(
-                    app_state=self.app_state.value,
-                    is_process_running=is_process_running,
-                    status=self.status,
-                    stats_summary=stats_summary,
-                    envs=self.initializer.envs,  # Pass empty list when running
-                    num_envs=self.env_config.NUM_ENVS,
-                    env_config=self.env_config,
-                    cleanup_confirmation_active=self.cleanup_confirmation_active,
-                    cleanup_message=self.cleanup_message,
-                    last_cleanup_message_time=self.last_cleanup_message_time,
-                    tensorboard_log_dir=tb_log_dir,
-                    plot_data=plot_data,
-                    demo_env=self.initializer.demo_env,
-                    update_progress_details=self.update_progress_details,
-                    agent_param_count=agent_params,
-                    worker_counts={},
-                    best_game_state_data=best_game_state_data,  # Pass best state data
-                )
-            else:
-                self.screen.fill((20, 0, 0))
-                font = pygame.font.Font(None, 30)
-                text_surf = font.render("Renderer Error", True, (255, 50, 50))
-                self.screen.blit(
-                    text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
-                )
-                pygame.display.flip()
         logger.info("Main application loop exited.")
 
     def shutdown(self):
@@ -3195,25 +3018,13 @@ class MainApp:
         logger.info("Shutdown complete.")
 
 
+# --- Main Execution ---
 tee_logger_instance: Optional[TeeLogger] = None
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AlphaTri Trainer")
-    parser.add_argument(
-        "--load-checkpoint",
-        type=str,
-        default=None,
-        help="Path to a specific checkpoint file to load.",
-    )
-    parser.add_argument(
-        "--log-level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set logging level.",
-    )
-    args = parser.parse_args()
 
+def setup_logging_and_run_id(args: argparse.Namespace):
+    """Sets up logging and determines the run ID."""
+    global tee_logger_instance
     if args.load_checkpoint:
         try:
             run_id_from_path = os.path.basename(os.path.dirname(args.load_checkpoint))
@@ -3221,7 +3032,7 @@ if __name__ == "__main__":
                 set_run_id(run_id_from_path)
                 print(f"Using Run ID from checkpoint path: {get_run_id()}")
             else:
-                get_run_id()
+                get_run_id()  # Generate new if path doesn't contain valid ID
         except Exception:
             get_run_id()
     else:
@@ -3230,7 +3041,7 @@ if __name__ == "__main__":
             set_run_id(latest_run_id)
             print(f"Resuming Run ID: {get_run_id()}")
         else:
-            get_run_id()
+            get_run_id()  # Generate new if no runs found
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
@@ -3249,6 +3060,44 @@ if __name__ == "__main__":
     logger.info(f"Using Run ID: {get_run_id()}")
     if args.load_checkpoint:
         logger.info(f"Attempting to load checkpoint: {args.load_checkpoint}")
+    return original_stdout, original_stderr
+
+
+def cleanup_logging(original_stdout, original_stderr, exit_code):
+    """Restores standard output/error and closes logger."""
+    print("[Main Finally] Restoring stdout/stderr and closing logger...")
+    if tee_logger_instance:
+        try:
+            if isinstance(sys.stdout, TeeLogger):
+                sys.stdout.flush()
+            if isinstance(sys.stderr, TeeLogger):
+                sys.stderr.flush()
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+            tee_logger_instance.close()
+            print("[Main Finally] TeeLogger closed and streams restored.")
+        except Exception as log_close_err:
+            original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
+            traceback.print_exc(file=original_stderr)
+    print(f"[Main Finally] Exiting with code {exit_code}.")
+    sys.exit(exit_code)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="AlphaTri Trainer")
+    parser.add_argument(
+        "--load-checkpoint", type=str, default=None, help="Path to checkpoint."
+    )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging level.",
+    )
+    args = parser.parse_args()
+
+    original_stdout, original_stderr = setup_logging_and_run_id(args)
 
     app = None
     exit_code = 0
@@ -3265,7 +3114,7 @@ if __name__ == "__main__":
             pygame.quit()
         exit_code = 130
     except Exception as e:
-        logger.critical(f"An unhandled exception occurred in main: {e}", exc_info=True)
+        logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
         if app:
             app.logic.exit_app()
             app.shutdown()
@@ -3273,22 +3122,7 @@ if __name__ == "__main__":
             pygame.quit()
         exit_code = 1
     finally:
-        print("[Main Finally] Restoring stdout/stderr and closing logger...")
-        if tee_logger_instance:
-            try:
-                if isinstance(sys.stdout, TeeLogger):
-                    sys.stdout.flush()
-                if isinstance(sys.stderr, TeeLogger):
-                    sys.stderr.flush()
-                sys.stdout = original_stdout
-                sys.stderr = original_stderr
-                tee_logger_instance.close()
-                print("[Main Finally] TeeLogger closed and streams restored.")
-            except Exception as log_close_err:
-                original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
-                traceback.print_exc(file=original_stderr)
-        print(f"[Main Finally] Exiting with code {exit_code}.")
-        sys.exit(exit_code)
+        cleanup_logging(original_stdout, original_stderr, exit_code)
 
 
 File: requirements.txt
@@ -3300,142 +3134,14 @@ cloudpickle
 matplotlib
 psutil
 
-File: wish.md
-**AlphaZero Core Concepts Explained**
-
-AlphaZero learns by combining a powerful Neural Network (NN) with Monte Carlo Tree Search (MCTS) through self-play.
-
-1.  **Neural Network (NN):**
-    *   **Input:** The current game state (`GameState.get_state()`).
-    *   **Output:** Two heads:
-        *   **Policy Head (π):** Predicts a probability distribution over all possible *next moves* from the current state. This acts as a prior, guiding the MCTS search towards promising moves.
-        *   **Value Head (v):** Predicts the expected *outcome* of the game from the current state (e.g., a value between -1 for loss, 0 for draw, +1 for win).
-    *   **Architecture:** Often uses convolutional layers (like ResNet blocks) to process the board state, followed by fully connected layers leading to the policy and value heads. Your `ModelConfig` provides a good starting point.
-
-2.  **Monte Carlo Tree Search (MCTS):**
-    *   **Purpose:** For a given game state, MCTS explores the possible future game trajectories to determine the *best* move to make *right now*. It builds a search tree where nodes are game states and edges are actions.
-    *   **Process (for each move decision):**
-        *   **Selection:** Start at the root node (current state). Traverse down the tree by repeatedly selecting the child node with the highest score according to a formula (like UCB1: `ValueEstimate + ExplorationBonus * sqrt(log(ParentVisits) / ChildVisits)`). The NN's policy output (π) influences the ExplorationBonus, biasing the search towards moves the NN thinks are good. The NN's value output (v) can be used as the initial ValueEstimate for new nodes.
-        *   **Expansion:** When a leaf node (a state not yet fully explored or added to the tree) is reached, expand it by adding one or more children representing possible next states after taking valid actions. Get the policy (π) and value (v) for this leaf state from the NN. Use π to initialize child node priors and v as the initial value estimate for this node.
-        *   **Simulation (Rollout):** *Crucially, the original AlphaZero often doesn't perform full random rollouts.* Instead, the **NN's value prediction (v)** for the expanded leaf node is directly used as the estimated outcome of the game from that point. This makes the search much more efficient than random simulations.
-        *   **Backpropagation:** Update the statistics (visit count `N`, total action value `W` or `Q`) of all nodes along the path from the expanded leaf node back up to the root, using the value (v) obtained during expansion/simulation. The value estimate for a node becomes `Q = W / N`.
-    *   **Output:** After running many simulations (e.g., 100, 800, 1600), MCTS provides an *improved* policy distribution for the root state (current state). This distribution is usually based on the visit counts (`N`) of the children nodes of the root (often normalized: `probs = N^(1/temperature)`). This improved policy is the target the NN learns to predict.
-
-**Self-Play:**
-    *   The agent plays games against itself.
-    *   For each move in a game:
-        *   Run MCTS from the current state using the *current* NN.
-        *   Select the actual move to play based on the MCTS result (e.g., sample proportionally to visit counts, especially early in the game to encourage exploration; later, deterministically pick the most visited move).
-        *   Update the game state.
-    *   At the end of the game, record the final outcome (Win=+1, Loss=-1, Draw=0).
-    *   Store the collected data for each step: `(state, mcts_policy_target, final_outcome)`.
-
-**Training:**
-    *   Periodically (or continuously), sample batches of `(state, mcts_policy_target, final_outcome)` data collected from self-play games.
-    *   Train the NN:
-        *   **Policy Loss:** Minimize the difference (e.g., cross-entropy) between the NN's policy output (π) for the `state` and the `mcts_policy_target`.
-        *   **Value Loss:** Minimize the difference (e.g., mean squared error) between the NN's value output (v) for the `state` and the actual `final_outcome` (z).
-        *   Combine these losses (often with regularization) and update the NN weights using an optimizer (e.g., Adam).
-
-**Analogy:** The NN is like an improving intuition about the game. MCTS is like focused thinking/planning using that intuition to find the best immediate move. Self-play generates the experience (games) needed for the intuition (NN) to learn from the thinking (MCTS) and the results (game outcomes).
-
-**Does MCTS need huge amounts of random data?** Not exactly. MCTS *itself* is the search process. The *self-play* phase generates the data *using* MCTS guided by the NN. The quality of this data improves as the NN gets better. You need many self-play games, but the moves within those games are intelligently selected by MCTS, not purely random (except maybe in the simulation phase if you choose to implement it that way, but using the NN value is standard).
-
-**Step-by-Step Implementation Plan**
-
-Here's a high-level, detailed plan to refactor towards AlphaZero:
-
-**Phase 1: Implement AlphaZero Components**
-
-3.  **Define Neural Network (`AlphaZeroNet`):**
-    *   Create a new file (e.g., `agent/alphazero_net.py`).
-    *   Define a class `AlphaZeroNet(torch.nn.Module)`.
-    *   Use `ModelConfig` to define the architecture (e.g., CNN backbone similar to existing, potentially ResNet blocks).
-    *   Implement the `forward` method:
-        *   Input: State dictionary from `GameState.get_state()`. Process grid, shapes, features appropriately.
-        *   Output: `policy_logits` (raw scores before softmax, shape `[batch_size, action_dim]`) and `value` (scalar estimate, shape `[batch_size, 1]`).
-    *   Implement `get_state_dict` and `load_state_dict` (standard PyTorch).
-4.  **Implement MCTS:**
-    *   Create new files (e.g., `mcts/node.py`, `mcts/search.py`).
-    *   **`MCTSNode` Class:** Represents a node in the search tree. Stores:
-        *   `state`: The game state this node represents (can be lightweight if needed).
-        *   `parent`: Reference to the parent node.
-        *   `children`: Dictionary mapping action -> child `MCTSNode`.
-        *   `visit_count (N)`: How many times this node was visited during backpropagation.
-        *   `total_action_value (W)` or `mean_action_value (Q)`: Sum or average of values backpropagated through this node.
-        *   `prior_probability (P)`: Policy prior from the NN for the action leading to this node (stored in the child).
-        *   `action_taken`: The action that led from the parent to this node.
-        *   `is_expanded`: Boolean flag.
-    *   **`MCTS` Class:** Orchestrates the search.
-        *   `__init__(self, nn_agent: AlphaZeroNet, env_config: EnvConfig, mcts_config)`: Takes the NN and configs.
-        *   `run_simulations(self, root_state: GameState, num_simulations: int)`: Main MCTS loop.
-            *   Creates the `root_node`.
-            *   Repeatedly calls `_select`, `_expand`, `_simulate` (using NN value), `_backpropagate`.
-        *   `_select(self, node: MCTSNode)`: Traverses the tree using UCB1 or PUCT formula, returning the leaf node to expand.
-        *   `_expand(self, node: MCTSNode)`: If node isn't terminal, get valid actions, get policy/value from NN for the node's state, create child nodes, initialize their priors (P).
-        *   `_simulate(self, node: MCTSNode)`: **Crucially, just return the value (v) predicted by the NN during the `_expand` step for this node.** No random rollout needed typically.
-        *   `_backpropagate(self, node: MCTSNode, value: float)`: Update `N` and `W` (or `Q`) for the node and its ancestors up to the root.
-        *   `get_policy_target(self, root_node: MCTSNode, temperature: float)`: After simulations, calculate the improved policy target based on child visit counts (`N^(1/temperature)`), normalized. Returns a probability distribution over actions.
-
-**Phase 2: Implement Workers and Integration**
-
-5.  **Implement Self-Play Worker:**
-    *   Create a class (e.g., `workers/self_play_worker.py`).
-    *   Takes the NN, `EnvConfig`, MCTS instance (or creates one), a shared data buffer (e.g., `queue.Queue` or custom buffer), stop/pause events.
-    *   `run()` method:
-        *   Loops indefinitely (until `stop_event`).
-        *   Plays a full game:
-            *   `game = GameState()`, `game.reset()`.
-            *   `game_data = []` (to store `(state, policy_target, player)` tuples for this game).
-            *   While `not game.is_over()`:
-                *   `policy_target = mcts.run_simulations(game.get_state(), num_simulations)`
-                *   `current_state_features = game.get_state()` # Get state *before* the move
-                *   `game_data.append((current_state_features, policy_target, game.current_player))` # Store state and MCTS target
-                *   `action = choose_action(policy_target, temperature)` # Choose actual move (probabilistic early, deterministic later)
-                *   `_, done = game.step(action)`
-            *   `final_outcome = determine_outcome(game)` # Get win/loss/draw (+1/-1/0)
-            *   Assign the `final_outcome` to all stored tuples in `game_data`.
-            *   Put `game_data` into the shared buffer.
-            *   Log episode stats via `StatsAggregator`.
-6.  **Implement Training Worker:**
-    *   Create a class (e.g., `workers/training_worker.py`).
-    *   Takes the NN, optimizer, shared data buffer, `StatsAggregator`, stop event.
-    *   `run()` method:
-        *   Loops indefinitely (until `stop_event`).
-        *   Samples a batch of `(state, policy_target, outcome)` from the buffer.
-        *   Performs NN forward pass: `policy_logits, value = nn(batch_states)`.
-        *   Calculates policy loss (e.g., `CrossEntropyLoss(policy_logits, batch_policy_targets)`).
-        *   Calculates value loss (e.g., `MSELoss(value, batch_outcomes)`).
-        *   Calculates total loss (+ regularization).
-        *   Performs `optimizer.zero_grad()`, `loss.backward()`, `optimizer.step()`.
-        *   Logs losses and other training metrics (LR, etc.) via `StatsAggregator.record_step()`.
-7.  **Integrate Components:**
-    *   **`AppInitializer`:** Instantiate `AlphaZeroNet`, `MCTS`, `SelfPlayWorker`, `TrainingWorker`, shared buffer, optimizer. Pass references correctly.
-    *   **`AppWorkerManager`:** Modify `start_worker_threads` and `stop_worker_threads` to manage the new `SelfPlayWorker` and `TrainingWorker` threads.
-    *   **`CheckpointManager`:** Update `save_checkpoint` to include `nn.state_dict()`, `optimizer.state_dict()`, and the updated `stats_aggregator.state_dict()`. Update `load_checkpoint` accordingly.
-    *   **`StatsAggregator` / Loggers:** Ensure they track and log `policy_loss`, `value_loss`, and potentially MCTS statistics passed via `record_step` or `record_episode`.
-    *   **`main_pygame.py`:** Ensure the main loop correctly starts/stops workers, fetches stats from the aggregator for rendering, and handles shutdown gracefully.
-    *   **UI (`LeftPanelRenderer`, `Plotter`):** Update to display new stats (NN losses) and remove obsolete PPO stats.
-
-**Phase 3: Refinement and Tuning**
-
-8.  **Debugging:** Thoroughly test interactions between MCTS, NN, self-play, and training.
-9.  **Tuning:** Adjust hyperparameters:
-    *   MCTS: `num_simulations`, UCB1/PUCT exploration constant (`c_puct`).
-    *   Self-Play: Temperature parameter for action selection.
-    *   NN: Architecture (`ModelConfig`), learning rate, optimizer parameters, regularization strength.
-    *   Training: Batch size, buffer size, training frequency vs. self-play generation speed.
-10. **Profiling:** Use `analyze_profile.py` to identify bottlenecks (MCTS or NN inference are common).
-
 File: agent\alphazero_net.py
-# File: agent/alphazero_net.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple, Optional, Any
 
 from config import ModelConfig, EnvConfig
-from utils.types import StateType, ActionType  # Corrected import
+from utils.types import StateType, ActionType
 
 
 class ResidualBlock(nn.Module):
@@ -3626,8 +3332,6 @@ File: agent\__init__.py
 
 
 File: config\constants.py
-# File: config/constants.py
-
 """
 Defines constants shared across different modules, primarily visual elements,
 to avoid circular imports and keep configuration clean.
@@ -3681,7 +3385,6 @@ MCTS_MINI_GRID_OCCUPIED_COLOR: tuple[int, int, int] = (
 
 
 File: config\core.py
-# File: config/core.py
 import torch
 from typing import List, Tuple, Optional
 
@@ -3725,7 +3428,9 @@ class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
     PUCT_C: float = 1.5
-    NUM_SIMULATIONS: int = 100
+    # --- Keep Simulations Low for Fast Testing ---
+    NUM_SIMULATIONS: int = 15  # Keep low for fast self-play steps
+    # --- Original Value: 100, Previous: 50, 30, 15 ---
     TEMPERATURE_INITIAL: float = 1.0
     TEMPERATURE_FINAL: float = 0.01
     TEMPERATURE_ANNEAL_STEPS: int = 30
@@ -3735,8 +3440,10 @@ class MCTSConfig:
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 16
-    FPS = 60
+    # --- Render multiple envs again when idle ---
+    NUM_ENVS_TO_RENDER = 8  # Show first 8 envs when run is stopped
+    # --- Original Value: 16, Changed to 0 previously ---
+    FPS = 0
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
@@ -3762,7 +3469,6 @@ class VisConfig:
     LINE_CLEAR_FLASH_COLOR = LINE_CLEAR_FLASH_COLOR
     LINE_CLEAR_HIGHLIGHT_COLOR = LINE_CLEAR_HIGHLIGHT_COLOR
     GAME_OVER_FLASH_COLOR = GAME_OVER_FLASH_COLOR
-    # MCTS Colors
     MCTS_NODE_WIN_COLOR = MCTS_NODE_WIN_COLOR
     MCTS_NODE_LOSS_COLOR = MCTS_NODE_LOSS_COLOR
     MCTS_NODE_NEUTRAL_COLOR = MCTS_NODE_NEUTRAL_COLOR
@@ -3780,7 +3486,6 @@ class VisConfig:
 
 
 class EnvConfig:
-    NUM_ENVS = 1  # AlphaZero typically uses 1 env for self-play generation
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2
@@ -3825,22 +3530,23 @@ class TransformerConfig:
 class TrainConfig:
     """Configuration parameters for the Training Worker."""
 
-    CHECKPOINT_SAVE_FREQ = 50  # Save every N training steps/epochs
+    CHECKPOINT_SAVE_FREQ = 50
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
-    # --- Training Loop Parameters ---
-    BATCH_SIZE: int = 64
-    LEARNING_RATE: float = 1e-4
-    WEIGHT_DECAY: float = 1e-5  # L2 Regularization
-    NUM_TRAINING_STEPS_PER_ITER: int = (
-        100  # How many optimizer steps per training iteration
-    )
-    MIN_BUFFER_SIZE_TO_TRAIN: int = (
-        1000  # Minimum experiences in buffer before training starts
-    )
-    BUFFER_CAPACITY: int = 50_000  # Max size of the experience replay buffer
+    # --- Worker Configuration ---
+    # --- Reduced Workers for Testing ---
+    NUM_SELF_PLAY_WORKERS: int = 2  # Reduced for testing (Prev: 24)
+    # --- Original Value: 8 ---
 
-    # --- Loss Weights (Optional) ---
+    # --- Training Loop Parameters (Configured for FAST TESTING) ---
+    BATCH_SIZE: int = 64  # Keep batch size reasonable
+    LEARNING_RATE: float = 1e-4
+    WEIGHT_DECAY: float = 1e-5
+    NUM_TRAINING_STEPS_PER_ITER: int = 10  # Reduced for faster iterations (Prev: 100)
+    MIN_BUFFER_SIZE_TO_TRAIN: int = (
+        100  # Drastically reduced for fast start (Prev: 1000)
+    )
+    BUFFER_CAPACITY: int = 200  # Reduced to match min buffer (Prev: 50000)
     POLICY_LOSS_WEIGHT: float = 1.0
     VALUE_LOSS_WEIGHT: float = 1.0
 
@@ -3851,17 +3557,14 @@ class ModelConfig:
         HEIGHT = _env_cfg_instance.ROWS
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
-
         CONV_CHANNELS = [64, 128, 256]
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
-
         SHAPE_FEATURE_MLP_DIMS = [128, 128]
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
-
         COMBINED_FC_DIMS = [1024, 256]
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
@@ -3870,16 +3573,8 @@ class ModelConfig:
 
 class StatsConfig:
     STATS_AVG_WINDOW: List[int] = [25, 50, 100]
-    CONSOLE_LOG_FREQ = 1  # Log every N training steps or episodes
+    CONSOLE_LOG_FREQ = 1
     PLOT_DATA_WINDOW = 100_000
-
-
-class TensorBoardConfig:
-    LOG_HISTOGRAMS = False
-    HISTOGRAM_LOG_FREQ = 20  # Log every N training steps
-    LOG_IMAGES = False
-    IMAGE_LOG_FREQ = 20  # Log every N training steps
-    LOG_DIR: Optional[str] = None
 
 
 class DemoConfig:
@@ -3892,7 +3587,6 @@ class DemoConfig:
 
 
 File: config\general.py
-# File: config/general.py
 import torch
 import os
 import time
@@ -3967,7 +3661,6 @@ def get_model_save_path() -> str:
 
 
 File: config\utils.py
-# File: config/utils.py
 import torch
 from typing import Dict, Any
 from .core import (
@@ -3977,13 +3670,11 @@ from .core import (
     TrainConfig,
     ModelConfig,
     StatsConfig,
-    TensorBoardConfig,
     DemoConfig,
     TransformerConfig,
-    MCTSConfig,  # Import MCTSConfig from core
+    MCTSConfig,  
 )
 
-# Import DEVICE and RANDOM_SEED directly, use get_run_id() for the run ID
 from .general import DEVICE, RANDOM_SEED, get_run_id
 
 
@@ -4024,7 +3715,7 @@ def get_config_dict() -> Dict[str, Any]:
     all_configs.update(flatten_class(TrainConfig, "Train."))
     all_configs.update(flatten_class(ModelConfig.Network, "Model.Net."))
     all_configs.update(flatten_class(StatsConfig, "Stats."))
-    all_configs.update(flatten_class(TensorBoardConfig, "TB."))
+    # all_configs.update(flatten_class(TensorBoardConfig, "TB.")) # Removed
     all_configs.update(flatten_class(DemoConfig, "Demo."))
     all_configs.update(flatten_class(TransformerConfig, "Transformer."))
     all_configs.update(flatten_class(MCTSConfig, "MCTS."))  # Flatten MCTSConfig
@@ -4051,14 +3742,12 @@ def get_config_dict() -> Dict[str, Any]:
 
 
 File: config\validation.py
-# File: config/validation.py
 from .core import (
     EnvConfig,
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
-    TensorBoardConfig,
     VisConfig,
     TransformerConfig,
     MCTSConfig,
@@ -4068,7 +3757,6 @@ from .general import (
     get_run_id,
     get_run_log_dir,
     get_run_checkpoint_dir,
-    get_model_save_path,
 )
 
 
@@ -4076,7 +3764,6 @@ def print_config_info_and_validate():
     env_config_instance = EnvConfig()
     rnn_config_instance = RNNConfig()
     transformer_config_instance = TransformerConfig()
-    vis_config_instance = VisConfig()
     train_config_instance = TrainConfig()
     mcts_config_instance = MCTSConfig()
 
@@ -4089,10 +3776,7 @@ def print_config_info_and_validate():
     print(f"Log Directory: {run_log_dir}")
     print(f"Checkpoint Directory: {run_checkpoint_dir}")
     print(f"Device: {DEVICE}")
-    print(
-        f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
-        f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
-    )
+    # Removed TensorBoard logging status print
 
     if train_config_instance.LOAD_CHECKPOINT_PATH:
         print(
@@ -4131,7 +3815,7 @@ def print_config_info_and_validate():
     )
 
     print(
-        f"MCTS: Sims={mcts_config_instance.NUM_SIMULATIONS}, "
+        f"MCTS: Sims={mcts_config_instance.NUM_SIMULATIONS}, "  # Updated Sims
         f"PUCT_C={mcts_config_instance.PUCT_C:.2f}, "
         f"Temp={mcts_config_instance.TEMPERATURE_INITIAL:.2f}->{mcts_config_instance.TEMPERATURE_FINAL:.2f}, "
         f"Dirichlet(α={mcts_config_instance.DIRICHLET_ALPHA:.2f}, ε={mcts_config_instance.DIRICHLET_EPSILON:.2f})"
@@ -4143,19 +3827,18 @@ def print_config_info_and_validate():
         f"MinBuffer={train_config_instance.MIN_BUFFER_SIZE_TO_TRAIN:,}, Steps/Iter={train_config_instance.NUM_TRAINING_STEPS_PER_ITER}"
     )
     print(
+        f"Workers: Self-Play={train_config_instance.NUM_SELF_PLAY_WORKERS}, Training=1"
+    )  # Updated Workers
+    print(
         f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (updates/episodes)"
     )
 
-    if env_config_instance.NUM_ENVS > 1:
-        print(
-            "*" * 70
-            + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. AlphaZero self-play typically uses 1 env. ***\n"
-            "*** Ensure worker implementation handles this correctly if parallel generation is intended. ***\n"
-            + "*" * 70
-        )
-    print(
-        f"--- Rendering {VisConfig.NUM_ENVS_TO_RENDER if VisConfig.NUM_ENVS_TO_RENDER > 0 else 'ALL'} of {env_config_instance.NUM_ENVS} environments ---"
-    )
+    render_info = "Best State (when running)"
+    if VisConfig.NUM_ENVS_TO_RENDER > 0:
+        render_info += f" / First {VisConfig.NUM_ENVS_TO_RENDER} Envs (when idle)"
+    else:
+        render_info += " / Placeholder (when idle)"
+    print(f"--- Rendering {render_info} in Game Area ---")  # Updated Render info
     print("-" * 70)
 
 
@@ -4172,7 +3855,7 @@ from .core import (
     TrainConfig,
     ModelConfig,
     StatsConfig,
-    TensorBoardConfig,
+    # TensorBoardConfig removed
     DemoConfig,
     TransformerConfig,
     MCTSConfig,
@@ -4246,7 +3929,7 @@ __all__ = [
     "TrainConfig",
     "ModelConfig",
     "StatsConfig",
-    "TensorBoardConfig",
+    # "TensorBoardConfig", # Removed
     "DemoConfig",
     "TransformerConfig",
     "MCTSConfig",
@@ -5006,12 +4689,11 @@ class GameStateFeatures:
 
 
 File: environment\grid.py
+# File: environment/grid.py
 import numpy as np
 from typing import List, Tuple, Set, Dict
 
 from config import EnvConfig
-
-
 from .triangle import Triangle
 from .shape import Shape
 
@@ -5019,291 +4701,172 @@ from .shape import Shape
 class Grid:
     """Represents the game board composed of Triangles."""
 
-    def __init__(self, env_config: EnvConfig): 
+    def __init__(self, env_config: EnvConfig):
         self.rows = env_config.ROWS
         self.cols = env_config.COLS
-        self.triangles: List[List[Triangle]] = []
-        self._create(env_config)  # Pass config to _create
-        self._link_neighbors()  # Link neighbors after creation
-        self._identify_playable_lines()  # Identify all potential lines
+        self.triangles: List[List[Triangle]] = self._create(env_config)
+        self._link_neighbors()
+        self.potential_lines: List[Set[Triangle]] = self._identify_playable_lines()
 
-    def _create(self, env_config: EnvConfig) -> None:
+    def _create(self, env_config: EnvConfig) -> List[List[Triangle]]:
         """Initializes the grid with playable and death cells."""
-        # Example pattern for a hexagon-like board within the grid bounds
         cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]  # Specific to 8 rows
-
         if len(cols_per_row) != self.rows:
-            raise ValueError(
-                f"Grid._create error: Length of cols_per_row ({len(cols_per_row)}) must match EnvConfig.ROWS ({self.rows})"
-            )
+            raise ValueError("cols_per_row length mismatch")
         if max(cols_per_row) > self.cols:
-            raise ValueError(
-                f"Grid._create error: Max playable columns ({max(cols_per_row)}) exceeds EnvConfig.COLS ({self.cols})"
-            )
+            raise ValueError("cols_per_row exceeds EnvConfig.COLS")
 
-        self.triangles = []
+        grid: List[List[Triangle]] = []
         for r in range(self.rows):
-            row_triangles: List[Triangle] = []
-            base_playable_cols = cols_per_row[r]
-
-            # Calculate padding for death cells
-            initial_death_cols_left = (
-                (self.cols - base_playable_cols) // 2
-                if base_playable_cols < self.cols
-                else 0
-            )
-            initial_first_death_col_right = initial_death_cols_left + base_playable_cols
-
-            # Adjustment for Specific Hex Grid Pattern (makes it slightly narrower)
-            adjusted_death_cols_left = initial_death_cols_left + 1
-            adjusted_first_death_col_right = initial_first_death_col_right - 1
-
+            row_tris: List[Triangle] = []
+            playable = cols_per_row[r]
+            pad_l = (self.cols - playable) // 2 + 1  # Adjusted padding
+            pad_r = pad_l + playable - 2  # Adjusted padding
             for c in range(self.cols):
-                is_death_cell = (
-                    (c < adjusted_death_cols_left)
-                    or (
-                        c >= adjusted_first_death_col_right
-                        and adjusted_first_death_col_right > adjusted_death_cols_left
-                    )
-                    or (base_playable_cols <= 2)  # Treat very narrow rows as death
+                is_death = (
+                    (c < pad_l) or (c >= pad_r and pad_r > pad_l) or (playable <= 2)
                 )
-                is_up_cell = (r + c) % 2 == 0  
-                triangle = Triangle(r, c, is_up=is_up_cell, is_death=is_death_cell)
-                row_triangles.append(triangle)
-            self.triangles.append(row_triangles)
+                is_up = (r + c) % 2 == 0
+                row_tris.append(Triangle(r, c, is_up=is_up, is_death=is_death))
+            grid.append(row_tris)
+        return grid
 
     def _link_neighbors(self) -> None:
-        """Iterates through the grid and sets neighbor references for each triangle."""
+        """Sets neighbor references for each triangle."""
         for r in range(self.rows):
             for c in range(self.cols):
-                current_tri = self.triangles[r][c]
-
-                # Neighbor Left (X)
+                tri = self.triangles[r][c]
                 if self.valid(r, c - 1):
-                    current_tri.neighbor_left = self.triangles[r][c - 1]
-
-                # Neighbor Right (Y)
+                    tri.neighbor_left = self.triangles[r][c - 1]
                 if self.valid(r, c + 1):
-                    current_tri.neighbor_right = self.triangles[r][c + 1]
+                    tri.neighbor_right = self.triangles[r][c + 1]
+                nr, nc = (r + 1, c) if tri.is_up else (r - 1, c)
+                if self.valid(nr, nc):
+                    tri.neighbor_vert = self.triangles[nr][nc]
 
-                # Neighbor Vertical (Z)
-                if current_tri.is_up:
-                    # Up triangle's vertical neighbor is below
-                    if self.valid(r + 1, c):
-                        current_tri.neighbor_vert = self.triangles[r + 1][c]
-                else:
-                    # Down triangle's vertical neighbor is above
-                    if self.valid(r - 1, c):
-                        current_tri.neighbor_vert = self.triangles[r - 1][c]
-
-    def _identify_playable_lines(self):
-        """
-        Identifies all sets of playable triangles that form a complete line
-        along horizontal (1-thick) and diagonal (2-thick) axes.
-        Stores these sets for efficient checking later.
-        """
-        self.potential_lines: List[Set[Triangle]] = []
-
+    def _identify_playable_lines(self) -> List[Set[Triangle]]:
+        """Identifies all sets of playable triangles forming potential lines."""
+        lines: List[Set[Triangle]] = []
         # 1. Horizontal Lines (1-thick)
         for r in range(self.rows):
-            line_triangles: List[Triangle] = []
-            is_playable_row = False
+            segment: List[Triangle] = []
             for c in range(self.cols):
                 tri = self.triangles[r][c]
                 if not tri.is_death:
-                    line_triangles.append(tri)
-                    is_playable_row = True
+                    segment.append(tri)
                 else:
-                    # If we hit a death cell after finding playable cells, store the line segment
-                    if line_triangles:
-                        self.potential_lines.append(set(line_triangles))
-                        line_triangles = []
-                    # Reset if the row started with death cells
-                    if not is_playable_row:
-                        line_triangles = []
+                    if segment:
+                        lines.append(set(segment))
+                    segment = []
+            if segment:
+                lines.append(set(segment))
 
-            # Add the last segment if the row ended with playable cells
-            if line_triangles:
-                self.potential_lines.append(set(line_triangles))
-
-        # Helper function to generate single diagonal lines
-        def get_single_diagonal_lines(
-            k_func, r_range, c_func
-        ) -> Dict[int, Set[Triangle]]:
-            single_lines: Dict[int, Set[Triangle]] = {}
-            min_k = float("inf")
-            max_k = float("-inf")
-            # Determine k range by checking all valid cells
-            for r_check in range(self.rows):
-                for c_check in range(self.cols):
-                    if (
-                        self.valid(r_check, c_check)
-                        and not self.triangles[r_check][c_check].is_death
-                    ):
-                        k_val = k_func(r_check, c_check)
-                        min_k = min(min_k, k_val)
-                        max_k = max(max_k, k_val)
-
-            if min_k > max_k:  # No playable cells found
-                return {}
-
-            for k in range(min_k, max_k + 1):
-                line_triangles: List[Triangle] = []
-                is_playable_line = False
-                for r in r_range:
-                    c = c_func(k, r)
-                    if self.valid(r, c):
-                        tri = self.triangles[r][c]
-                        if not tri.is_death:
-                            line_triangles.append(tri)
-                            is_playable_line = True
-                        else:
-                            if line_triangles:  # End of a playable segment
-                                if k not in single_lines:
-                                    single_lines[k] = set()
-                                single_lines[k].update(line_triangles)
-                            if not is_playable_line:  # Reset if started with death
-                                line_triangles = []
-                            else:  # Break segment
-                                line_triangles = []
-                    elif (
-                        line_triangles
-                    ):  # End of playable segment due to invalid coords
-                        if k not in single_lines:
-                            single_lines[k] = set()
-                        single_lines[k].update(line_triangles)
-                        line_triangles = []
-
-                if line_triangles:  # Add last segment
-                    if k not in single_lines:
-                        single_lines[k] = set()
-                    single_lines[k].update(line_triangles)
-            return single_lines
-
-        # 2. Diagonal Lines TL-BR (k = c - r) - Combine adjacent k and k+1
-        single_diag_tlbr = get_single_diagonal_lines(
-            k_func=lambda r, c: c - r,
-            r_range=range(self.rows),
-            c_func=lambda k, r: k + r,
+        # 2. Diagonal Lines (2-thick combined from 1-thick)
+        diag_tlbr = self._get_single_diagonal_lines(
+            lambda r, c: c - r, lambda k, r: k + r
         )
-        # Determine the actual range of k present in the dictionary keys
-        k_values_tlbr = sorted(single_diag_tlbr.keys())
-        if k_values_tlbr:
-            for i in range(len(k_values_tlbr) - 1):
-                k1 = k_values_tlbr[i]
-                k2 = k_values_tlbr[i + 1]
-                # Check if keys are adjacent (k+1)
-                if k2 == k1 + 1:
-                    # Combine the sets for the 2-thick diagonal line
-                    combined_line = single_diag_tlbr[k1].union(single_diag_tlbr[k2])
-                    if combined_line:  # Ensure not empty
-                        self.potential_lines.append(combined_line)
-
-        # 3. Diagonal Lines TR-BL (k = r + c) - Combine adjacent k and k+1
-        single_diag_trbl = get_single_diagonal_lines(
-            k_func=lambda r, c: r + c,
-            r_range=range(self.rows),
-            c_func=lambda k, r: k - r,
+        diag_trbl = self._get_single_diagonal_lines(
+            lambda r, c: r + c, lambda k, r: k - r
         )
-        # Determine the actual range of k present in the dictionary keys
-        k_values_trbl = sorted(single_diag_trbl.keys())
-        if k_values_trbl:
-            for i in range(len(k_values_trbl) - 1):
-                k1 = k_values_trbl[i]
-                k2 = k_values_trbl[i + 1]
-                # Check if keys are adjacent (k+1)
-                if k2 == k1 + 1:
-                    # Combine the sets for the 2-thick diagonal line
-                    combined_line = single_diag_trbl[k1].union(single_diag_trbl[k2])
-                    if combined_line:  # Ensure not empty
-                        self.potential_lines.append(combined_line)
+        for diag_dict in [diag_tlbr, diag_trbl]:
+            k_values = sorted(diag_dict.keys())
+            for i in range(len(k_values) - 1):
+                k1, k2 = k_values[i], k_values[i + 1]
+                if k2 == k1 + 1:  # Check adjacency
+                    combined = diag_dict[k1].union(diag_dict[k2])
+                    if combined:
+                        lines.append(combined)
+        return [line for line in lines if line]  # Filter empty sets
 
-        # Filter out potential lines that might be empty due to edge cases
-        self.potential_lines = [line for line in self.potential_lines if line]
-        # print(f"[Grid] Identified {len(self.potential_lines)} potential playable lines (H: 1-thick, D: 2-thick).")
+    def _get_single_diagonal_lines(self, k_func, c_func) -> Dict[int, Set[Triangle]]:
+        """Helper to find single-thickness diagonal lines."""
+        single_lines: Dict[int, Set[Triangle]] = {}
+        min_k, max_k = float("inf"), float("-inf")
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if self.valid(r, c) and not self.triangles[r][c].is_death:
+                    k = k_func(r, c)
+                    min_k = min(min_k, k)
+                    max_k = max(max_k, k)
+        if min_k > max_k:
+            return {}
+
+        for k in range(min_k, max_k + 1):
+            segment: List[Triangle] = []
+            for r in range(self.rows):
+                c = c_func(k, r)
+                if self.valid(r, c):
+                    tri = self.triangles[r][c]
+                    if not tri.is_death:
+                        segment.append(tri)
+                    else:
+                        if segment:
+                            single_lines.setdefault(k, set()).update(segment)
+                        segment = []
+                elif segment:
+                    single_lines.setdefault(k, set()).update(segment)
+                    segment = []
+            if segment:
+                single_lines.setdefault(k, set()).update(segment)
+        return single_lines
 
     def valid(self, r: int, c: int) -> bool:
         """Checks if coordinates are within grid bounds."""
         return 0 <= r < self.rows and 0 <= c < self.cols
 
-    def can_place(
-        self, shape_to_place: Shape, target_row: int, target_col: int
-    ) -> bool:
+    def can_place(self, shape: Shape, r: int, c: int) -> bool:
         """Checks if a shape can be placed at the target location."""
-        for dr, dc, is_up_shape_tri in shape_to_place.triangles:
-            nr, nc = target_row + dr, target_col + dc
+        for dr, dc, is_up_shape in shape.triangles:
+            nr, nc = r + dr, c + dc
             if not self.valid(nr, nc):
-                return False  # Out of bounds
-            grid_triangle = self.triangles[nr][nc]
-            # Cannot place on death cells, occupied cells, or cells with mismatching orientation
-            if (
-                grid_triangle.is_death
-                or grid_triangle.is_occupied
-                or (grid_triangle.is_up != is_up_shape_tri)
-            ):
                 return False
-        return True  # All shape triangles can be placed
+            tri = self.triangles[nr][nc]
+            if tri.is_death or tri.is_occupied or (tri.is_up != is_up_shape):
+                return False
+        return True
 
-    def place(self, shape_to_place: Shape, target_row: int, target_col: int) -> None:
+    def place(self, shape: Shape, r: int, c: int) -> None:
         """Places a shape onto the grid (assumes can_place was checked)."""
-        for dr, dc, _ in shape_to_place.triangles:
-            nr, nc = target_row + dr, target_col + dc
+        for dr, dc, _ in shape.triangles:
+            nr, nc = r + dr, c + dc
             if self.valid(nr, nc):
-                grid_triangle = self.triangles[nr][nc]
-                # Only occupy non-death, non-occupied cells
-                if not grid_triangle.is_death and not grid_triangle.is_occupied:
-                    grid_triangle.is_occupied = True
-                    grid_triangle.color = shape_to_place.color
+                tri = self.triangles[nr][nc]
+                if not tri.is_death and not tri.is_occupied:
+                    tri.is_occupied = True
+                    tri.color = shape.color
 
     def clear_lines(self) -> Tuple[int, int, List[Tuple[int, int]]]:
-        """
-        Checks for completed lines based on pre-identified potential lines.
-        Clears all triangles belonging to any completed lines simultaneously.
-        Returns the number of lines cleared, total triangles cleared, and their coordinates.
-        """
-        cleared_triangles_in_this_step: Set[Triangle] = set()
-        lines_cleared_count = 0
-
-        # Iterate through all potential lines identified during initialization
+        """Checks and clears completed lines. Returns lines, tris cleared, coords."""
+        cleared_tris: Set[Triangle] = set()
+        lines_cleared = 0
         for line_set in self.potential_lines:
-            is_complete = True
-            if not line_set:
-                is_complete = False
-            else:
-                for triangle in line_set:
-                    if not triangle.is_occupied:
-                        is_complete = False
-                        break
+            if line_set and all(tri.is_occupied for tri in line_set):
+                cleared_tris.update(line_set)
+                lines_cleared += 1
 
-            if is_complete:
-                cleared_triangles_in_this_step.update(line_set)
-                lines_cleared_count += 1
-
-        triangles_cleared_count = 0
-        cleared_triangles_coords: List[Tuple[int, int]] = []
-
-        if not cleared_triangles_in_this_step:
-            return 0, 0, []  # Return 3 values even if none cleared
-
-        for triangle in cleared_triangles_in_this_step:
-            if not triangle.is_death and triangle.is_occupied:
-                triangles_cleared_count += 1
-                triangle.is_occupied = False
-                triangle.color = None
-                cleared_triangles_coords.append((triangle.row, triangle.col))
-
-        return lines_cleared_count, triangles_cleared_count, cleared_triangles_coords
-
+        tris_count = 0
+        coords: List[Tuple[int, int]] = []
+        if not cleared_tris:
+            return 0, 0, []
+        for tri in cleared_tris:
+            if not tri.is_death and tri.is_occupied:
+                tris_count += 1
+                tri.is_occupied = False
+                tri.color = None
+                coords.append((tri.row, tri.col))
+        return lines_cleared, tris_count, coords
 
     def get_column_heights(self) -> List[int]:
         """Calculates the height of occupied cells in each column."""
         heights = [0] * self.cols
         for c in range(self.cols):
-            for r in range(self.rows - 1, -1, -1):  # Iterate from top down
-                triangle = self.triangles[r][c]
-                if triangle.is_occupied and not triangle.is_death:
-                    heights[c] = r + 1  # Height is row index + 1
-                    break  # Found highest occupied cell in this column
+            for r in range(self.rows - 1, -1, -1):
+                if (
+                    self.triangles[r][c].is_occupied
+                    and not self.triangles[r][c].is_death
+                ):
+                    heights[c] = r + 1
+                    break
         return heights
 
     def get_max_height(self) -> int:
@@ -5314,42 +4877,33 @@ class Grid:
     def get_bumpiness(self) -> int:
         """Calculates the total absolute difference between adjacent column heights."""
         heights = self.get_column_heights()
-        bumpiness = 0
-        for i in range(len(heights) - 1):
-            bumpiness += abs(heights[i] - heights[i + 1])
-        return bumpiness
+        return sum(abs(heights[i] - heights[i + 1]) for i in range(len(heights) - 1))
 
     def count_holes(self) -> int:
-        """Counts the number of empty, non-death cells below an occupied cell in the same column."""
+        """Counts empty, non-death cells below an occupied cell in the same column."""
         holes = 0
         for c in range(self.cols):
-            occupied_above_found = False
-            for r in range(self.rows - 1, -1, -1):  # Iterate from top down
-                triangle = self.triangles[r][c]
-                if triangle.is_death:
-                    occupied_above_found = (
-                        False  # Reset if we hit a death cell column top
-                    )
-                    continue  # Skip death cells
-
-                if triangle.is_occupied:
-                    occupied_above_found = True
-                elif not triangle.is_occupied and occupied_above_found:
-                    # Found an empty cell below an occupied one in this column
+            occupied_above = False
+            for r in range(self.rows - 1, -1, -1):
+                tri = self.triangles[r][c]
+                if tri.is_death:
+                    occupied_above = False
+                    continue
+                if tri.is_occupied:
+                    occupied_above = True
+                elif not tri.is_occupied and occupied_above:
                     holes += 1
         return holes
 
     def get_feature_matrix(self) -> np.ndarray:
         """Returns the grid state as a 2-channel numpy array (Occupancy, Orientation)."""
-        # Channel 0: Occupancy (1.0 if occupied and not death, 0.0 otherwise)
-        # Channel 1: Orientation (1.0 if pointing up and not death, 0.0 otherwise)
         grid_state = np.zeros((2, self.rows, self.cols), dtype=np.float32)
         for r in range(self.rows):
             for c in range(self.cols):
-                triangle = self.triangles[r][c]
-                if not triangle.is_death:
-                    grid_state[0, r, c] = 1.0 if triangle.is_occupied else 0.0
-                    grid_state[1, r, c] = 1.0 if triangle.is_up else 0.0
+                tri = self.triangles[r][c]
+                if not tri.is_death:
+                    grid_state[0, r, c] = 1.0 if tri.is_occupied else 0.0
+                    grid_state[1, r, c] = 1.0 if tri.is_up else 0.0
         return grid_state
 
 
@@ -5472,7 +5026,6 @@ File: environment\__init__.py
 
 
 File: mcts\config.py
-# File: mcts/config.py
 class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
@@ -5508,7 +5061,6 @@ class MCTSConfig:
 
 
 File: mcts\node.py
-# File: mcts/node.py
 import math
 import numpy as np
 from typing import Dict, Optional, TYPE_CHECKING, Any, List
@@ -5590,25 +5142,20 @@ class MCTSNode:
 
 
 File: mcts\search.py
-# File: mcts/search.py
-import math
 import numpy as np
 import time
 import copy
-from typing import Dict, Optional, Tuple, TYPE_CHECKING, Callable, List, Any
+from typing import Dict, Optional, Tuple, Callable
+import logging
 
 from environment.game_state import GameState
 from utils.types import ActionType, StateType
 from .node import MCTSNode
 from config import MCTSConfig, EnvConfig
 
-# Import the actual network class for type hinting
-from agent.alphazero_net import AlphaZeroNet
 
-
-# Define a type hint for the network prediction function
-# It takes a game state dict and returns (policy_probs_dict, value)
 NetworkPredictor = Callable[[StateType], Tuple[Dict[ActionType, float], float]]
+logger = logging.getLogger(__name__)
 
 
 class MCTS:
@@ -5616,13 +5163,14 @@ class MCTS:
 
     def __init__(
         self,
-        network_predictor: NetworkPredictor,  # Expects a function like agent.predict
+        network_predictor: NetworkPredictor,
         config: Optional[MCTSConfig] = None,
         env_config: Optional[EnvConfig] = None,
     ):
         self.network_predictor = network_predictor
         self.config = config if config else MCTSConfig()
         self.env_config = env_config if env_config else EnvConfig()
+        self.log_prefix = "[MCTS]"
 
     def _select_leaf(self, root_node: MCTSNode) -> MCTSNode:
         """Traverses the tree using PUCT until a leaf node is reached."""
@@ -5638,95 +5186,101 @@ class MCTS:
         return node
 
     def _expand_node(self, node: MCTSNode) -> Optional[float]:
-        """
-        Expands a leaf node: gets NN predictions and creates children.
-        Returns the predicted value from the network for this node's state.
-        """
+        """Expands a leaf node: gets NN predictions and creates children."""
         if node.is_expanded or node.is_terminal:
             return node.mean_action_value if node.visit_count > 0 else 0.0
 
-        # Get state features and call the network predictor function
         state_features = node.game_state.get_state()
         try:
-            # This call should execute the NN's forward pass (via agent.predict)
+            start_pred_time = time.monotonic()
             policy_probs_dict, predicted_value = self.network_predictor(state_features)
+            pred_duration = time.monotonic() - start_pred_time
+            logger.info(
+                f"{self.log_prefix} NN Prediction took {pred_duration:.4f}s. Value: {predicted_value:.3f}"
+            )
         except Exception as e:
-            print(f"Error during network prediction in MCTS expand: {e}")
-            # Handle error: maybe return a default value or re-raise
-            node.is_expanded = True  # Mark as expanded to avoid retrying
-            return 0.0  # Return neutral value on prediction error
+            logger.error(
+                f"{self.log_prefix} Error during network prediction: {e}", exc_info=True
+            )
+            node.is_expanded = True
+            return 0.0
 
         valid_actions = node.game_state.valid_actions()
-
         if not valid_actions:
             node.is_expanded = True
             node.is_terminal = True
-            # Return the value predicted for this terminal state
             return predicted_value
 
-        # Create child nodes using the policy priors from the network
+        parent_state = node.game_state
+        start_expand_time = time.monotonic()
+        children_created = 0
         for action in valid_actions:
-            # Create a *copy* of the state to simulate the action
-            # This is crucial to avoid modifying the parent node's state
-            temp_state = copy.deepcopy(node.game_state)
-            _, done = temp_state.step(action)  # Simulate the action
-
-            prior_prob = policy_probs_dict.get(action, 0.0)  # Get prior from NN output
-            child_node = MCTSNode(
-                game_state=temp_state,  # Use the state *after* the action
-                parent=node,
-                action_taken=action,
-                prior=prior_prob,
-                config=self.config,
-            )
-            node.children[action] = child_node
+            try:
+                # --- Deepcopy moved INSIDE the loop ---
+                child_state = copy.deepcopy(parent_state)
+                _, done = child_state.step(action)
+                prior_prob = policy_probs_dict.get(action, 0.0)
+                child_node = MCTSNode(
+                    game_state=child_state,
+                    parent=node,
+                    action_taken=action,
+                    prior=prior_prob,
+                    config=self.config,
+                )
+                node.children[action] = child_node
+                children_created += 1
+            except Exception as child_creation_err:
+                logger.error(
+                    f"{self.log_prefix} Error creating child for action {action}: {child_creation_err}",
+                    exc_info=True,
+                )
+                continue
+        expand_duration = time.monotonic() - start_expand_time
+        logger.info(
+            f"{self.log_prefix} Node expansion ({children_created} children) took {expand_duration:.4f}s."
+        )
 
         node.is_expanded = True
-        # Return the value predicted by the network for the *expanded node's state*
         return predicted_value
 
     def run_simulations(self, root_state: GameState, num_simulations: int) -> MCTSNode:
         """Runs the MCTS process for a given number of simulations."""
         root_node = MCTSNode(game_state=root_state, config=self.config)
+        sim_start_time = time.monotonic()
 
-        # Expand root immediately to get initial policy/value and apply noise
         if not root_node.is_terminal:
             initial_value = self._expand_node(root_node)
             if initial_value is not None:
                 self._add_dirichlet_noise(root_node)
-                # Backpropagate the initial value estimate for the root itself
                 root_node.backpropagate(initial_value)
-            else:  # Root might be terminal or expansion failed
-                pass  # No noise or initial backprop needed
+            # else: logger.info(f"{self.log_prefix} Root expansion failed or node is terminal.")
+        # else: logger.info(f"{self.log_prefix} Root node is terminal. Skipping initial expansion.")
 
-        for _ in range(num_simulations):
+        for sim_num in range(num_simulations):
+            # logger.info(f"{self.log_prefix} --- Simulation {sim_num+1}/{num_simulations} ---")
             leaf_node = self._select_leaf(root_node)
-
-            # Use the network's prediction as the simulation result (AlphaZero style)
-            if leaf_node.is_terminal:
-                # Determine terminal value (e.g., based on game score or fixed values)
-                # For simplicity, let's use 0 for now, but a real implementation
-                # might use +1 for win, -1 for loss, 0 for draw/timeout.
-                # This requires the GameState to provide the outcome.
-                value = 0.0  # Placeholder terminal value
-            else:
-                # Expand the node if it hasn't been, get NN value prediction
-                value = self._expand_node(leaf_node)
-                if (
-                    value is None
-                ):  # Should not happen if not terminal, but handle defensively
-                    value = 0.0  # Fallback value
-
-            # Backpropagate the estimated value up the tree
+            value = (
+                leaf_node.game_state.get_outcome()
+                if leaf_node.is_terminal
+                else self._expand_node(leaf_node)
+            )
+            if value is None:
+                logger.warning(
+                    f"{self.log_prefix} Expansion returned None for non-terminal node. Using 0."
+                )
+                value = 0.0
             leaf_node.backpropagate(value)
 
+        sim_duration = time.monotonic() - sim_start_time
+        logger.info(
+            f"{self.log_prefix} Finished {num_simulations} simulations in {sim_duration:.4f}s. Root visits: {root_node.visit_count}"
+        )
         return root_node
 
     def _add_dirichlet_noise(self, node: MCTSNode):
         """Adds Dirichlet noise to the prior probabilities of the root node's children."""
         if not node.children or self.config.DIRICHLET_ALPHA <= 0:
             return
-
         actions = list(node.children.keys())
         noise = np.random.dirichlet([self.config.DIRICHLET_ALPHA] * len(actions))
         eps = self.config.DIRICHLET_EPSILON
@@ -5740,10 +5294,7 @@ class MCTS:
         """Calculates the improved policy distribution based on visit counts."""
         if not root_node.children:
             return {}
-
-        visit_counts: List[Tuple[ActionType, int]] = []
         total_visits = sum(child.visit_count for child in root_node.children.values())
-
         if total_visits == 0:
             num_children = len(root_node.children)
             return (
@@ -5754,121 +5305,93 @@ class MCTS:
 
         policy_target: Dict[ActionType, float] = {}
         if temperature == 0:
-            # Choose the action with the highest visit count deterministically
             most_visited_action = max(
                 root_node.children.items(), key=lambda item: item[1].visit_count
             )[0]
             for action in root_node.children:
                 policy_target[action] = 1.0 if action == most_visited_action else 0.0
         else:
-            # Sample proportionally to N^(1/temperature)
-            total_power = 0.0
-            powered_counts = {}
+            total_power, powered_counts = 0.0, {}
             for action, child in root_node.children.items():
-                # Ensure visit_count is non-negative before exponentiation
                 visit_count = max(0, child.visit_count)
                 try:
-                    powered_count = visit_count ** (1.0 / temperature)
+                    powered_count = float(visit_count) ** (1.0 / temperature)
                 except OverflowError:
-                    # Handle potential overflow if temperature is very small and visits large
-                    # Assign a large number, or handle based on relative visits
                     powered_count = float("inf") if visit_count > 0 else 0.0
                 powered_counts[action] = powered_count
                 if powered_count != float("inf"):
                     total_power += powered_count
 
-            # Handle case where all powered counts are inf or total_power is 0
             if total_power == 0 or total_power == float("inf"):
-                # Fallback to uniform distribution among children with visits > 0
                 visited_children = [
                     a for a, c in root_node.children.items() if c.visit_count > 0
                 ]
                 num_visited = len(visited_children)
-                if num_visited > 0:
-                    prob = 1.0 / num_visited
-                    for action in root_node.children:
-                        policy_target[action] = (
-                            prob if action in visited_children else 0.0
-                        )
-                else:  # If no children were visited (shouldn't happen if total_visits > 0)
-                    num_children = len(root_node.children)
-                    prob = 1.0 / num_children if num_children > 0 else 1.0
-                    for action in root_node.children:
-                        policy_target[action] = prob
-
+                prob = (
+                    1.0 / num_visited
+                    if num_visited > 0
+                    else (1.0 / len(root_node.children) if root_node.children else 1.0)
+                )
+                for action in root_node.children:
+                    policy_target[action] = prob if action in visited_children else 0.0
             else:
                 for action, powered_count in powered_counts.items():
                     policy_target[action] = powered_count / total_power
 
-        # Create full policy vector matching ACTION_DIM (important for training target)
         full_policy = np.zeros(self.env_config.ACTION_DIM, dtype=np.float32)
         for action, prob in policy_target.items():
             if 0 <= action < self.env_config.ACTION_DIM:
                 full_policy[action] = prob
             else:
-                print(f"Warning: MCTS produced invalid action index {action}")
+                logger.warning(
+                    f"{self.log_prefix} MCTS produced invalid action index {action}"
+                )
 
-        # Normalize the full policy vector (optional, but good practice)
         policy_sum = np.sum(full_policy)
         if policy_sum > 1e-6 and not np.isclose(policy_sum, 1.0):
             full_policy /= policy_sum
         elif policy_sum <= 1e-6 and self.env_config.ACTION_DIM > 0:
-            # Handle zero sum case - distribute probability uniformly?
-            # This might happen if temperature is extremely high or visits are zero
-            print(
-                f"Warning: MCTS policy target sum is near zero ({policy_sum}). Check visits/temperature."
-            )
-            # Fallback to uniform? Or keep as zeros? Keeping zeros for now.
-            pass
+            pass  # Keep zeros
 
-        # Return as dict for compatibility, though array might be better for training
         return {i: float(prob) for i, prob in enumerate(full_policy)}
 
     def choose_action(self, root_node: MCTSNode, temperature: float) -> ActionType:
         """Chooses an action based on MCTS visit counts and temperature."""
         policy_dict = self.get_policy_target(root_node, temperature)
-        if not policy_dict:
-            valid_actions = root_node.game_state.valid_actions()
-            if valid_actions:
-                return np.random.choice(valid_actions)
-            else:
-                raise RuntimeError("MCTS failed: no policy and no valid actions.")
-
-        # Filter policy_dict to only include valid actions for sampling
         valid_actions = root_node.game_state.valid_actions()
-        filtered_policy = {a: p for a, p in policy_dict.items() if a in valid_actions}
-
-        if not filtered_policy:  # If no valid actions have non-zero probability
+        if not policy_dict or not valid_actions:
             if valid_actions:
-                print(
-                    "Warning: MCTS policy has zero probability for all valid actions. Choosing uniformly."
+                logger.warning(
+                    f"{self.log_prefix} Policy dict empty/invalid, choosing random valid action."
                 )
                 return np.random.choice(valid_actions)
             else:
-                raise RuntimeError("MCTS failed: no valid actions to choose from.")
+                logger.error(
+                    f"{self.log_prefix} MCTS failed: no policy and no valid actions."
+                )
+                raise RuntimeError("MCTS failed: no policy/valid actions.")
+
+        filtered_policy = {a: p for a, p in policy_dict.items() if a in valid_actions}
+        if not filtered_policy:
+            logger.warning(
+                f"{self.log_prefix} MCTS policy zero for all valid actions. Choosing uniformly."
+            )
+            return np.random.choice(valid_actions)
 
         actions = np.array(list(filtered_policy.keys()))
         probabilities = np.array(list(filtered_policy.values()))
-
-        # Ensure probabilities sum to 1 after filtering
         prob_sum = np.sum(probabilities)
         if prob_sum <= 1e-6:
-            # Fallback to uniform distribution among the filtered valid actions
-            print(
-                f"Warning: MCTS filtered policy sum is near zero ({prob_sum}). Choosing uniformly among valid."
+            logger.warning(
+                f"{self.log_prefix} Filtered policy sum near zero. Choosing uniformly."
             )
             return np.random.choice(actions)
-
-        probabilities /= prob_sum  # Normalize
+        probabilities /= prob_sum
 
         try:
-            chosen_action_index = np.random.choice(len(actions), p=probabilities)
-            return actions[chosen_action_index]
+            return np.random.choice(actions, p=probabilities)
         except ValueError as e:
-            print(f"Error during np.random.choice: {e}")
-            print(f"Actions: {actions}")
-            print(f"Probabilities: {probabilities} (Sum: {np.sum(probabilities)})")
-            # Fallback to uniform choice among valid actions
+            logger.error(f"{self.log_prefix} Error during np.random.choice: {e}")
             return np.random.choice(actions)
 
 
@@ -5881,10 +5404,7 @@ __all__ = ["MCTSConfig", "MCTSNode", "MCTS"]
 
 
 File: stats\aggregator.py
-# File: stats/aggregator.py
-# File: stats/aggregator.py
 import time
-from collections import deque
 from typing import (
     Deque,
     Dict,
@@ -5892,8 +5412,7 @@ from typing import (
     Optional,
     List,
     TYPE_CHECKING,
-)  # Added TYPE_CHECKING
-import numpy as np
+)
 import threading
 
 from config import StatsConfig
@@ -5901,7 +5420,7 @@ from .aggregator_storage import AggregatorStorage
 from .aggregator_logic import AggregatorLogic
 
 if TYPE_CHECKING:
-    from environment.game_state import GameState  # Import for type hinting
+    from environment.game_state import GameState
 
 
 class StatsAggregator:
@@ -5909,6 +5428,7 @@ class StatsAggregator:
     Handles aggregation and storage of training statistics using deques.
     Calculates rolling averages and tracks best values. Does not perform logging.
     Includes locks for thread safety. Delegates storage and logic to helper classes.
+    Refactored for clarity and AlphaZero focus.
     """
 
     def __init__(
@@ -5939,51 +5459,46 @@ class StatsAggregator:
 
     def record_episode(
         self,
-        episode_score: float,
+        episode_outcome: float,  # Renamed from episode_score for clarity (-1, 0, 1)
         episode_length: int,
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,  # Added optional GameState
+        game_state_for_best: Optional["GameState"] = None,
     ) -> Dict[str, Any]:
+        """Records episode stats and checks for new bests."""
         with self._lock:
-            # Use the passed global_step or the current stored one
             current_step = (
                 global_step
                 if global_step is not None
                 else self.storage.current_global_step
             )
             update_info = self.logic.update_episode_stats(
-                episode_score,
+                episode_outcome,
                 episode_length,
                 episode_num,
                 current_step,
                 game_score,
                 triangles_cleared,
-                game_state_for_best,  # Pass GameState to logic
+                game_state_for_best,
             )
             return update_info
 
     def record_step(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Records step data, now likely related to NN training steps."""
+        """Records step data (e.g., NN training step) and checks for new bests."""
         with self._lock:
-            # Ensure global_step is updated within the storage based on step_data
             g_step = step_data.get("global_step")
             if g_step is not None and g_step > self.storage.current_global_step:
                 self.storage.current_global_step = g_step
             elif g_step is None:
-                # If no global step provided, maybe increment internally?
-                # Or rely on the caller (TrainingWorker) to always provide it.
-                # For now, use the stored value if not provided.
                 g_step = self.storage.current_global_step
 
-            update_info = self.logic.update_step_stats(
-                step_data, g_step
-            )  # Pass g_step to logic
+            update_info = self.logic.update_step_stats(step_data, g_step)
             return update_info
 
     def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
+        """Calculates and returns the summary dictionary."""
         with self._lock:
             if current_global_step is None:
                 current_global_step = self.storage.current_global_step
@@ -5993,10 +5508,22 @@ class StatsAggregator:
             return summary
 
     def get_plot_data(self) -> Dict[str, Deque]:
+        """Returns copies of all deques intended for plotting."""
         with self._lock:
             return self.storage.get_all_plot_deques()
 
+    def get_best_game_state_data(self) -> Optional[Dict[str, Any]]:
+        """Returns the data needed to render the best game state found."""
+        with self._lock:
+            # Return a copy to prevent modification outside the lock
+            return (
+                self.storage.best_game_state_data.copy()
+                if self.storage.best_game_state_data
+                else None
+            )
+
     def state_dict(self) -> Dict[str, Any]:
+        """Returns the state for checkpointing."""
         with self._lock:
             state = self.storage.state_dict()
             state["plot_window"] = self.plot_window
@@ -6004,6 +5531,7 @@ class StatsAggregator:
             return state
 
     def load_state_dict(self, state_dict: Dict[str, Any]):
+        """Loads the state from a checkpoint."""
         with self._lock:
             print("[StatsAggregator] Loading state...")
             self.plot_window = state_dict.get("plot_window", self.plot_window)
@@ -6014,12 +5542,10 @@ class StatsAggregator:
 
             print("[StatsAggregator] State loaded.")
             print(f"  -> Loaded total_episodes: {self.storage.total_episodes}")
-            print(f"  -> Loaded best_score: {self.storage.best_score}")
+            print(f"  -> Loaded best_outcome: {self.storage.best_outcome}")
+            print(f"  -> Loaded best_game_score: {self.storage.best_game_score}")
             print(
                 f"  -> Loaded start_time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.storage.start_time))}"
-            )
-            print(
-                f"  -> Loaded training_target_step: {self.storage.training_target_step}"
             )
             print(
                 f"  -> Loaded current_global_step: {self.storage.current_global_step}"
@@ -6033,17 +5559,11 @@ class StatsAggregator:
 
 
 File: stats\aggregator_logic.py
-# File: stats/aggregator_logic.py
-# File: stats/aggregator_logic.py
-from collections import deque
-from typing import Deque, Dict, Any, Optional, List
+from typing import  Dict, Any, Optional
 import numpy as np
-import time
-import copy  # Import copy for deepcopy
 
 from .aggregator_storage import AggregatorStorage
 
-# Import GameState only for type hinting if needed, avoid direct dependency
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -6051,27 +5571,26 @@ if TYPE_CHECKING:
 
 
 class AggregatorLogic:
-    """Handles the calculation logic for StatsAggregator."""
+    """Handles the calculation logic for StatsAggregator.
+    Refactored for AlphaZero focus and intermediate stats. Resource usage removed."""
 
     def __init__(self, storage: AggregatorStorage):
         self.storage = storage
 
     def update_episode_stats(
         self,
-        episode_score: float,  # Game outcome (-1, 0, 1)
+        episode_outcome: float,
         episode_length: int,
         episode_num: int,
         current_step: int,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional[
-            "GameState"
-        ] = None,  # Pass the actual GameState object
+        game_state_for_best: Optional["GameState"] = None,
     ) -> Dict[str, Any]:
         """Updates storage with episode data and checks for bests."""
-        update_info = {"new_best_rl": False, "new_best_game": False}
+        update_info = {"new_best_outcome": False, "new_best_game": False}
 
-        self.storage.episode_scores.append(episode_score)
+        self.storage.episode_outcomes.append(episode_outcome)
         self.storage.episode_lengths.append(episode_length)
         if game_score is not None:
             self.storage.game_scores.append(game_score)
@@ -6079,21 +5598,20 @@ class AggregatorLogic:
             self.storage.episode_triangles_cleared.append(triangles_cleared)
             self.storage.total_triangles_cleared += triangles_cleared
         self.storage.total_episodes = episode_num
+        self.storage.current_self_play_game_number = episode_num + 1
+        self.storage.current_self_play_game_steps = 0
 
-        # Track best game outcome (closer to 1 is better)
-        if episode_score > self.storage.best_score:
-            self.storage.previous_best_score = self.storage.best_score
-            self.storage.best_score = episode_score
-            self.storage.best_score_step = current_step
-            update_info["new_best_rl"] = True  # Keep flag name for consistency
+        if episode_outcome > self.storage.best_outcome:
+            self.storage.previous_best_outcome = self.storage.best_outcome
+            self.storage.best_outcome = episode_outcome
+            self.storage.best_outcome_step = current_step
+            update_info["new_best_outcome"] = True
 
-        # Track best game score and store corresponding state data
         if game_score is not None and game_score > self.storage.best_game_score:
             self.storage.previous_best_game_score = self.storage.best_game_score
             self.storage.best_game_score = float(game_score)
             self.storage.best_game_score_step = current_step
             update_info["new_best_game"] = True
-            # Store data needed to render the best state
             if game_state_for_best and hasattr(game_state_for_best, "grid"):
                 try:
                     grid = game_state_for_best.grid
@@ -6101,9 +5619,10 @@ class AggregatorLogic:
                         [[t.is_occupied for t in row] for row in grid.triangles],
                         dtype=bool,
                     )
-                    colors = np.array(
-                        [[t.color for t in row] for row in grid.triangles], dtype=object
-                    )
+                    colors = [
+                        [t.color if t.color else (0, 0, 0) for t in row]
+                        for row in grid.triangles
+                    ]
                     death_cells = np.array(
                         [[t.is_death for t in row] for row in grid.triangles],
                         dtype=bool,
@@ -6111,13 +5630,12 @@ class AggregatorLogic:
                     is_up = np.array(
                         [[t.is_up for t in row] for row in grid.triangles], dtype=bool
                     )
-
                     self.storage.best_game_state_data = {
                         "score": game_score,
-                        "occupancy": copy.deepcopy(occupancy),
-                        "colors": copy.deepcopy(colors),
-                        "death": copy.deepcopy(death_cells),
-                        "is_up": copy.deepcopy(is_up),
+                        "occupancy": occupancy,
+                        "colors": colors,
+                        "death": death_cells,
+                        "is_up": is_up,
                         "rows": grid.rows,
                         "cols": grid.cols,
                         "step": current_step,
@@ -6127,10 +5645,8 @@ class AggregatorLogic:
                     )
                 except Exception as e:
                     print(f"[Aggregator] Error saving best game state data: {e}")
-                    self.storage.best_game_state_data = None  # Clear on error
+                    self.storage.best_game_state_data = None
 
-        # RL score history removed
-        # self.storage.best_rl_score_history.append(self.storage.best_score)
         current_best_game = (
             int(self.storage.best_game_score)
             if self.storage.best_game_score > -float("inf")
@@ -6140,22 +5656,25 @@ class AggregatorLogic:
 
         return update_info
 
-    def update_step_stats(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
+    def update_step_stats(
+        self, step_data: Dict[str, Any], g_step: int
+    ) -> Dict[str, Any]:
         """Updates storage with step data and checks for best loss."""
-        g_step = step_data.get("global_step", self.storage.current_global_step)
-        if g_step > self.storage.current_global_step:
-            self.storage.current_global_step = g_step
+        update_info = {"new_best_value_loss": False, "new_best_policy_loss": False}
 
-        if "training_target_step" in step_data:
-            self.storage.training_target_step = step_data["training_target_step"]
+        if "current_self_play_game_steps" in step_data:
+            self.storage.current_self_play_game_steps = step_data[
+                "current_self_play_game_steps"
+            ]
+        if "training_steps_performed" in step_data:
+            self.storage.training_steps_performed = step_data[
+                "training_steps_performed"
+            ]
+        if "current_self_play_game_number" in step_data: 
+            self.storage.current_self_play_game_number = step_data[
+                "current_self_play_game_number"
+            ]
 
-        update_info = {
-            "new_best_value_loss": False,
-            "new_best_policy_loss": False,
-        }
-
-        # Append to deques
-        # --- NN Policy Loss ---
         if "policy_loss" in step_data and step_data["policy_loss"] is not None:
             current_policy_loss = step_data["policy_loss"]
             if np.isfinite(current_policy_loss):
@@ -6171,9 +5690,7 @@ class AggregatorLogic:
                 print(
                     f"[Aggregator Warning] Received non-finite Policy Loss: {current_policy_loss}"
                 )
-        # --- End NN Policy Loss ---
 
-        # --- NN Value Loss ---
         if "value_loss" in step_data and step_data["value_loss"] is not None:
             current_value_loss = step_data["value_loss"]
             if np.isfinite(current_value_loss):
@@ -6187,18 +5704,11 @@ class AggregatorLogic:
                 print(
                     f"[Aggregator Warning] Received non-finite Value Loss: {current_value_loss}"
                 )
-        # --- End NN Value Loss ---
 
-        # Append other optional metrics
+        # Resource usage metrics removed
         optional_metrics = [
-            # ("avg_max_q", "avg_max_qs"), # Removed PPO/DQN specific
-            # ("beta", "beta_values"), # Removed PER specific
             ("buffer_size", "buffer_sizes"),
             ("lr", "lr_values"),
-            # ("epsilon", "epsilon_values"), # Removed Epsilon-greedy specific
-            ("cpu_usage", "cpu_usage"),
-            ("memory_usage", "memory_usage"),
-            ("gpu_memory_usage_percent", "gpu_memory_usage_percent"),
         ]
         for data_key, deque_name in optional_metrics:
             if data_key in step_data and step_data[data_key] is not None:
@@ -6207,21 +5717,14 @@ class AggregatorLogic:
                     if hasattr(self.storage, deque_name):
                         getattr(self.storage, deque_name).append(val)
                     else:
-                        print(
-                            f"[Aggregator Warning] Deque '{deque_name}' not found in storage."
-                        )
+                        print(f"[Aggregator Warning] Deque '{deque_name}' not found.")
                 else:
                     print(f"[Aggregator Warning] Received non-finite {data_key}: {val}")
 
-        # Update scalar values
+        # Resource usage scalars removed
         scalar_updates = {
-            # "beta": "current_beta", # Removed PER specific
             "buffer_size": "current_buffer_size",
             "lr": "current_lr",
-            # "epsilon": "current_epsilon", # Removed Epsilon-greedy specific
-            "cpu_usage": "current_cpu_usage",
-            "memory_usage": "current_memory_usage",
-            "gpu_memory_usage_percent": "current_gpu_memory_usage_percent",
         }
         for data_key, storage_key in scalar_updates.items():
             if data_key in step_data and step_data[data_key] is not None:
@@ -6247,25 +5750,21 @@ class AggregatorLogic:
             return float(np.mean(finite_data)) if finite_data else default
 
         summary = {
-            "avg_score_window": safe_mean("episode_scores"),  # Game outcome avg
+            "avg_outcome_window": safe_mean("episode_outcomes"),
             "avg_length_window": safe_mean("episode_lengths"),
             "policy_loss": safe_mean("policy_losses"),
             "value_loss": safe_mean("value_losses"),
-            # "avg_max_q_window": safe_mean("avg_max_qs"), # Removed PPO/DQN specific
             "avg_game_score_window": safe_mean("game_scores"),
             "avg_triangles_cleared_window": safe_mean("episode_triangles_cleared"),
             "avg_lr_window": safe_mean("lr_values", default=self.storage.current_lr),
-            "avg_cpu_window": safe_mean("cpu_usage"),
-            "avg_memory_window": safe_mean("memory_usage"),
-            "avg_gpu_memory_window": safe_mean("gpu_memory_usage_percent"),
+            # Resource usage averages removed
             "total_episodes": self.storage.total_episodes,
-            # "beta": self.storage.current_beta, # Removed PER specific
             "buffer_size": self.storage.current_buffer_size,
             "global_step": current_global_step,
             "current_lr": self.storage.current_lr,
-            "best_score": self.storage.best_score,  # Best game outcome
-            "previous_best_score": self.storage.previous_best_score,
-            "best_score_step": self.storage.best_score_step,
+            "best_outcome": self.storage.best_outcome,
+            "previous_best_outcome": self.storage.previous_best_outcome,
+            "best_outcome_step": self.storage.best_outcome_step,
             "best_game_score": self.storage.best_game_score,
             "previous_best_game_score": self.storage.previous_best_game_score,
             "best_game_score_step": self.storage.best_game_score_step,
@@ -6275,75 +5774,86 @@ class AggregatorLogic:
             "best_policy_loss": self.storage.best_policy_loss,
             "previous_best_policy_loss": self.storage.previous_best_policy_loss,
             "best_policy_loss_step": self.storage.best_policy_loss_step,
-            "num_ep_scores": len(self.storage.episode_scores),
+            "num_ep_outcomes": len(self.storage.episode_outcomes),
             "num_value_losses": len(self.storage.value_losses),
             "num_policy_losses": len(self.storage.policy_losses),
             "summary_avg_window_size": summary_avg_window,
             "start_time": self.storage.start_time,
-            "training_target_step": self.storage.training_target_step,
-            "current_cpu_usage": self.storage.current_cpu_usage,
-            "current_memory_usage": self.storage.current_memory_usage,
-            "current_gpu_memory_usage_percent": self.storage.current_gpu_memory_usage_percent,
-            "best_game_state_data": self.storage.best_game_state_data,  # Include best state data
+            # Resource usage current values removed
+            "current_self_play_game_number": self.storage.current_self_play_game_number,
+            "current_self_play_game_steps": self.storage.current_self_play_game_steps,
+            "training_steps_performed": self.storage.training_steps_performed,
         }
         return summary
 
 
 File: stats\aggregator_storage.py
-# File: stats/aggregator_storage.py
-# File: stats/aggregator_storage.py
 from collections import deque
-from typing import Deque, Dict, Any, List, Optional  # Added Optional
+from typing import Deque, Dict, Any, List, Optional
 import time
 import numpy as np
 
 
 class AggregatorStorage:
-    """Holds the data structures (deques and scalar values) for StatsAggregator."""
+    """Holds the data structures (deques and scalar values) for StatsAggregator.
+    Refactored for AlphaZero focus. Resource usage removed."""
 
     def __init__(self, plot_window: int):
         self.plot_window = plot_window
 
-        # --- Deques for Plotting ---
+        # --- Deques for Plotting (AlphaZero Relevant) ---
+        # Stores recent values for plotting trends. Max length defined by plot_window.
         self.policy_losses: Deque[float] = deque(maxlen=plot_window)
         self.value_losses: Deque[float] = deque(maxlen=plot_window)
-        self.avg_max_qs: Deque[float] = deque(maxlen=plot_window)
-        self.episode_scores: Deque[float] = deque(
+        self.episode_outcomes: Deque[float] = deque(
             maxlen=plot_window
-        )  # Game outcome (-1, 0, 1)
-        self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
-        self.game_scores: Deque[int] = deque(maxlen=plot_window)
+        )  # -1 (loss), 0 (draw), 1 (win)
+        self.episode_lengths: Deque[int] = deque(
+            maxlen=plot_window
+        )  # Steps per episode
+        self.game_scores: Deque[int] = deque(
+            maxlen=plot_window
+        )  # Raw game score per episode
         self.episode_triangles_cleared: Deque[int] = deque(maxlen=plot_window)
-        self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
-        self.beta_values: Deque[float] = deque(maxlen=plot_window)
-        # self.best_rl_score_history: Deque[float] = deque(maxlen=plot_window) # Removed RL score history
-        self.best_game_score_history: Deque[int] = deque(maxlen=plot_window)
-        self.lr_values: Deque[float] = deque(maxlen=plot_window)
-        self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
-        self.cpu_usage: Deque[float] = deque(maxlen=plot_window)
-        self.memory_usage: Deque[float] = deque(maxlen=plot_window)
-        self.gpu_memory_usage_percent: Deque[float] = deque(maxlen=plot_window)
+        self.buffer_sizes: Deque[int] = deque(
+            maxlen=plot_window
+        )  # Replay buffer size over time
+        self.best_game_score_history: Deque[int] = deque(
+            maxlen=plot_window
+        )  # Tracks the best score found so far
+        self.lr_values: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Learning rate over time
 
         # --- Scalar State Variables ---
-        self.total_episodes = 0
-        self.total_triangles_cleared = 0
-        self.current_epsilon: float = 0.0
-        self.current_beta: float = 0.0
-        self.current_buffer_size: int = 0
-        self.current_global_step: int = 0
-        self.current_lr: float = 0.0
-        self.start_time: float = time.time()
-        self.training_target_step: int = 0
-        self.current_cpu_usage: float = 0.0
-        self.current_memory_usage: float = 0.0
-        self.current_gpu_memory_usage_percent: float = 0.0
+        # Tracks overall progress and current state.
+        self.total_episodes: int = 0  # Total completed episodes since start/load
+        self.total_triangles_cleared: int = 0  # Cumulative triangles cleared
+        self.current_buffer_size: int = 0  # Latest known buffer size
+        self.current_global_step: int = 0  # Tracks NN training steps primarily
+        self.current_lr: float = 0.0  # Current learning rate
+        self.start_time: float = time.time()  # Timestamp of aggregator creation/load
+        self.training_target_step: int = (
+            0  # Target training step for completion (if any)
+        )
 
-        # --- Best Value Tracking ---
-        self.best_score: float = -float(
-            "inf"
-        )  # Best game outcome (closer to 1 is better)
-        self.previous_best_score: float = -float("inf")
-        self.best_score_step: int = 0
+        # --- Intermediate Progress Tracking ---
+        # Useful for detailed status updates during runs.
+        self.current_self_play_game_number: int = (
+            0  # Track which game is being played by workers
+        )
+        self.current_self_play_game_steps: int = (
+            0  # Steps within the current self-play game
+        )
+        self.training_steps_performed: int = (
+            0  # Total training steps executed by training worker
+        )
+
+        # --- Best Value Tracking (AlphaZero Relevant) ---
+        # Stores the best values achieved and the step they occurred at.
+        self.best_outcome: float = -float("inf")
+        self.previous_best_outcome: float = -float("inf")
+        self.best_outcome_step: int = 0
         self.best_game_score: float = -float("inf")
         self.previous_best_game_score: float = -float("inf")
         self.best_game_score_step: int = 0
@@ -6355,9 +5865,8 @@ class AggregatorStorage:
         self.best_policy_loss_step: int = 0
 
         # --- Best Game State Data ---
-        self.best_game_state_data: Optional[Dict[str, Any]] = (
-            None  # Store grid data for best game score
-        )
+        # Stores data needed to visualize the best game state found.
+        self.best_game_state_data: Optional[Dict[str, Any]] = None
 
     def get_deque(self, name: str) -> Deque:
         """Safely gets a deque attribute."""
@@ -6368,20 +5877,13 @@ class AggregatorStorage:
         deque_names = [
             "policy_losses",
             "value_losses",
-            # "avg_max_qs", # Removed PPO/DQN specific
-            "episode_scores",  # Game outcome
+            "episode_outcomes",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
             "buffer_sizes",
-            # "beta_values", # Removed PER specific
-            # "best_rl_score_history", # Removed RL score
             "best_game_score_history",
             "lr_values",
-            # "epsilon_values", # Removed Epsilon-greedy specific
-            "cpu_usage",
-            "memory_usage",
-            "gpu_memory_usage_percent",
         ]
         return {
             name: self.get_deque(name).copy()
@@ -6395,23 +5897,16 @@ class AggregatorStorage:
         deque_names = [
             "policy_losses",
             "value_losses",
-            "avg_max_qs",
-            "episode_scores",
+            "episode_outcomes",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
             "buffer_sizes",
-            "beta_values",  # "best_rl_score_history",
             "best_game_score_history",
             "lr_values",
-            "epsilon_values",
-            "cpu_usage",
-            "memory_usage",
-            "gpu_memory_usage_percent",
         ]
         for name in deque_names:
             if hasattr(self, name):
-                # Ensure deque exists before accessing
                 deque_instance = getattr(self, name, None)
                 if deque_instance is not None:
                     state[name] = list(deque_instance)
@@ -6419,24 +5914,22 @@ class AggregatorStorage:
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
-            "current_epsilon",
-            "current_beta",
             "current_buffer_size",
             "current_global_step",
             "current_lr",
             "start_time",
             "training_target_step",
-            "current_cpu_usage",
-            "current_memory_usage",
-            "current_gpu_memory_usage_percent",
+            "current_self_play_game_number",
+            "current_self_play_game_steps",
+            "training_steps_performed",
         ]
         for key in scalar_keys:
-            state[key] = getattr(self, key, 0)  # Use default 0 if missing
+            state[key] = getattr(self, key, 0)
 
         best_value_keys = [
-            "best_score",
-            "previous_best_score",
-            "best_score_step",
+            "best_outcome",
+            "previous_best_outcome",
+            "best_outcome_step",
             "best_game_score",
             "previous_best_game_score",
             "best_game_score_step",
@@ -6448,94 +5941,75 @@ class AggregatorStorage:
             "best_policy_loss_step",
         ]
         for key in best_value_keys:
-            # Provide appropriate defaults for inf/-inf
-            default = 0
-            if "loss" in key:
-                default = float("inf")
-            elif "score" in key:
-                default = -float("inf")
+            default = (
+                0
+                if "step" in key
+                else (float("inf") if "loss" in key else -float("inf"))
+            )
             state[key] = getattr(self, key, default)
 
-        # Save best game state data
-        state["best_game_state_data"] = self.best_game_state_data
-
+        if self.best_game_state_data:
+            serializable_data = {
+                k: v.tolist() if isinstance(v, np.ndarray) else v
+                for k, v in self.best_game_state_data.items()
+            }
+            state["best_game_state_data"] = serializable_data
+        else:
+            state["best_game_state_data"] = None
         return state
 
     def load_state_dict(self, state_dict: Dict[str, Any], plot_window: int):
         """Loads the state from a dictionary."""
         self.plot_window = plot_window
-
         deque_names = [
             "policy_losses",
             "value_losses",
-            "avg_max_qs",
-            "episode_scores",
+            "episode_outcomes",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
             "buffer_sizes",
-            "beta_values",  # "best_rl_score_history",
             "best_game_score_history",
             "lr_values",
-            "epsilon_values",
-            "cpu_usage",
-            "memory_usage",
-            "gpu_memory_usage_percent",
         ]
         for key in deque_names:
-            data_to_load = state_dict.get(key)
-            if data_to_load is not None:
-                try:
-                    if isinstance(data_to_load, (list, tuple)):
-                        setattr(self, key, deque(data_to_load, maxlen=self.plot_window))
-                    else:
-                        print(
-                            f"  -> Warning: Invalid type for deque '{key}'. Initializing empty."
-                        )
-                        setattr(self, key, deque(maxlen=self.plot_window))
-                except Exception as e:
-                    print(f"  -> Error loading deque '{key}': {e}. Initializing empty.")
-                    setattr(self, key, deque(maxlen=self.plot_window))
+            data = state_dict.get(key)
+            if isinstance(data, (list, tuple)):
+                setattr(self, key, deque(data, maxlen=self.plot_window))
             else:
-                # Initialize deque if key is missing in saved state
                 setattr(self, key, deque(maxlen=self.plot_window))
 
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
-            "current_epsilon",
-            "current_beta",
             "current_buffer_size",
             "current_global_step",
             "current_lr",
             "start_time",
             "training_target_step",
-            "current_cpu_usage",
-            "current_memory_usage",
-            "current_gpu_memory_usage_percent",
+            "current_self_play_game_number",
+            "current_self_play_game_steps",
+            "training_steps_performed",
         ]
-        default_values = {
+        defaults = {
             "start_time": time.time(),
             "training_target_step": 0,
             "current_global_step": 0,
             "total_episodes": 0,
             "total_triangles_cleared": 0,
-            "current_epsilon": 0.0,
-            "current_beta": 0.0,
             "current_buffer_size": 0,
             "current_lr": 0.0,
-            "current_cpu_usage": 0.0,
-            "current_memory_usage": 0.0,
-            "current_gpu_memory_usage_percent": 0.0,
+            "current_self_play_game_number": 0,
+            "current_self_play_game_steps": 0,
+            "training_steps_performed": 0,
         }
         for key in scalar_keys:
-            value_to_load = state_dict.get(key, default_values.get(key))
-            setattr(self, key, value_to_load)
+            setattr(self, key, state_dict.get(key, defaults.get(key)))
 
         best_value_keys = [
-            "best_score",
-            "previous_best_score",
-            "best_score_step",
+            "best_outcome",
+            "previous_best_outcome",
+            "best_outcome_step",
             "best_game_score",
             "previous_best_game_score",
             "best_game_score_step",
@@ -6546,155 +6020,186 @@ class AggregatorStorage:
             "previous_best_policy_loss",
             "best_policy_loss_step",
         ]
-        default_best = {
-            "best_score": -float("inf"),
-            "previous_best_score": -float("inf"),
+        best_defaults = {
+            "best_outcome": -float("inf"),
+            "previous_best_outcome": -float("inf"),
             "best_game_score": -float("inf"),
             "previous_best_game_score": -float("inf"),
             "best_value_loss": float("inf"),
             "previous_best_value_loss": float("inf"),
             "best_policy_loss": float("inf"),
             "previous_best_policy_loss": float("inf"),
-            "best_score_step": 0,
+            "best_outcome_step": 0,
             "best_game_score_step": 0,
             "best_value_loss_step": 0,
             "best_policy_loss_step": 0,
         }
         for key in best_value_keys:
-            setattr(self, key, state_dict.get(key, default_best.get(key)))
+            setattr(self, key, state_dict.get(key, best_defaults.get(key)))
 
-        # Load best game state data
-        self.best_game_state_data = state_dict.get("best_game_state_data", None)
-
-        # Ensure critical attributes exist after loading
-        if not hasattr(self, "current_global_step"):
-            self.current_global_step = 0
-        if not hasattr(self, "training_target_step"):
-            self.training_target_step = 0
-        if not hasattr(self, "best_policy_loss"):
-            self.best_policy_loss = float("inf")
-        if not hasattr(self, "previous_best_policy_loss"):
-            self.previous_best_policy_loss = float("inf")
-        if not hasattr(self, "best_policy_loss_step"):
-            self.best_policy_loss_step = 0
-        if not hasattr(self, "best_game_score"):
-            self.best_game_score = -float("inf")
-        if not hasattr(self, "best_game_state_data"):
+        loaded_best_data = state_dict.get("best_game_state_data")
+        if loaded_best_data:
+            try:
+                self.best_game_state_data = {
+                    k: (
+                        np.array(v)
+                        if isinstance(v, list) and v and isinstance(v[0], list)
+                        else v
+                    )
+                    for k, v in loaded_best_data.items()
+                }
+            except Exception as e:
+                print(f"Error converting loaded best_game_state_data: {e}")
+                self.best_game_state_data = None
+        else:
             self.best_game_state_data = None
+
+        # Ensure critical attributes exist
+        for attr, default in [
+            ("current_global_step", 0),
+            ("best_game_score", -float("inf")),
+            ("best_game_state_data", None),
+            ("training_steps_performed", 0),
+            ("current_self_play_game_number", 0),
+            ("current_self_play_game_steps", 0),
+        ]:
+            if not hasattr(self, attr):
+                setattr(self, attr, default)
 
 
 File: stats\simple_stats_recorder.py
-# File: stats/simple_stats_recorder.py
-# File: stats/simple_stats_recorder.py
 import time
-from collections import deque
-from typing import (
-    Deque,
-    Dict,
-    Any,
-    Optional,
-    Union,
-    List,
-    TYPE_CHECKING,
-)  # Added TYPE_CHECKING
+from typing import Deque, Dict, Any, Optional, Union, List, TYPE_CHECKING
 import numpy as np
 import torch
 import threading
 
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
-from config import StatsConfig
+from config import StatsConfig, TrainConfig
 
 if TYPE_CHECKING:
-    from environment.game_state import GameState  # Import for type hinting
+    from environment.game_state import GameState
 
 
 class SimpleStatsRecorder(StatsRecorderBase):
-    """
-    Logs aggregated statistics to the console periodically. Thread-safe.
-    Delegates data storage and aggregation to a StatsAggregator instance.
-    Provides no-op implementations for histogram, image, hparam, graph logging.
-    """
+    """Logs aggregated statistics to the console periodically."""
 
     def __init__(
         self,
         aggregator: StatsAggregator,
         console_log_interval: int = StatsConfig.CONSOLE_LOG_FREQ,
+        train_config: Optional[TrainConfig] = None,
     ):
         self.aggregator = aggregator
         self.console_log_interval = (
             max(1, console_log_interval) if console_log_interval > 0 else -1
         )
+        self.train_config = train_config if train_config else TrainConfig()
         self.last_log_time: float = time.time()
-        self.start_time: float = time.time()
         self.summary_avg_window = self.aggregator.summary_avg_window
         self.updates_since_last_log = 0
-
         self._lock = threading.Lock()
-
         print(
-            f"[SimpleStatsRecorder] Initialized. Console Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} updates/episodes"
+            f"[SimpleStatsRecorder] Initialized. Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} updates/episodes. Avg Window: {self.summary_avg_window}"
         )
+
+    def _log_new_best(
+        self,
+        metric_name: str,
+        current_best: float,
+        previous_best: float,
+        step: int,
+        is_loss: bool,
+    ):
+        """Logs a new best value achieved."""
+        if (
+            not np.isfinite(current_best)
+            or (is_loss and current_best == float("inf"))
+            or (not is_loss and current_best == -float("inf"))
+        ):
+            return
+        prev_str = "N/A"
+        if np.isfinite(previous_best) and (
+            (is_loss and previous_best != float("inf"))
+            or (not is_loss and previous_best != -float("inf"))
+        ):
+            prev_str = f"{previous_best:.4f}" if is_loss else f"{previous_best:.0f}"
+        current_str = f"{current_best:.4f}" if is_loss else f"{current_best:.0f}"
+        step_info = f"at Step ~{step/1e6:.1f}M"
+        prefix = "📉" if is_loss else "🎮"
         print(
-            f"[SimpleStatsRecorder] Console logs will use Avg Window: {self.summary_avg_window}"
+            f"--- {prefix} New Best {metric_name}: {current_str} {step_info} (Prev: {prev_str}) ---"
         )
 
     def record_episode(
         self,
-        episode_score: float,
+        episode_outcome: float,
         episode_length: int,
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,  # Added optional GameState
+        game_state_for_best: Optional["GameState"] = None,
     ):
-        """Records episode stats and prints new bests to console. Thread-safe."""
+        """Records episode stats and prints new bests to console."""
         update_info = self.aggregator.record_episode(
-            episode_score,
+            episode_outcome,
             episode_length,
             episode_num,
             global_step,
             game_score,
             triangles_cleared,
-            game_state_for_best,  # Pass GameState down
+            game_state_for_best,
         )
         current_step = (
             global_step
             if global_step is not None
             else self.aggregator.storage.current_global_step
         )
-        step_info = f"at Step ~{current_step/1e6:.1f}M"
 
-        # Print new bests immediately
         if update_info.get("new_best_game"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_game_score:.0f}"
-                if self.aggregator.storage.previous_best_game_score > -float("inf")
-                else "N/A"
+            self._log_new_best(
+                "Game Score",
+                self.aggregator.storage.best_game_score,
+                self.aggregator.storage.previous_best_game_score,
+                current_step,
+                is_loss=False,
             )
-            print(
-                f"--- 🎮 New Best Game: {self.aggregator.storage.best_game_score:.0f} {step_info} (Prev: {prev_str}) ---"
-            )
+        # Note: Best outcome logging removed as it's less informative than score for this game
+
+        self._check_and_log_summary(current_step)
+
+    def record_step(self, step_data: Dict[str, Any]):
+        """Records step stats and triggers console logging if interval met."""
+        update_info = self.aggregator.record_step(step_data)
+        g_step = step_data.get(
+            "global_step", self.aggregator.storage.current_global_step
+        )
+
         if update_info.get("new_best_value_loss"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_value_loss:.4f}"
-                if self.aggregator.storage.previous_best_value_loss < float("inf")
-                else "N/A"
-            )
-            print(
-                f"---📉 New Best V.Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
+            self._log_new_best(
+                "V.Loss",
+                self.aggregator.storage.best_value_loss,
+                self.aggregator.storage.previous_best_value_loss,
+                g_step,
+                is_loss=True,
             )
         if update_info.get("new_best_policy_loss"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_policy_loss:.4f}"
-                if self.aggregator.storage.previous_best_policy_loss < float("inf")
-                else "N/A"
-            )
-            print(
-                f"---📉 New Best P.Loss: {self.aggregator.storage.best_policy_loss:.4f} {step_info} (Prev: {prev_str}) ---"
+            self._log_new_best(
+                "P.Loss",
+                self.aggregator.storage.best_policy_loss,
+                self.aggregator.storage.previous_best_policy_loss,
+                g_step,
+                is_loss=True,
             )
 
+        # Log based on interval if it was a training step (indicated by loss)
+        if "policy_loss" in step_data or "value_loss" in step_data:
+            self._check_and_log_summary(g_step)
+
+    def _check_and_log_summary(self, global_step: int):
+        """Checks if the logging interval is met and logs summary."""
         log_now = False
         with self._lock:
             self.updates_since_last_log += 1
@@ -6704,98 +6209,62 @@ class SimpleStatsRecorder(StatsRecorderBase):
             ):
                 log_now = True
                 self.updates_since_last_log = 0
-
         if log_now:
-            self.log_summary(current_step)
-
-    def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats (e.g., NN update) and triggers console logging if interval met. Thread-safe."""
-        update_info = self.aggregator.record_step(step_data)
-        g_step = step_data.get(
-            "global_step", self.aggregator.storage.current_global_step
-        )
-
-        if update_info.get("new_best_value_loss"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_value_loss:.4f}"
-                if self.aggregator.storage.previous_best_value_loss < float("inf")
-                else "N/A"
-            )
-            step_info = f"at Step ~{g_step/1e6:.1f}M"
-            print(
-                f"---📉 New Best V.Loss: {self.aggregator.storage.best_value_loss:.4f} {step_info} (Prev: {prev_str}) ---"
-            )
-        if update_info.get("new_best_policy_loss"):
-            prev_str = (
-                f"{self.aggregator.storage.previous_best_policy_loss:.4f}"
-                if self.aggregator.storage.previous_best_policy_loss < float("inf")
-                else "N/A"
-            )
-            step_info = f"at Step ~{g_step/1e6:.1f}M"
-            print(
-                f"---📉 New Best P.Loss: {self.aggregator.storage.best_policy_loss:.4f} {step_info} (Prev: {prev_str}) ---"
-            )
-
-        log_now = False
-        with self._lock:
-            if "policy_loss" in step_data or "value_loss" in step_data:
-                self.updates_since_last_log += 1
-                if (
-                    self.console_log_interval > 0
-                    and self.updates_since_last_log >= self.console_log_interval
-                ):
-                    log_now = True
-                    self.updates_since_last_log = 0
-
-        if log_now:
-            self.log_summary(g_step)
+            self.log_summary(global_step)
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        """Gets the summary dictionary from the aggregator (thread-safe)."""
+        """Gets the summary dictionary from the aggregator."""
         return self.aggregator.get_summary(current_global_step)
 
     def get_plot_data(self) -> Dict[str, Deque]:
-        """Gets the plot data deques from the aggregator (thread-safe)."""
+        """Gets the plot data deques from the aggregator."""
         return self.aggregator.get_plot_data()
 
     def log_summary(self, global_step: int):
         """Logs the current summary statistics to the console."""
         summary = self.get_summary(global_step)
-        elapsed_runtime = time.time() - self.aggregator.storage.start_time
-        runtime_hrs = elapsed_runtime / 3600
-
-        best_game_score_val = (
+        runtime_hrs = (time.time() - self.aggregator.storage.start_time) / 3600
+        best_score = (
             f"{summary['best_game_score']:.0f}"
             if summary["best_game_score"] > -float("inf")
             else "N/A"
         )
-        best_v_loss_val = (
+        best_v = (
             f"{summary['best_value_loss']:.4f}"
             if summary["best_value_loss"] < float("inf")
             else "N/A"
         )
-        best_p_loss_val = (
+        best_p = (
             f"{summary['best_policy_loss']:.4f}"
             if summary["best_policy_loss"] < float("inf")
             else "N/A"
         )
-        avg_window_size = summary.get("summary_avg_window_size", "?")
+        avg_win = summary.get("summary_avg_window_size", "?")
+        buf_size = summary.get("buffer_size", 0)
+        min_buf = self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
+        phase = "Buffering" if buf_size < min_buf and global_step == 0 else "Training"
 
-        log_str = (
-            f"[{runtime_hrs:.1f}h|Console] Step: {global_step/1e6:<6.2f}M | "
-            f"Ep: {summary['total_episodes']:<7} | "
-            f"GameScore(Avg{avg_window_size}): {summary['avg_game_score_window']:<6.0f} (Best: {best_game_score_val}) | "
-            f"V.Loss(Avg{avg_window_size}): {summary['value_loss']:.4f} (Best: {best_v_loss_val}) | "
-            f"P.Loss(Avg{avg_window_size}): {summary['policy_loss']:.4f} (Best: {best_p_loss_val}) | "
-            f"LR: {summary['current_lr']:.1e}"
-        )
-        avg_tris_cleared = summary.get("avg_triangles_cleared_window", 0.0)
-        log_str += f" | TrisClr(Avg{avg_window_size}): {avg_tris_cleared:.1f}"
-
-        print(log_str)
-
+        log_items = [
+            f"[{runtime_hrs:.1f}h|{phase}]",
+            f"Step: {global_step/1e6:<6.2f}M",
+            f"Ep: {summary['total_episodes']:<7,}".replace(",", "_"),
+            f"Buf: {buf_size:,}/{min_buf:,}".replace(",", "_"),
+            f"Score(Avg{avg_win}): {summary['avg_game_score_window']:<6.0f} (Best: {best_score})",
+        ]
+        if global_step > 0:
+            log_items.extend(
+                [
+                    f"V.Loss(Avg{avg_win}): {summary['value_loss']:.4f} (Best: {best_v})",
+                    f"P.Loss(Avg{avg_win}): {summary['policy_loss']:.4f} (Best: {best_p})",
+                    f"LR: {summary['current_lr']:.1e}",
+                ]
+            )
+        else:
+            log_items.append("Loss: N/A (Buffering)")
+        print(" | ".join(log_items))
         self.last_log_time = time.time()
 
+    # --- No-op methods for other recording types ---
     def record_histogram(
         self,
         tag: str,
@@ -6818,13 +6287,10 @@ class SimpleStatsRecorder(StatsRecorderBase):
         pass
 
     def close(self, is_cleanup: bool = False):
-        """Closes the recorder (no action needed for simple console logger)."""
         print(f"[SimpleStatsRecorder] Closed (is_cleanup={is_cleanup}).")
 
 
 File: stats\stats_recorder.py
-# File: stats/stats_recorder.py
-# File: stats/stats_recorder.py
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -6836,7 +6302,7 @@ from typing import (
     Optional,
     Union,
     TYPE_CHECKING,
-)  # Added TYPE_CHECKING
+)
 import numpy as np
 import torch
 
@@ -6856,7 +6322,7 @@ class StatsRecorderBase(ABC):
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,  # Added optional GameState
+        game_state_for_best: Optional["GameState"] = None,
     ):
         """Record stats for a completed episode."""
         pass
@@ -6916,671 +6382,23 @@ class StatsRecorderBase(ABC):
         pass
 
 
-File: stats\tb_histogram_logger.py
-# File: stats/tb_histogram_logger.py
-import torch
-from torch.utils.tensorboard import SummaryWriter
-import threading
-from typing import Union, List, Optional
-import numpy as np
-
-
-class TBHistogramLogger:
-    """Handles logging histograms to TensorBoard based on frequency."""
-
-    def __init__(
-        self, writer: Optional[SummaryWriter], lock: threading.Lock, log_interval: int
-    ):
-        self.writer = writer
-        self._lock = lock
-        self.log_interval = log_interval  # Interval in terms of updates/rollouts
-        self.last_log_step = -1
-        self.rollouts_since_last_log = 0  # Track rollouts internally
-
-    def should_log(self, global_step: int) -> bool:
-        """Checks if enough rollouts have passed and the global step has advanced."""
-        if not self.writer or self.log_interval <= 0:
-            return False
-        # Check based on internal rollout counter and if step has advanced
-        return (
-            self.rollouts_since_last_log >= self.log_interval
-            and global_step > self.last_log_step
-        )
-
-    def log_histogram(
-        self,
-        tag: str,
-        values: Union[np.ndarray, torch.Tensor, List[float]],
-        global_step: int,
-    ):
-        """Logs a histogram if the interval condition is met."""
-        if not self.should_log(global_step):
-            # Increment counter even if not logging this specific histogram
-            # This assumes record_step increments the counter externally
-            # Let's manage the counter internally based on when log_histogram is called
-            # self.rollouts_since_last_log += 1 # No, let external call manage this
-            return
-
-        with self._lock:
-            # Double check condition inside lock
-            if global_step > self.last_log_step:
-                try:
-                    self.writer.add_histogram(tag, values, global_step)
-                    self.last_log_step = global_step
-                    # Reset counter after successful log
-                    # self.rollouts_since_last_log = 0 # Resetting counter is handled in record_step
-                except Exception as e:
-                    print(f"Error logging histogram '{tag}': {e}")
-
-    def increment_rollout_counter(self):
-        """Increments the internal counter, called after each update/rollout."""
-        if self.log_interval > 0:
-            self.rollouts_since_last_log += 1
-
-    def reset_rollout_counter(self):
-        """Resets the counter, called after logging."""
-        self.rollouts_since_last_log = 0
-
-
-File: stats\tb_hparam_logger.py
-# File: stats/tb_hparam_logger.py
-import torch
-from torch.utils.tensorboard import SummaryWriter
-import threading
-from typing import Dict, Any, Optional
-import traceback
-
-
-class TBHparamLogger:
-    """Handles logging hyperparameters and final metrics to TensorBoard."""
-
-    def __init__(
-        self,
-        writer: Optional[SummaryWriter],
-        lock: threading.Lock,
-        hparam_dict: Optional[Dict[str, Any]],
-    ):
-        self.writer = writer
-        self._lock = lock
-        self.hparam_dict = hparam_dict if hparam_dict else {}
-        self.initial_hparams_logged = False
-
-    def _filter_hparams(self, hparams: Dict[str, Any]) -> Dict[str, Any]:
-        """Filters hyperparameters to types supported by TensorBoard."""
-        return {
-            k: v
-            for k, v in hparams.items()
-            if isinstance(v, (int, float, str, bool, torch.Tensor))
-        }
-
-    def log_initial_hparams(self):
-        """Logs hyperparameters at the beginning of the run."""
-        if not self.writer or not self.hparam_dict or self.initial_hparams_logged:
-            return
-        with self._lock:
-            try:
-                initial_metrics = {
-                    "hparam/final_best_rl_score": -float("inf"),
-                    "hparam/final_best_game_score": -float("inf"),
-                    "hparam/final_best_value_loss": float("inf"),
-                    "hparam/final_best_policy_loss": float("inf"),
-                    "hparam/final_total_episodes": 0,
-                }
-                filtered_hparams = self._filter_hparams(self.hparam_dict)
-                self.writer.add_hparams(filtered_hparams, initial_metrics, run_name=".")
-                self.initial_hparams_logged = True
-                print("[TensorBoardStatsRecorder] Hyperparameters logged.")
-            except Exception as e:
-                print(f"Error logging initial hyperparameters: {e}")
-                traceback.print_exc()
-
-    def log_final_hparams(
-        self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]
-    ):
-        """Logs final hyperparameters and metrics."""
-        if not self.writer:
-            return
-        with self._lock:
-            try:
-                filtered_hparams = self._filter_hparams(hparam_dict)
-                filtered_metrics = {
-                    k: v for k, v in metric_dict.items() if isinstance(v, (int, float))
-                }
-                self.writer.add_hparams(
-                    filtered_hparams, filtered_metrics, run_name="."
-                )
-                print("[TensorBoardStatsRecorder] Final hparams and metrics logged.")
-            except Exception as e:
-                print(f"Error logging final hyperparameters/metrics: {e}")
-                traceback.print_exc()
-
-    def log_final_hparams_from_summary(self, final_summary: Dict[str, Any]):
-        """Logs final hparams using the stored hparam_dict and metrics from summary."""
-        if not self.hparam_dict:
-            print(
-                "[TensorBoardStatsRecorder] Skipping final hparam logging (hparam_dict not set)."
-            )
-            return
-        final_metrics = {
-            "hparam/final_best_rl_score": final_summary.get(
-                "best_score", -float("inf")
-            ),
-            "hparam/final_best_game_score": final_summary.get(
-                "best_game_score", -float("inf")
-            ),
-            "hparam/final_best_value_loss": final_summary.get(
-                "best_value_loss", float("inf")
-            ),
-            "hparam/final_best_policy_loss": final_summary.get(
-                "best_policy_loss", float("inf")
-            ),
-            "hparam/final_total_episodes": final_summary.get("total_episodes", 0),
-        }
-        self.log_final_hparams(self.hparam_dict, final_metrics)
-
-
-File: stats\tb_image_logger.py
-# File: stats/tb_image_logger.py
-import torch
-from torch.utils.tensorboard import SummaryWriter
-import threading
-from typing import Union, Optional
-import numpy as np
-import traceback
-
-from .tb_log_utils import format_image_for_tb
-
-
-class TBImageLogger:
-    """Handles logging images to TensorBoard based on frequency."""
-
-    def __init__(
-        self, writer: Optional[SummaryWriter], lock: threading.Lock, log_interval: int
-    ):
-        self.writer = writer
-        self._lock = lock
-        self.log_interval = log_interval  # Interval in terms of updates/rollouts
-        self.last_log_step = -1
-        self.rollouts_since_last_log = 0  # Track rollouts internally
-
-    def should_log(self, global_step: int) -> bool:
-        """Checks if enough rollouts have passed and the global step has advanced."""
-        if not self.writer or self.log_interval <= 0:
-            return False
-        return (
-            self.rollouts_since_last_log >= self.log_interval
-            and global_step > self.last_log_step
-        )
-
-    def log_image(
-        self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
-    ):
-        """Logs an image if the interval condition is met."""
-        if not self.should_log(global_step):
-            # self.rollouts_since_last_log += 1 # No, let external call manage this
-            return
-
-        with self._lock:
-            # Double check condition inside lock
-            if global_step > self.last_log_step:
-                try:
-                    image_tensor = format_image_for_tb(image)
-                    self.writer.add_image(
-                        tag, image_tensor, global_step, dataformats="CHW"
-                    )
-                    self.last_log_step = global_step
-                    # self.rollouts_since_last_log = 0 # Resetting counter is handled in record_step
-                except Exception as e:
-                    print(f"Error logging image '{tag}': {e}")
-                    # traceback.print_exc() # Optional: more detail
-
-    def increment_rollout_counter(self):
-        """Increments the internal counter, called after each update/rollout."""
-        if self.log_interval > 0:
-            self.rollouts_since_last_log += 1
-
-    def reset_rollout_counter(self):
-        """Resets the counter, called after logging."""
-        self.rollouts_since_last_log = 0
-
-
-File: stats\tb_log_utils.py
-# File: stats/tb_log_utils.py
-import torch
-import numpy as np
-from typing import Union
-
-
-def format_image_for_tb(image: Union[np.ndarray, torch.Tensor]) -> torch.Tensor:
-    """Formats an image (numpy or tensor) into CHW format for TensorBoard."""
-    if isinstance(image, np.ndarray):
-        if image.ndim == 3 and image.shape[-1] in [1, 3, 4]:  # HWC
-            image_tensor = torch.from_numpy(image).permute(2, 0, 1)
-        elif image.ndim == 2:  # HW (grayscale)
-            image_tensor = torch.from_numpy(image).unsqueeze(0)
-        else:  # Assume CHW or other format, pass through
-            image_tensor = torch.from_numpy(image)
-    elif isinstance(image, torch.Tensor):
-        if image.ndim == 3 and image.shape[0] not in [1, 3, 4]:  # Likely HWC
-            if image.shape[-1] in [1, 3, 4]:
-                image_tensor = image.permute(2, 0, 1)
-            else:  # Unknown format, pass through
-                image_tensor = image
-        elif image.ndim == 2:  # HW
-            image_tensor = image.unsqueeze(0)
-        else:  # Assume CHW or other format
-            image_tensor = image
-    else:
-        raise TypeError(f"Unsupported image type for TensorBoard: {type(image)}")
-
-    # Ensure correct data type (e.g., uint8 or float) - TB handles this mostly
-    return image_tensor
-
-
-File: stats\tb_scalar_logger.py
-# File: stats/tb_scalar_logger.py
-# File: stats/tb_scalar_logger.py
-import torch
-from torch.utils.tensorboard import SummaryWriter
-import threading
-from typing import Dict, Any, Optional
-
-from .aggregator import StatsAggregator
-
-
-class TBScalarLogger:
-    """Handles logging scalar values to TensorBoard."""
-
-    def __init__(self, writer: Optional[SummaryWriter], lock: threading.Lock):
-        self.writer = writer
-        self._lock = lock
-
-    def log_episode_scalars(
-        self,
-        g_step: int,
-        episode_score: float,  # This is the game outcome (-1, 0, 1)
-        episode_length: int,
-        episode_num: int,
-        game_score: Optional[int],
-        triangles_cleared: Optional[int],
-        update_info: Dict[str, Any],
-        aggregator: StatsAggregator,
-    ):
-        """Logs scalars related to a completed episode."""
-        if not self.writer:
-            return
-        with self._lock:
-            try:
-                # Log game outcome instead of RL score
-                self.writer.add_scalar("Episode/Outcome", episode_score, g_step)
-                self.writer.add_scalar("Episode/Length", episode_length, g_step)
-                if game_score is not None:
-                    self.writer.add_scalar("Episode/Game Score", game_score, g_step)
-                if triangles_cleared is not None:
-                    self.writer.add_scalar(
-                        "Episode/Triangles Cleared", triangles_cleared, g_step
-                    )
-                self.writer.add_scalar("Progress/Total Episodes", episode_num, g_step)
-
-                # RL Score removed
-                # if update_info.get("new_best_rl"):
-                #     self.writer.add_scalar(
-                #         "Best Performance/RL Score",
-                #         aggregator.storage.best_score,
-                #         g_step,
-                #     )
-                if update_info.get("new_best_game"):
-                    self.writer.add_scalar(
-                        "Best Performance/Game Score",
-                        aggregator.storage.best_game_score,
-                        g_step,
-                    )
-            except Exception as e:
-                print(f"Error writing episode scalars to TensorBoard: {e}")
-
-    def log_step_scalars(
-        self,
-        g_step: int,
-        step_data: Dict[str, Any],
-        update_info: Dict[str, Any],
-        aggregator: StatsAggregator,
-    ):
-        """Logs scalars related to a training/environment step."""
-        if not self.writer:
-            return
-        with self._lock:
-            try:
-                scalar_map = {
-                    "policy_loss": "Loss/Policy Loss",
-                    "value_loss": "Loss/Value Loss",
-                    # "avg_max_q": "Debug/Avg Max Q", # Removed PPO/DQN specific stat
-                    # "beta": "Debug/Beta", # Removed PER specific stat
-                    "buffer_size": "Debug/Buffer Size",
-                    "lr": "Train/Learning Rate",
-                    # "epsilon": "Train/Epsilon", # Removed Epsilon-greedy specific stat
-                    "update_time": "Performance/Update Time",
-                    # "step_time": "Performance/Total Step Time", # Less relevant for AZ training step
-                    "cpu_usage": "Resource/CPU Usage (%)",
-                    "memory_usage": "Resource/Memory Usage (%)",
-                    "gpu_memory_usage_percent": "Resource/GPU Memory Usage (%)",
-                }
-                for key, tag in scalar_map.items():
-                    if key in step_data and step_data[key] is not None:
-                        self.writer.add_scalar(tag, step_data[key], g_step)
-
-                if update_info.get("new_best_value_loss"):
-                    self.writer.add_scalar(
-                        "Best Performance/Value Loss",
-                        aggregator.storage.best_value_loss,
-                        g_step,
-                    )
-                if update_info.get("new_best_policy_loss"):
-                    self.writer.add_scalar(
-                        "Best Performance/Policy Loss",
-                        aggregator.storage.best_policy_loss,
-                        g_step,
-                    )
-            except Exception as e:
-                print(f"Error writing step scalars to TensorBoard: {e}")
-
-
-File: stats\tensorboard_logger.py
-# File: stats/tensorboard_logger.py
-import time
-import traceback
-from collections import deque
-from typing import (
-    Deque,
-    Dict,
-    Any,
-    Optional,
-    Union,
-    List,
-    Tuple,
-    TYPE_CHECKING,
-)  # Added TYPE_CHECKING
-import numpy as np
-import torch
-from torch.utils.tensorboard import SummaryWriter
-import threading
-
-from .stats_recorder import StatsRecorderBase
-from .aggregator import StatsAggregator
-from .simple_stats_recorder import SimpleStatsRecorder
-from config import (
-    TensorBoardConfig,
-    EnvConfig,
-    RNNConfig,
-    TransformerConfig,
-)
-from agent.alphazero_net import AlphaZeroNet
-
-from .tb_log_utils import format_image_for_tb
-from .tb_scalar_logger import TBScalarLogger
-from .tb_histogram_logger import TBHistogramLogger
-from .tb_image_logger import TBImageLogger
-from .tb_hparam_logger import TBHparamLogger
-
-if TYPE_CHECKING:
-    from environment.game_state import GameState  # Import for type hinting
-
-
-class TensorBoardStatsRecorder(StatsRecorderBase):
-    """
-    Logs aggregated statistics, histograms, images, and hyperparameters to TensorBoard. Thread-safe.
-    Uses a SimpleStatsRecorder for console logging and a StatsAggregator for data handling.
-    Delegates specific logging tasks to helper classes.
-    """
-
-    def __init__(
-        self,
-        aggregator: StatsAggregator,
-        console_recorder: SimpleStatsRecorder,
-        log_dir: str,
-        hparam_dict: Optional[Dict[str, Any]] = None,
-        model_for_graph: Optional[AlphaZeroNet] = None,
-        dummy_input_for_graph: Optional[Dict[str, torch.Tensor]] = None,
-        histogram_log_interval: int = TensorBoardConfig.HISTOGRAM_LOG_FREQ,
-        image_log_interval: int = TensorBoardConfig.IMAGE_LOG_FREQ,
-        env_config: Optional[EnvConfig] = None,
-        rnn_config: Optional[RNNConfig] = None,
-        transformer_config: Optional[TransformerConfig] = None,
-    ):
-        self.aggregator = aggregator
-        self.console_recorder = console_recorder
-        self.log_dir = log_dir
-        self.writer: Optional[SummaryWriter] = None
-        self._lock = threading.Lock()
-
-        try:
-            self.writer = SummaryWriter(log_dir=self.log_dir)
-            print(f"[TensorBoardStatsRecorder] Initialized. Logging to: {self.log_dir}")
-
-            self.scalar_logger = TBScalarLogger(self.writer, self._lock)
-            self.histogram_logger = TBHistogramLogger(
-                self.writer, self._lock, histogram_log_interval
-            )
-            self.image_logger = TBImageLogger(
-                self.writer, self._lock, image_log_interval
-            )
-            self.hparam_logger = TBHparamLogger(self.writer, self._lock, hparam_dict)
-
-            if model_for_graph and dummy_input_for_graph:
-                self.record_graph(model_for_graph, dummy_input_for_graph)
-            else:
-                print("[TensorBoardStatsRecorder] Model graph logging skipped.")
-
-            self.hparam_logger.log_initial_hparams()
-
-        except Exception as e:
-            print(f"FATAL: Error initializing TensorBoard SummaryWriter: {e}")
-            traceback.print_exc()
-            self.writer = None
-            self.scalar_logger = None
-            self.histogram_logger = None
-            self.image_logger = None
-            self.hparam_logger = None
-
-    def record_episode(
-        self,
-        episode_score: float,
-        episode_length: int,
-        episode_num: int,
-        global_step: Optional[int] = None,
-        game_score: Optional[int] = None,
-        triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,  # Added optional GameState
-    ):
-        """Records episode stats to TensorBoard and delegates to console recorder."""
-        update_info = self.aggregator.record_episode(
-            episode_score,
-            episode_length,
-            episode_num,
-            global_step,
-            game_score,
-            triangles_cleared,
-            game_state_for_best,  # Pass GameState down
-        )
-        g_step = (
-            global_step
-            if global_step is not None
-            else getattr(self.aggregator.storage, "current_global_step", 0)
-        )
-
-        if self.scalar_logger:
-            self.scalar_logger.log_episode_scalars(
-                g_step,
-                episode_score,
-                episode_length,
-                episode_num,
-                game_score,
-                triangles_cleared,
-                update_info,
-                self.aggregator,
-            )
-
-        self.console_recorder.record_episode(
-            episode_score,
-            episode_length,
-            episode_num,
-            global_step,
-            game_score,
-            triangles_cleared,
-            game_state_for_best,  # Pass GameState down to console recorder
-        )
-
-    def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats (e.g., NN training step) to TensorBoard and console."""
-        update_info = self.aggregator.record_step(step_data)
-        g_step = step_data.get(
-            "global_step",
-            getattr(self.aggregator.storage, "current_global_step", 0),
-        )
-
-        if self.scalar_logger:
-            self.scalar_logger.log_step_scalars(
-                g_step, step_data, update_info, self.aggregator
-            )
-
-        if "policy_loss" in step_data or "value_loss" in step_data:
-            if self.histogram_logger:
-                self.histogram_logger.increment_rollout_counter()
-                if self.histogram_logger.should_log(g_step):
-                    self.histogram_logger.reset_rollout_counter()
-            if self.image_logger:
-                self.image_logger.increment_rollout_counter()
-                if self.image_logger.should_log(g_step):
-                    self.image_logger.reset_rollout_counter()
-
-        self.console_recorder.record_step(step_data)
-
-    def record_histogram(
-        self,
-        tag: str,
-        values: Union[np.ndarray, torch.Tensor, List[float]],
-        global_step: int,
-    ):
-        """Records a histogram to TensorBoard using the helper."""
-        if self.histogram_logger:
-            self.histogram_logger.log_histogram(tag, values, global_step)
-
-    def record_image(
-        self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
-    ):
-        """Records an image to TensorBoard using the helper."""
-        if self.image_logger:
-            self.image_logger.log_image(tag, image, global_step)
-
-    def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
-        """Records final hyperparameters and metrics using the helper."""
-        if self.hparam_logger:
-            self.hparam_logger.log_final_hparams(hparam_dict, metric_dict)
-
-    def record_graph(
-        self,
-        model: AlphaZeroNet,
-        input_to_model: Optional[Dict[str, torch.Tensor]] = None,
-    ):
-        """Records the model graph to TensorBoard."""
-        if not self.writer:
-            return
-        if input_to_model is None:
-            print("Warning: Cannot record graph without dummy input.")
-            return
-        with self._lock:
-            try:
-                original_device = next(iter(model.parameters())).device
-                model.cpu()
-                dummy_input_cpu = {
-                    k: v.cpu() if isinstance(v, torch.Tensor) else v
-                    for k, v in input_to_model.items()
-                }
-                self.writer.add_graph(
-                    model, input_to_model=dummy_input_cpu, verbose=False
-                )
-                print("[TensorBoardStatsRecorder] Model graph logged.")
-                model.to(original_device)
-            except Exception as e:
-                print(f"Error logging model graph: {e}.")
-                traceback.print_exc()
-                try:
-                    model.to(original_device)
-                except Exception:
-                    pass
-
-    def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        return self.aggregator.get_summary(current_global_step)
-
-    def get_plot_data(self) -> Dict[str, Deque]:
-        return self.aggregator.get_plot_data()
-
-    def log_summary(self, global_step: int):
-        self.console_recorder.log_summary(global_step)
-
-    def close(self, is_cleanup: bool = False):
-        """Closes the TensorBoard writer and logs final hparams unless cleaning up."""
-        print(f"[TensorBoardStatsRecorder] Close called (is_cleanup={is_cleanup})...")
-        if not self.writer:
-            print(
-                "[TensorBoardStatsRecorder] Writer was not initialized or already closed."
-            )
-            self.console_recorder.close(is_cleanup=is_cleanup)
-            return
-
-        with self._lock:
-            print("[TensorBoardStatsRecorder] Acquired lock for closing.")
-            try:
-                if not is_cleanup and self.hparam_logger:
-                    print("[TensorBoardStatsRecorder] Logging final hparams...")
-                    final_step = getattr(
-                        self.aggregator.storage, "current_global_step", 0
-                    )
-                    final_summary = self.get_summary(final_step)
-                    self.hparam_logger.log_final_hparams_from_summary(final_summary)
-                    print("[TensorBoardStatsRecorder] Final hparams logged.")
-                elif is_cleanup:
-                    print(
-                        "[TensorBoardStatsRecorder] Skipping final hparams logging due to cleanup."
-                    )
-
-                print("[TensorBoardStatsRecorder] Flushing writer...")
-                self.writer.flush()
-                print("[TensorBoardStatsRecorder] Writer flushed.")
-                print("[TensorBoardStatsRecorder] Closing writer...")
-                self.writer.close()
-                self.writer = None
-                print("[TensorBoardStatsRecorder] Writer closed successfully.")
-            except Exception as e:
-                print(f"[TensorBoardStatsRecorder] Error during writer close: {e}")
-                traceback.print_exc()
-            finally:
-                print(
-                    "[TensorBoardStatsRecorder] Releasing lock after closing attempt."
-                )
-
-        self.console_recorder.close(is_cleanup=is_cleanup)
-        print("[TensorBoardStatsRecorder] Close method finished.")
-
-
 File: stats\__init__.py
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
 from .simple_stats_recorder import SimpleStatsRecorder
-from .tensorboard_logger import TensorBoardStatsRecorder
+
 
 __all__ = [
     "StatsRecorderBase",
     "StatsAggregator",
     "SimpleStatsRecorder",
-    "TensorBoardStatsRecorder",
 ]
 
 
 File: training\checkpoint_manager.py
-# File: training/checkpoint_manager.py
 import os
 import torch
-import torch.optim as optim  # Added optimizer import
+import torch.optim as optim
 import traceback
 import re
 import time
@@ -7591,117 +6409,85 @@ from stats.aggregator import StatsAggregator
 from agent.alphazero_net import AlphaZeroNet
 
 
+# --- Checkpoint Finding Logic ---
 def find_latest_run_and_checkpoint(
-    base_checkpoint_dir: str,
+    base_dir: str,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Finds the latest run directory and the latest checkpoint within it.
-    Returns (run_id, checkpoint_path) or (None, None).
-    """
-    latest_run_id = None
-    latest_run_mtime = 0
-
-    if not os.path.isdir(base_checkpoint_dir):
-        print(
-            f"[CheckpointFinder] Base checkpoint directory not found: {base_checkpoint_dir}"
-        )
+    """Finds the latest run directory and the latest checkpoint within it."""
+    latest_run_id, latest_run_mtime = None, 0
+    if not os.path.isdir(base_dir):
         return None, None
-
     try:
-        for item in os.listdir(base_checkpoint_dir):
-            item_path = os.path.join(base_checkpoint_dir, item)
-            if os.path.isdir(item_path) and item.startswith("run_"):
+        for item in os.listdir(base_dir):
+            path = os.path.join(base_dir, item)
+            if os.path.isdir(path) and item.startswith("run_"):
                 try:
-                    mtime = os.path.getmtime(item_path)
+                    mtime = os.path.getmtime(path)
                     if mtime > latest_run_mtime:
-                        latest_run_mtime = mtime
-                        latest_run_id = item
+                        latest_run_mtime, latest_run_id = mtime, item
                 except OSError:
                     continue
     except OSError as e:
-        print(
-            f"[CheckpointFinder] Error listing base checkpoint directory {base_checkpoint_dir}: {e}"
-        )
+        print(f"[CheckpointFinder] Error listing {base_dir}: {e}")
         return None, None
 
     if latest_run_id is None:
-        print(f"[CheckpointFinder] No run directories found in {base_checkpoint_dir}.")
+        print(f"[CheckpointFinder] No runs found in {base_dir}.")
         return None, None
-
-    latest_run_dir = os.path.join(base_checkpoint_dir, latest_run_id)
-    print(f"[CheckpointFinder] Identified latest run directory: {latest_run_dir}")
-
-    latest_checkpoint_path = find_latest_checkpoint_in_dir(latest_run_dir)
-
-    if latest_checkpoint_path:
+    latest_run_dir = os.path.join(base_dir, latest_run_id)
+    print(f"[CheckpointFinder] Latest run directory: {latest_run_dir}")
+    latest_checkpoint = find_latest_checkpoint_in_dir(latest_run_dir)
+    if latest_checkpoint:
         print(
-            f"[CheckpointFinder] Found latest checkpoint in run '{latest_run_id}': {os.path.basename(latest_checkpoint_path)}"
+            f"[CheckpointFinder] Found checkpoint: {os.path.basename(latest_checkpoint)}"
         )
-        return latest_run_id, latest_checkpoint_path
     else:
-        print(
-            f"[CheckpointFinder] No valid checkpoints found in the latest run directory: {latest_run_dir}"
-        )
-        return latest_run_id, None
+        print(f"[CheckpointFinder] No valid checkpoints found in {latest_run_dir}")
+    return latest_run_id, latest_checkpoint
 
 
-def find_latest_checkpoint_in_dir(checkpoint_dir: str) -> Optional[str]:
-    """
-    Finds the latest checkpoint file (step_*_alphazero_nn.pth or FINAL_alphazero_nn.pth)
-    in a specific directory. Prioritizes FINAL checkpoint if it exists.
-    """
-    if not os.path.isdir(checkpoint_dir):
+def find_latest_checkpoint_in_dir(ckpt_dir: str) -> Optional[str]:
+    """Finds the latest checkpoint file in a specific directory."""
+    if not os.path.isdir(ckpt_dir):
         return None
-
-    checkpoints = []
-    final_checkpoint = None
+    checkpoints, final_ckpt = [], None
     step_pattern = re.compile(r"step_(\d+)_alphazero_nn\.pth")
-    final_filename = "FINAL_alphazero_nn.pth"
-
+    final_name = "FINAL_alphazero_nn.pth"
     try:
-        for filename in os.listdir(checkpoint_dir):
-            full_path = os.path.join(checkpoint_dir, filename)
-            if not os.path.isfile(full_path):
+        for fname in os.listdir(ckpt_dir):
+            fpath = os.path.join(ckpt_dir, fname)
+            if not os.path.isfile(fpath):
                 continue
-
-            if filename == final_filename:
-                final_checkpoint = full_path
+            if fname == final_name:
+                final_ckpt = fpath
             else:
-                match = step_pattern.match(filename)
-                if match:
-                    step = int(match.group(1))
-                    checkpoints.append((step, full_path))
-
+                match = step_pattern.match(fname)
+                checkpoints.append((int(match.group(1)), fpath)) if match else None
     except OSError as e:
-        print(f"[CheckpointFinder] Error listing directory {checkpoint_dir}: {e}")
+        print(f"[CheckpointFinder] Error listing {ckpt_dir}: {e}")
         return None
 
-    if final_checkpoint:
+    if final_ckpt:
         try:
-            final_mtime = os.path.getmtime(final_checkpoint)
-            newer_step_checkpoints = [
-                cp for step, cp in checkpoints if os.path.getmtime(cp) > final_mtime
-            ]
-            if not newer_step_checkpoints:
-                print(f"[CheckpointFinder] Using FINAL checkpoint: {final_checkpoint}")
-                return final_checkpoint
+            final_mtime = os.path.getmtime(final_ckpt)
+            if not any(os.path.getmtime(cp) > final_mtime for _, cp in checkpoints):
+                return final_ckpt
         except OSError:
             pass
-
     if not checkpoints:
-        return final_checkpoint
-
+        return final_ckpt
     checkpoints.sort(key=lambda x: x[0], reverse=True)
     return checkpoints[0][1]
 
 
+# --- Checkpoint Manager Class ---
 class CheckpointManager:
     """Handles loading and saving of agent, optimizer, and stats states."""
 
     def __init__(
         self,
         agent: Optional[AlphaZeroNet],
-        optimizer: Optional[optim.Optimizer],  # Added optimizer
+        optimizer: Optional[optim.Optimizer],
         stats_aggregator: Optional[StatsAggregator],
         base_checkpoint_dir: str,
         run_checkpoint_dir: str,
@@ -7709,70 +6495,67 @@ class CheckpointManager:
         device: torch.device,
     ):
         self.agent = agent
-        self.optimizer = optimizer  # Store optimizer
+        self.optimizer = optimizer
         self.stats_aggregator = stats_aggregator
         self.base_checkpoint_dir = base_checkpoint_dir
         self.run_checkpoint_dir = run_checkpoint_dir
         self.device = device
-
         self.global_step = 0
         self.episode_count = 0
         self.training_target_step = 0
-
-        self.run_id_to_load_from: Optional[str] = None
-        self.checkpoint_path_to_load: Optional[str] = None
-
-        if load_checkpoint_path_config:
-            print(
-                f"[CheckpointManager] Using explicit checkpoint path from config: {load_checkpoint_path_config}"
-            )
-            if os.path.isfile(load_checkpoint_path_config):
-                self.checkpoint_path_to_load = load_checkpoint_path_config
-                try:
-                    parent_dir = os.path.dirname(load_checkpoint_path_config)
-                    self.run_id_to_load_from = os.path.basename(parent_dir)
-                    if not self.run_id_to_load_from.startswith("run_"):
-                        self.run_id_to_load_from = None
-                except Exception:
-                    self.run_id_to_load_from = None
-                if self.run_id_to_load_from:
-                    print(
-                        f"[CheckpointManager] Extracted run_id '{self.run_id_to_load_from}' from explicit path."
-                    )
-                else:
-                    print(
-                        "[CheckpointManager] Could not determine run_id from explicit path."
-                    )
-            else:
-                print(
-                    f"[CheckpointManager] WARNING: Explicit checkpoint path not found: {load_checkpoint_path_config}. Starting fresh."
-                )
-        else:
-            print(
-                f"[CheckpointManager] No explicit checkpoint path. Searching for latest run in: {self.base_checkpoint_dir}"
-            )
-            latest_run_id, latest_checkpoint_path = find_latest_run_and_checkpoint(
-                self.base_checkpoint_dir
-            )
-            if latest_run_id and latest_checkpoint_path:
-                print(
-                    f"[CheckpointManager] Found latest run '{latest_run_id}' with checkpoint: {os.path.basename(latest_checkpoint_path)}"
-                )
-                self.run_id_to_load_from = latest_run_id
-                self.checkpoint_path_to_load = latest_checkpoint_path
-            elif latest_run_id:
-                print(
-                    f"[CheckpointManager] Found latest run directory '{latest_run_id}' but no valid checkpoint inside. Starting fresh."
-                )
-            else:
-                print(
-                    f"[CheckpointManager] No previous runs found in {self.base_checkpoint_dir}. Starting fresh."
-                )
-
+        self.run_id_to_load_from, self.checkpoint_path_to_load = (
+            self._determine_checkpoint_to_load(load_checkpoint_path_config)
+        )
         if self.stats_aggregator:
             self.stats_aggregator.storage.training_target_step = (
                 self.training_target_step
             )
+
+    def _determine_checkpoint_to_load(
+        self, config_path: Optional[str]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Determines which checkpoint to load based on config or latest run."""
+        if config_path:
+            print(f"[CheckpointManager] Using explicit checkpoint path: {config_path}")
+            if os.path.isfile(config_path):
+                run_id = None
+                try:
+                    run_id = (
+                        os.path.basename(os.path.dirname(config_path))
+                        if os.path.basename(os.path.dirname(config_path)).startswith(
+                            "run_"
+                        )
+                        else None
+                    )
+                except Exception:
+                    pass
+                print(
+                    f"[CheckpointManager] Extracted run_id '{run_id}' from path."
+                    if run_id
+                    else "[CheckpointManager] Could not determine run_id from path."
+                )
+                return run_id, config_path
+            else:
+                print(
+                    f"[CheckpointManager] WARNING: Explicit path not found: {config_path}. Starting fresh."
+                )
+                return None, None
+        else:
+            print(
+                f"[CheckpointManager] Searching for latest run in: {self.base_checkpoint_dir}"
+            )
+            run_id, ckpt_path = find_latest_run_and_checkpoint(self.base_checkpoint_dir)
+            if run_id and ckpt_path:
+                print(
+                    f"[CheckpointManager] Found latest run '{run_id}' with checkpoint."
+                )
+            elif run_id:
+                print(
+                    f"[CheckpointManager] Found latest run '{run_id}' but no checkpoint. Starting fresh."
+                )
+            else:
+                print(f"[CheckpointManager] No previous runs found. Starting fresh.")
+            return run_id, ckpt_path
 
     def get_run_id_to_load_from(self) -> Optional[str]:
         return self.run_id_to_load_from
@@ -7782,184 +6565,130 @@ class CheckpointManager:
 
     def load_checkpoint(self):
         """Loads agent, optimizer, and stats aggregator state."""
-        if not self.checkpoint_path_to_load:
+        if not self.checkpoint_path_to_load or not os.path.isfile(
+            self.checkpoint_path_to_load
+        ):
             print(
-                "[CheckpointManager] No checkpoint path specified for loading. Skipping load."
+                f"[CheckpointManager] Checkpoint not found or not specified: {self.checkpoint_path_to_load}. Skipping load."
             )
             self._reset_all_states()
             return
-
-        if not os.path.isfile(self.checkpoint_path_to_load):
-            print(
-                f"[CheckpointManager] LOAD ERROR: Checkpoint file not found: {self.checkpoint_path_to_load}"
-            )
-            self._reset_all_states()
-            return
-
-        print(
-            f"[CheckpointManager] Loading checkpoint from: {self.checkpoint_path_to_load}"
-        )
-        loaded_target_step = None
-        agent_load_successful = False
-        optimizer_load_successful = False
+        print(f"[CheckpointManager] Loading checkpoint: {self.checkpoint_path_to_load}")
         try:
             checkpoint = torch.load(
                 self.checkpoint_path_to_load,
                 map_location=self.device,
                 weights_only=False,
             )
-
-            # --- Load Agent State ---
-            if "agent_state_dict" in checkpoint:
-                if self.agent:
-                    try:
-                        self.agent.load_state_dict(checkpoint["agent_state_dict"])
-                        agent_load_successful = True
-                        print("  -> Agent state loaded successfully.")
-                    except Exception as agent_load_err:
-                        print(
-                            f"  -> ERROR loading Agent state: {agent_load_err}. Agent state may be inconsistent."
-                        )
-                        agent_load_successful = False
-                else:
-                    print(
-                        "  -> WARNING: Agent not initialized, cannot load agent state dict."
-                    )
-            else:
-                print(
-                    "  -> WARNING: 'agent_state_dict' key missing. Agent state NOT loaded."
-                )
-            # --- End Load Agent State ---
-
-            # --- Load Optimizer State ---
-            if "optimizer_state_dict" in checkpoint:
-                if self.optimizer:
-                    try:
-                        self.optimizer.load_state_dict(
-                            checkpoint["optimizer_state_dict"]
-                        )
-                        # Move optimizer state to the correct device
-                        for state in self.optimizer.state.values():
-                            for k, v in state.items():
-                                if isinstance(v, torch.Tensor):
-                                    state[k] = v.to(self.device)
-                        optimizer_load_successful = True
-                        print("  -> Optimizer state loaded successfully.")
-                    except Exception as opt_load_err:
-                        print(
-                            f"  -> ERROR loading Optimizer state: {opt_load_err}. Optimizer state reset."
-                        )
-                        # Consider resetting optimizer if load fails
-                        # self.optimizer.state = defaultdict(dict) # Or re-initialize
-                        optimizer_load_successful = False
-                else:
-                    print(
-                        "  -> WARNING: Optimizer not initialized, cannot load optimizer state dict."
-                    )
-            else:
-                print(
-                    "  -> WARNING: 'optimizer_state_dict' key missing. Optimizer state NOT loaded."
-                )
-            # --- End Load Optimizer State ---
-
+            agent_ok = self._load_agent_state(checkpoint)
+            opt_ok = self._load_optimizer_state(checkpoint)
+            stats_ok, loaded_target = self._load_stats_state(checkpoint)
             self.global_step = checkpoint.get("global_step", 0)
             print(f"  -> Loaded Global Step: {self.global_step}")
-
-            # --- Load Stats Aggregator State ---
-            if "stats_aggregator_state_dict" in checkpoint and self.stats_aggregator:
-                try:
-                    self.stats_aggregator.load_state_dict(
-                        checkpoint["stats_aggregator_state_dict"]
-                    )
-                    print("  -> Stats Aggregator state loaded successfully.")
-                    self.episode_count = self.stats_aggregator.storage.total_episodes
-                    loaded_target_step = getattr(
-                        self.stats_aggregator.storage, "training_target_step", None
-                    )
-                    if loaded_target_step is not None:
-                        print(
-                            f"  -> Loaded Training Target Step from Stats: {loaded_target_step}"
-                        )
-                    else:
-                        print(
-                            "  -> WARNING: 'training_target_step' not found in loaded stats."
-                        )
-                    loaded_start_time = self.stats_aggregator.storage.start_time
-                    print(
-                        f"  -> Loaded Run Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(loaded_start_time))}"
-                    )
-                except Exception as stats_err:
-                    print(
-                        f"  -> ERROR loading Stats Aggregator state: {stats_err}. Stats reset."
-                    )
-                    self._reset_aggregator_state()
-                    self.episode_count = 0
-            elif self.stats_aggregator:
-                print(
-                    "  -> WARNING: 'stats_aggregator_state_dict' not found. Stats Aggregator reset."
-                )
-                self._reset_aggregator_state()
-                self.episode_count = 0
+            if stats_ok:
+                self.episode_count = self.stats_aggregator.storage.total_episodes
             else:
                 self.episode_count = checkpoint.get("episode_count", 0)
-                loaded_target_step = checkpoint.get("training_target_step", None)
-                if loaded_target_step is not None:
-                    print(
-                        f"  -> Loaded Training Target Step from Checkpoint (fallback): {loaded_target_step}"
-                    )
-            # --- End Load Stats Aggregator State ---
-
             print(
                 f"  -> Resuming from Step: {self.global_step}, Ep: {self.episode_count}"
             )
-
-            if loaded_target_step is not None:
-                self.training_target_step = loaded_target_step
-                print(
-                    f"[CheckpointManager] Using loaded Training Target Step: {self.training_target_step}"
-                )
-            else:
-                self.training_target_step = 0
-                print(
-                    "[CheckpointManager] WARNING: No training target step found in checkpoint or stats. Setting target to 0."
-                )
-
+            self.training_target_step = (
+                loaded_target
+                if loaded_target is not None
+                else checkpoint.get("training_target_step", 0)
+            )
             if self.stats_aggregator:
                 self.stats_aggregator.storage.training_target_step = (
                     self.training_target_step
                 )
-
             print("[CheckpointManager] Checkpoint loading finished.")
-
-        except pickle.UnpicklingError as e:
-            print(f"  -> ERROR loading checkpoint (UnpicklingError): {e}. State reset.")
-            traceback.print_exc()
-            self._reset_all_states()
-        except KeyError as e:
-            print(f"  -> ERROR loading checkpoint: Missing key '{e}'. State reset.")
-            traceback.print_exc()
-            self._reset_all_states()
-        except Exception as e:
+            if not agent_ok:
+                print("[CheckpointManager] Agent load was unsuccessful.")
+            if not opt_ok:
+                print("[CheckpointManager] Optimizer load was unsuccessful.")
+            if not stats_ok:
+                print("[CheckpointManager] Stats load was unsuccessful.")
+        except (pickle.UnpicklingError, KeyError, Exception) as e:
             print(f"  -> ERROR loading checkpoint ('{e}'). State reset.")
             traceback.print_exc()
             self._reset_all_states()
-
-        if not agent_load_successful:
-            print("[CheckpointManager] Agent load was unsuccessful.")
-        if not optimizer_load_successful:
-            print("[CheckpointManager] Optimizer load was unsuccessful.")
-
         print(
             f"[CheckpointManager] Final Training Target Step set to: {self.training_target_step}"
         )
 
+    def _load_agent_state(self, checkpoint: Dict[str, Any]) -> bool:
+        """Loads the agent state dictionary."""
+        if "agent_state_dict" not in checkpoint:
+            print("  -> WARNING: 'agent_state_dict' missing.")
+            return False
+        if not self.agent:
+            print("  -> WARNING: Agent not initialized.")
+            return False
+        try:
+            self.agent.load_state_dict(checkpoint["agent_state_dict"])
+            print("  -> Agent state loaded.")
+            return True
+        except Exception as e:
+            print(f"  -> ERROR loading Agent state: {e}.")
+            return False
+
+    def _load_optimizer_state(self, checkpoint: Dict[str, Any]) -> bool:
+        """Loads the optimizer state dictionary."""
+        if "optimizer_state_dict" not in checkpoint:
+            print("  -> WARNING: 'optimizer_state_dict' missing.")
+            return False
+        if not self.optimizer:
+            print("  -> WARNING: Optimizer not initialized.")
+            return False
+        try:
+            self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            for state in self.optimizer.state.values():  # Move state to device
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(self.device)
+            print("  -> Optimizer state loaded.")
+            return True
+        except Exception as e:
+            print(f"  -> ERROR loading Optimizer state: {e}.")
+            return False
+
+    def _load_stats_state(
+        self, checkpoint: Dict[str, Any]
+    ) -> Tuple[bool, Optional[int]]:
+        """Loads the stats aggregator state."""
+        loaded_target = None
+        if "stats_aggregator_state_dict" not in checkpoint:
+            print("  -> WARNING: 'stats_aggregator_state_dict' missing.")
+            return False, loaded_target
+        if not self.stats_aggregator:
+            print("  -> WARNING: Stats Aggregator not initialized.")
+            return False, loaded_target
+        try:
+            self.stats_aggregator.load_state_dict(
+                checkpoint["stats_aggregator_state_dict"]
+            )
+            loaded_target = getattr(
+                self.stats_aggregator.storage, "training_target_step", None
+            )
+            start_time = self.stats_aggregator.storage.start_time
+            print("  -> Stats Aggregator state loaded.")
+            if loaded_target is not None:
+                print(f"  -> Loaded Training Target Step from Stats: {loaded_target}")
+            print(
+                f"  -> Loaded Run Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}"
+            )
+            return True, loaded_target
+        except Exception as e:
+            print(f"  -> ERROR loading Stats Aggregator state: {e}.")
+            self._reset_aggregator_state()
+            return False, loaded_target
+
     def _reset_aggregator_state(self):
-        """Helper to reset only the stats aggregator state."""
+        """Resets only the stats aggregator state."""
         if self.stats_aggregator:
-            avg_windows = self.stats_aggregator.avg_windows
-            plot_window = self.stats_aggregator.plot_window
             self.stats_aggregator.__init__(
-                avg_windows=avg_windows, plot_window=plot_window
+                avg_windows=self.stats_aggregator.avg_windows,
+                plot_window=self.stats_aggregator.plot_window,
             )
             self.stats_aggregator.storage.training_target_step = (
                 self.training_target_step
@@ -7967,14 +6696,13 @@ class CheckpointManager:
             self.stats_aggregator.storage.total_episodes = 0
 
     def _reset_all_states(self):
-        """Helper to reset all managed states on critical load failure."""
+        """Resets all managed states on critical load failure."""
         print("[CheckpointManager] Resetting all managed states due to load failure.")
         self.global_step = 0
         self.episode_count = 0
         self.training_target_step = 0
-        # Reset optimizer state if it exists
         if self.optimizer:
-            self.optimizer.state = {}  # Clear optimizer state
+            self.optimizer.state = {}
             print("  -> Optimizer state reset.")
         self._reset_aggregator_state()
 
@@ -7990,56 +6718,40 @@ class CheckpointManager:
         save_dir = self.run_checkpoint_dir
         os.makedirs(save_dir, exist_ok=True)
         filename = f"{prefix}_alphazero_nn.pth"
-        full_save_path = os.path.join(save_dir, filename)
-
+        full_path = os.path.join(save_dir, filename)
         print(f"[CheckpointManager] Saving checkpoint ({prefix}) to {save_dir}...")
-        temp_save_path = full_save_path + ".tmp"
+        temp_path = full_path + ".tmp"
         try:
-            agent_save_data = {}
-            if self.agent:
-                agent_save_data = self.agent.state_dict()
-            else:
-                print("  -> WARNING: Agent not initialized, saving empty agent state.")
-
-            optimizer_save_data = {}
-            if self.optimizer:
-                optimizer_save_data = self.optimizer.state_dict()
-            else:
-                print(
-                    "  -> WARNING: Optimizer not initialized, saving empty optimizer state."
-                )
-
-            stats_aggregator_save_data = {}
-            aggregator_episode_count = episode_count
-            aggregator_target_step = training_target_step
+            agent_sd = self.agent.state_dict() if self.agent else {}
+            opt_sd = self.optimizer.state_dict() if self.optimizer else {}
+            stats_sd = {}
+            agg_ep_count = episode_count
+            agg_target_step = training_target_step
             if self.stats_aggregator:
                 self.stats_aggregator.storage.training_target_step = (
                     training_target_step
                 )
-                stats_aggregator_save_data = self.stats_aggregator.state_dict()
-                aggregator_episode_count = self.stats_aggregator.storage.total_episodes
-                aggregator_target_step = (
-                    self.stats_aggregator.storage.training_target_step
-                )
+                stats_sd = self.stats_aggregator.state_dict()
+                agg_ep_count = self.stats_aggregator.storage.total_episodes
+                agg_target_step = self.stats_aggregator.storage.training_target_step
 
             checkpoint_data = {
                 "global_step": global_step,
-                "episode_count": aggregator_episode_count,
-                "training_target_step": aggregator_target_step,
-                "agent_state_dict": agent_save_data,
-                "optimizer_state_dict": optimizer_save_data,  # Save optimizer state
-                "stats_aggregator_state_dict": stats_aggregator_save_data,
+                "episode_count": agg_ep_count,
+                "training_target_step": agg_target_step,
+                "agent_state_dict": agent_sd,
+                "optimizer_state_dict": opt_sd,
+                "stats_aggregator_state_dict": stats_sd,
             }
-
-            torch.save(checkpoint_data, temp_save_path)
-            os.replace(temp_save_path, full_save_path)
+            torch.save(checkpoint_data, temp_path)
+            os.replace(temp_path, full_path)
             print(f"  -> Checkpoint saved: {filename}")
         except Exception as e:
             print(f"  -> ERROR saving checkpoint: {e}")
             traceback.print_exc()
-            if os.path.exists(temp_save_path):
+            if os.path.exists(temp_path):
                 try:
-                    os.remove(temp_save_path)
+                    os.remove(temp_path)
                 except OSError:
                     pass
 
@@ -8643,22 +7355,22 @@ class OverlayRenderer:
 File: ui\plotter.py
 # File: ui/plotter.py
 import pygame
-from typing import Dict, Optional, Deque
+from typing import Dict, Optional, Deque, Tuple
 from collections import deque
 import matplotlib
 import time
 import warnings
 from io import BytesIO
 import traceback
+import logging  # Added logging
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import VisConfig, StatsConfig
-from .plot_utils import (
-    render_single_plot,
-    normalize_color_for_matplotlib,
-)
+from .plot_utils import render_single_plot, normalize_color_for_matplotlib
+
+logger = logging.getLogger(__name__)
 
 
 class Plotter:
@@ -8667,60 +7379,62 @@ class Plotter:
     def __init__(self):
         self.plot_surface: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        self.plot_update_interval: float = 0.2
+        # Increase update interval significantly to reduce overhead
+        self.plot_update_interval: float = 2.0  # Changed from 0.2 to 2.0 seconds
         self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
+        self.colors = self._init_colors()
+        logger.info(
+            f"[Plotter] Initialized with update interval: {self.plot_update_interval}s"
+        )
 
-        self.colors = {
-            "rl_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
-            "game_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[1]),
-            "policy_loss": normalize_color_for_matplotlib(VisConfig.RED),
-            "value_loss": normalize_color_for_matplotlib(VisConfig.BLUE),
-            "len": normalize_color_for_matplotlib(VisConfig.BLUE),
+    def _init_colors(self) -> Dict[str, Tuple[float, float, float]]:
+        """Initializes plot colors."""
+        return {
+            "game_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
             "tris_cleared": normalize_color_for_matplotlib(VisConfig.YELLOW),
+            "outcome": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[1]),
+            "length": normalize_color_for_matplotlib(VisConfig.BLUE),
+            "policy_loss": normalize_color_for_matplotlib(VisConfig.RED),
+            "value_loss": normalize_color_for_matplotlib(VisConfig.CYAN),
             "lr": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[2]),
-            "cpu": normalize_color_for_matplotlib((255, 165, 0)),
-            "memory": normalize_color_for_matplotlib((0, 191, 255)),
-            "gpu_mem": normalize_color_for_matplotlib((123, 104, 238)),
+            "buffer": normalize_color_for_matplotlib(VisConfig.PURPLE),
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
 
     def create_plot_surface(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
-
+        """Creates the Matplotlib plot surface with AlphaZero relevant stats."""
         if target_width <= 10 or target_height <= 10 or not plot_data:
             return None
 
-        # Ensure keys match AggregatorStorage deque names
         data_keys = [
             "game_scores",
             "episode_triangles_cleared",
-            "episode_scores",  # RL Score (optional)
+            "episode_outcomes",
             "episode_lengths",
             "policy_losses",
             "value_losses",
             "lr_values",
-            "cpu_usage",
-            "memory_usage",
-            "gpu_memory_usage_percent",
-            "buffer_sizes",  # Added buffer size plot
-            "placeholder2",  # Keep one placeholder
+            "buffer_sizes",
+            "placeholder1",
+            "placeholder2",
+            "placeholder3",
+            "placeholder4",
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
-
-        has_any_data = any(len(d) > 0 for d in data_lists.values())
-        if not has_any_data:
+        if not any(len(d) > 0 for d in data_lists.values()):
             return None
 
         fig = None
+        plot_creation_start = time.monotonic()
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=UserWarning)
                 dpi = 90
                 fig_width_in = max(1, target_width / dpi)
                 fig_height_in = max(1, target_height / dpi)
-
                 fig, axes = plt.subplots(
                     4, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
@@ -8734,112 +7448,103 @@ class Plotter:
                 )
                 axes_flat = axes.flatten()
 
-                # Row 1: Performance Metrics
-                render_single_plot(
-                    axes_flat[0],
-                    data_lists["game_scores"],
-                    "Game Score",
-                    self.colors["game_score"],
-                    self.rolling_window_sizes,
-                    placeholder_text="Game Score",
-                )
-                render_single_plot(
-                    axes_flat[1],
-                    data_lists["episode_triangles_cleared"],
-                    "Tris Cleared / Ep",
-                    self.colors["tris_cleared"],
-                    self.rolling_window_sizes,
-                    placeholder_text="Triangles Cleared",
-                )
-                render_single_plot(
-                    axes_flat[2],
-                    data_lists["episode_scores"],
-                    "RL Score",
-                    self.colors["rl_score"],
-                    self.rolling_window_sizes,
-                    placeholder_text="RL Score",
-                )
+                plot_defs = [
+                    (
+                        axes_flat[0],
+                        data_lists["game_scores"],
+                        "Game Score",
+                        self.colors["game_score"],
+                        False,
+                    ),
+                    (
+                        axes_flat[1],
+                        data_lists["episode_triangles_cleared"],
+                        "Tris Cleared / Ep",
+                        self.colors["tris_cleared"],
+                        False,
+                    ),
+                    (
+                        axes_flat[2],
+                        data_lists["episode_outcomes"],
+                        "Episode Outcome",
+                        self.colors["outcome"],
+                        False,
+                    ),
+                    (
+                        axes_flat[3],
+                        data_lists["policy_losses"],
+                        "Policy Loss",
+                        self.colors["policy_loss"],
+                        True,
+                    ),
+                    (
+                        axes_flat[4],
+                        data_lists["value_losses"],
+                        "Value Loss",
+                        self.colors["value_loss"],
+                        True,
+                    ),
+                    (
+                        axes_flat[5],
+                        data_lists["episode_lengths"],
+                        "Ep Length",
+                        self.colors["length"],
+                        False,
+                    ),
+                    (
+                        axes_flat[6],
+                        data_lists["lr_values"],
+                        "Learning Rate",
+                        self.colors["lr"],
+                        True,
+                    ),
+                    (
+                        axes_flat[7],
+                        data_lists["buffer_sizes"],
+                        "Buffer Size",
+                        self.colors["buffer"],
+                        False,
+                    ),
+                    (
+                        axes_flat[8],
+                        data_lists["placeholder1"],
+                        "Future Plot 1",
+                        self.colors["placeholder"],
+                        False,
+                    ),
+                    (
+                        axes_flat[9],
+                        data_lists["placeholder2"],
+                        "Future Plot 2",
+                        self.colors["placeholder"],
+                        False,
+                    ),
+                    (
+                        axes_flat[10],
+                        data_lists["placeholder3"],
+                        "Future Plot 3",
+                        self.colors["placeholder"],
+                        False,
+                    ),
+                    (
+                        axes_flat[11],
+                        data_lists["placeholder4"],
+                        "Future Plot 4",
+                        self.colors["placeholder"],
+                        False,
+                    ),
+                ]
 
-                # Row 2: Training Dynamics / NN Losses
-                render_single_plot(
-                    axes_flat[3],
-                    data_lists["episode_lengths"],
-                    "Ep Length",
-                    self.colors["len"],
-                    self.rolling_window_sizes,
-                    placeholder_text="Episode Length",
-                )
-                render_single_plot(
-                    axes_flat[4],
-                    data_lists["policy_losses"],
-                    "Policy Loss",
-                    self.colors["policy_loss"],
-                    self.rolling_window_sizes,
-                    placeholder_text="Policy Loss",
-                    y_log_scale=True,
-                )
-                render_single_plot(
-                    axes_flat[5],
-                    data_lists["value_losses"],
-                    "Value Loss",
-                    self.colors["value_loss"],
-                    self.rolling_window_sizes,
-                    placeholder_text="Value Loss",
-                    y_log_scale=True,
-                )
-
-                # Row 3: Resource Usage & LR
-                render_single_plot(
-                    axes_flat[6],
-                    data_lists["cpu_usage"],
-                    "CPU Usage (%)",
-                    self.colors["cpu"],
-                    self.rolling_window_sizes,
-                    placeholder_text="CPU %",
-                )
-                render_single_plot(
-                    axes_flat[7],
-                    data_lists["memory_usage"],
-                    "Memory Usage (%)",
-                    self.colors["memory"],
-                    self.rolling_window_sizes,
-                    placeholder_text="Mem %",
-                )
-                render_single_plot(
-                    axes_flat[8],
-                    data_lists["gpu_memory_usage_percent"],
-                    "GPU Memory (%)",
-                    self.colors["gpu_mem"],
-                    self.rolling_window_sizes,
-                    placeholder_text="GPU Mem %",
-                )
-
-                # Row 4: LR, Buffer Size & Placeholder
-                render_single_plot(
-                    axes_flat[9],
-                    data_lists["lr_values"],
-                    "Learning Rate",
-                    self.colors["lr"],
-                    [],
-                    placeholder_text="Learning Rate",
-                    y_log_scale=True,
-                )
-                render_single_plot(
-                    axes_flat[10],
-                    data_lists["buffer_sizes"],
-                    "Buffer Size",
-                    self.colors["placeholder"],
-                    [],
-                    placeholder_text="Buffer Size",
-                )  # Added Buffer Size plot
-                render_single_plot(
-                    axes_flat[11],
-                    data_lists["placeholder2"],
-                    "Future Plot",
-                    self.colors["placeholder"],
-                    [],
-                    placeholder_text="Future Plot",
-                )
+                for ax, data, label, color, log_scale in plot_defs:
+                    render_single_plot(
+                        ax,
+                        data,
+                        label,
+                        color,
+                        self.rolling_window_sizes,
+                        placeholder_text=label,
+                        y_log_scale=log_scale,
+                    )
 
                 for i, ax in enumerate(axes_flat):
                     if i < 9:
@@ -8864,11 +7569,14 @@ class Plotter:
                         plot_img_surface, (target_width, target_height)
                     )
 
+                plot_creation_duration = time.monotonic() - plot_creation_start
+                logger.info(
+                    f"[Plotter] Plot surface created in {plot_creation_duration:.3f}s"
+                )
                 return plot_img_surface
 
         except Exception as e:
-            print(f"Error creating plot surface: {e}")
-            traceback.print_exc()
+            logger.error(f"Error creating plot surface: {e}", exc_info=True)
             return None
         finally:
             if fig is not None:
@@ -8877,6 +7585,7 @@ class Plotter:
     def get_cached_or_updated_plot(
         self, plot_data: Dict[str, Deque], target_width: int, target_height: int
     ) -> Optional[pygame.Surface]:
+        """Returns the cached plot surface or creates a new one if needed."""
         current_time = time.time()
         has_data = any(d for d in plot_data.values())
         needs_update_time = (
@@ -8891,6 +7600,9 @@ class Plotter:
 
         if can_create_plot and (needs_update_time or size_changed or first_plot_needed):
             if has_data:
+                logger.info(
+                    f"[Plotter] Update condition met (time: {needs_update_time}, size: {size_changed}, first: {first_plot_needed}). Recreating plot."
+                )
                 new_plot_surface = self.create_plot_surface(
                     plot_data, target_width, target_height
                 )
@@ -8899,6 +7611,7 @@ class Plotter:
                 self.last_plot_update_time = current_time
             elif not has_data:
                 self.plot_surface = None
+                self.last_plot_update_time = current_time
 
         return self.plot_surface
 
@@ -8916,18 +7629,37 @@ import matplotlib.pyplot as plt
 
 from config import VisConfig
 
+# --- Constants ---
+TREND_SLOPE_TOLERANCE = 1e-5
+TREND_MIN_LINEWIDTH = 1
+TREND_MAX_LINEWIDTH = 2
+TREND_COLOR_STABLE = (1.0, 1.0, 0.0)  # Yellow
+TREND_COLOR_INCREASING = (0.0, 0.8, 0.0)  # Green
+TREND_COLOR_DECREASING = (0.8, 0.0, 0.0)  # Red
+TREND_SLOPE_SCALE_FACTOR = 5.0
+TREND_BACKGROUND_ALPHA = 0.15
+TREND_LINE_COLOR = (1.0, 1.0, 1.0)
+TREND_LINE_STYLE = (0, (5, 10))
+TREND_LINE_WIDTH = 0.75
+TREND_LINE_ALPHA = 0.7
+TREND_LINE_ZORDER = 10
+MIN_ALPHA = 0.4
+MAX_ALPHA = 1.0
+MIN_DATA_AVG_LINEWIDTH = 1
+MAX_DATA_AVG_LINEWIDTH = 2
 
+
+# --- Helper Functions ---
 def normalize_color_for_matplotlib(
     color_tuple_0_255: Tuple[int, int, int],
 ) -> Tuple[float, float, float]:
     """Converts RGB tuple (0-255) to Matplotlib format (0.0-1.0)."""
     if isinstance(color_tuple_0_255, tuple) and len(color_tuple_0_255) == 3:
         return tuple(c / 255.0 for c in color_tuple_0_255)
-    else:
-        print(f"Warning: Invalid color tuple {color_tuple_0_255}, using black.")
-        return (0.0, 0.0, 0.0)
+    return (0.0, 0.0, 0.0)  # Default black
 
 
+# --- Matplotlib Style Setup ---
 try:
     plt.style.use("dark_background")
     plt.rcParams.update(
@@ -8958,113 +7690,65 @@ except Exception as e:
     print(f"Warning: Failed to set Matplotlib style: {e}")
 
 
-TREND_SLOPE_TOLERANCE = 1e-5
-TREND_MIN_LINEWIDTH = 1
-TREND_MAX_LINEWIDTH = 2
-TREND_COLOR_STABLE = normalize_color_for_matplotlib(VisConfig.YELLOW)
-TREND_COLOR_INCREASING = normalize_color_for_matplotlib(
-    (0, 200, 0)
-)  # Green for increasing (good)
-TREND_COLOR_DECREASING = normalize_color_for_matplotlib(
-    (200, 0, 0)
-)  # Red for decreasing (bad)
-TREND_SLOPE_SCALE_FACTOR = 5.0
-TREND_BACKGROUND_ALPHA = 0.15
-
-TREND_LINE_COLOR = (1.0, 1.0, 1.0)
-TREND_LINE_STYLE = (0, (5, 10))
-TREND_LINE_WIDTH = 0.75
-TREND_LINE_ALPHA = 0.7
-TREND_LINE_ZORDER = 10
-
-MIN_ALPHA = 0.4
-MAX_ALPHA = 1.0
-MIN_DATA_AVG_LINEWIDTH = 1
-MAX_DATA_AVG_LINEWIDTH = 2
-
-
+# --- Trend Calculation ---
 def calculate_trend_line(data: np.ndarray) -> Optional[Tuple[float, float]]:
-    """
-    Calculates the slope and intercept of the linear regression line.
-    Returns (slope, intercept) or None if calculation fails.
-    """
-    n_points = len(data)
-    if n_points < 2:
+    """Calculates the slope and intercept of the linear regression line."""
+    n = len(data)
+    x = np.arange(n)
+    mask = np.isfinite(data)
+    if np.sum(mask) < 2:
         return None
     try:
-        x_coords = np.arange(n_points)
-        finite_mask = np.isfinite(data)
-        if np.sum(finite_mask) < 2:
+        coeffs = np.polyfit(x[mask], data[mask], 1)
+        if not all(np.isfinite(c) for c in coeffs):
             return None
-        coeffs = np.polyfit(x_coords[finite_mask], data[finite_mask], 1)
-        slope = coeffs[0]
-        intercept = coeffs[1]
-        if not (np.isfinite(slope) and np.isfinite(intercept)):
-            return None
-        return slope, intercept
+        return coeffs[0], coeffs[1]  # slope, intercept
     except (np.linalg.LinAlgError, ValueError):
         return None
 
 
 def get_trend_color(slope: float, lower_is_better: bool) -> Tuple[float, float, float]:
-    """
-    Maps a slope to a color (Red -> Yellow(Stable) -> Green).
-    Adjusts based on whether lower values are better (e.g., for loss).
-    """
+    """Maps slope to color (Red -> Yellow -> Green)."""
     if abs(slope) < TREND_SLOPE_TOLERANCE:
         return TREND_COLOR_STABLE
-
-    # If lower is better, decreasing slope is good (green), increasing is bad (red)
-    effective_slope = -slope if lower_is_better else slope
-
-    norm_slope = math.atan(effective_slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0)
-    norm_slope = np.clip(norm_slope, -1.0, 1.0)
-
-    if norm_slope > 0:  # Good trend (increasing score or decreasing loss)
-        t = norm_slope
-        color = tuple(
-            TREND_COLOR_STABLE[i] * (1 - t) + TREND_COLOR_INCREASING[i] * t
-            for i in range(3)
-        )
-    else:  # Bad trend (decreasing score or increasing loss)
-        t = abs(norm_slope)
-        color = tuple(
-            TREND_COLOR_STABLE[i] * (1 - t) + TREND_COLOR_DECREASING[i] * t
-            for i in range(3)
-        )
+    eff_slope = -slope if lower_is_better else slope
+    norm_slope = np.clip(
+        math.atan(eff_slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0), -1.0, 1.0
+    )
+    t = abs(norm_slope)
+    base, target = (
+        (TREND_COLOR_STABLE, TREND_COLOR_INCREASING)
+        if norm_slope > 0
+        else (TREND_COLOR_STABLE, TREND_COLOR_DECREASING)
+    )
+    color = tuple(base[i] * (1 - t) + target[i] * t for i in range(3))
     return tuple(np.clip(c, 0.0, 1.0) for c in color)
 
 
 def get_trend_linewidth(slope: float) -> float:
-    """Maps the *magnitude* of a slope to a border linewidth."""
+    """Maps slope magnitude to border linewidth."""
     if abs(slope) < TREND_SLOPE_TOLERANCE:
         return TREND_MIN_LINEWIDTH
-    norm_slope_mag = abs(math.atan(slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0))
-    norm_slope_mag = np.clip(norm_slope_mag, 0.0, 1.0)
-    linewidth = TREND_MIN_LINEWIDTH + norm_slope_mag * (
-        TREND_MAX_LINEWIDTH - TREND_MIN_LINEWIDTH
+    norm_mag = np.clip(
+        abs(math.atan(slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0)), 0.0, 1.0
     )
-    return linewidth
+    return TREND_MIN_LINEWIDTH + norm_mag * (TREND_MAX_LINEWIDTH - TREND_MIN_LINEWIDTH)
 
 
+# --- Visual Property Interpolation ---
 def _interpolate_visual_property(
     rank: int, total_ranks: int, min_val: float, max_val: float
 ) -> float:
-    """
-    Linearly interpolates alpha or linewidth based on rank.
-    Rank 0 corresponds to max_val (most prominent).
-    Rank (total_ranks - 1) corresponds to min_val (least prominent).
-    """
+    """Linearly interpolates alpha/linewidth based on rank."""
     if total_ranks <= 1:
         return float(max_val)
-    inverted_rank = (total_ranks - 1) - rank
-    fraction = inverted_rank / max(1, total_ranks - 1)
-    f_min_val = float(min_val)
-    f_max_val = float(max_val)
-    value = f_min_val + (f_max_val - f_min_val) * fraction
+    inv_rank = (total_ranks - 1) - rank
+    fraction = inv_rank / max(1, total_ranks - 1)
+    value = float(min_val) + (float(max_val) - float(min_val)) * fraction
     return float(np.clip(value, min_val, max_val))
 
 
+# --- Value Formatting ---
 def _format_value(value: float, is_loss: bool) -> str:
     """Formats value based on magnitude and whether it's a loss."""
     if not np.isfinite(value):
@@ -9072,12 +7756,12 @@ def _format_value(value: float, is_loss: bool) -> str:
     if abs(value) < 1e-3 and value != 0:
         return f"{value:.1e}"
     if abs(value) >= 1000:
-        return f"{value:.2g}"
+        return f"{value:,.0f}".replace(",", "_")
     if is_loss:
         return f"{value:.3f}"
     if abs(value) < 10:
         return f"{value:.2f}"
-    return f"{value:.2f}"
+    return f"{value:.1f}"
 
 
 def _format_slope(slope: float) -> str:
@@ -9085,14 +7769,15 @@ def _format_slope(slope: float) -> str:
     if not np.isfinite(slope):
         return "N/A"
     sign = "+" if slope >= 0 else ""
-    if abs(slope) < 1e-4:
+    abs_slope = abs(slope)
+    if abs_slope < 1e-4:
         return f"{sign}{slope:.1e}"
-    elif abs(slope) < 0.1:
+    if abs_slope < 0.1:
         return f"{sign}{slope:.3f}"
-    else:
-        return f"{sign}{slope:.2f}"
+    return f"{sign}{slope:.2f}"
 
 
+# --- Main Plotting Function ---
 def render_single_plot(
     ax,
     data: List[Union[float, int]],
@@ -9103,26 +7788,16 @@ def render_single_plot(
     placeholder_text: Optional[str] = None,
     y_log_scale: bool = False,
 ):
-    """
-    Renders data with linearly scaled alpha/linewidth. Trend line is thin, white, dashed.
-    Title is just the label. Detailed values moved to legend. Best value shown as legend title.
-    Applies a background tint and border to the entire subplot based on trend desirability.
-    Legend now includes current values and trend slope, placed at center-left.
-    Handles empty data explicitly to show placeholder.
-    """
+    """Renders data with rolling averages, trend line, and informative legend."""
     try:
         data_np = np.array(data, dtype=float)
-        finite_mask = np.isfinite(data_np)
-        valid_data = data_np[finite_mask]
+        valid_data = data_np[np.isfinite(data_np)]
     except (ValueError, TypeError):
         valid_data = np.array([])
-
     n_points = len(valid_data)
-    placeholder_text_color = normalize_color_for_matplotlib(VisConfig.GRAY)
-
     is_lower_better = "loss" in label.lower()
 
-    if n_points == 0:
+    if n_points == 0:  # Handle empty data
         if show_placeholder:
             p_text = placeholder_text if placeholder_text else f"{label}\n(No data)"
             ax.text(
@@ -9133,11 +7808,11 @@ def render_single_plot(
                 va="center",
                 transform=ax.transAxes,
                 fontsize=8,
-                color=placeholder_text_color,
+                color=normalize_color_for_matplotlib(VisConfig.GRAY),
             )
         ax.set_yticks([])
         ax.set_xticks([])
-        ax.set_title(f"{label} (N/A)", fontsize=plt.rcParams["axes.titlesize"])
+        ax.set_title(f"{label} (N/A)")
         ax.grid(False)
         ax.patch.set_facecolor(plt.rcParams["axes.facecolor"])
         ax.patch.set_edgecolor(plt.rcParams["axes.edgecolor"])
@@ -9145,92 +7820,73 @@ def render_single_plot(
         return
 
     trend_params = calculate_trend_line(valid_data)
-    trend_slope = trend_params[0] if trend_params is not None else 0.0
-
-    trend_indicator_color = get_trend_color(trend_slope, is_lower_better)
-    trend_indicator_lw = get_trend_linewidth(trend_slope)
-
+    trend_slope = trend_params[0] if trend_params else 0.0
+    trend_color = get_trend_color(trend_slope, is_lower_better)
+    trend_lw = get_trend_linewidth(trend_slope)
     plotted_windows = sorted([w for w in rolling_window_sizes if n_points >= w])
     total_ranks = 1 + len(plotted_windows)
-
     current_val = valid_data[-1]
     best_val = np.min(valid_data) if is_lower_better else np.max(valid_data)
     best_val_str = f"Best: {_format_value(best_val, is_lower_better)}"
-
-    ax.set_title(
-        label,
-        loc="left",
-        fontsize=plt.rcParams["axes.titlesize"],
-        pad=plt.rcParams.get("axes.titlepad", 6),
-    )
+    ax.set_title(label, loc="left")
 
     try:
         x_coords = np.arange(n_points)
-        plotted_legend_items = False
-        min_y_overall = float("inf")
-        max_y_overall = float("-inf")
-
-        # Plot Raw Data
-        raw_data_rank = total_ranks - 1
-        raw_data_alpha = _interpolate_visual_property(
-            raw_data_rank, total_ranks, MIN_ALPHA, MAX_ALPHA
+        plotted_legend = False
+        min_y, max_y = float("inf"), float("-inf")
+        plot_raw = len(plotted_windows) == 0 or n_points < min(
+            rolling_window_sizes, default=10
         )
-        raw_data_lw = _interpolate_visual_property(
-            raw_data_rank,
-            total_ranks,
-            MIN_DATA_AVG_LINEWIDTH,
-            MAX_DATA_AVG_LINEWIDTH,
-        )
-        raw_label = f"Raw: {_format_value(current_val, is_lower_better)}"
-        ax.plot(
-            x_coords,
-            valid_data,
-            color=color,
-            linewidth=raw_data_lw,
-            label=raw_label,
-            alpha=raw_data_alpha,
-        )
-        min_y_overall = min(min_y_overall, np.min(valid_data))
-        max_y_overall = max(max_y_overall, np.max(valid_data))
-        plotted_legend_items = True
-
-        # Plot Rolling Averages
-        for i, avg_window in enumerate(plotted_windows):
-            avg_rank = len(plotted_windows) - 1 - i
-            current_alpha = _interpolate_visual_property(
-                avg_rank, total_ranks, MIN_ALPHA, MAX_ALPHA
+        if plot_raw:
+            rank = 0
+            alpha = _interpolate_visual_property(
+                rank, total_ranks, MIN_ALPHA, MAX_ALPHA
             )
-            current_avg_lw = _interpolate_visual_property(
-                avg_rank,
-                total_ranks,
-                MIN_DATA_AVG_LINEWIDTH,
-                MAX_DATA_AVG_LINEWIDTH,
+            lw = _interpolate_visual_property(
+                rank, total_ranks, MIN_DATA_AVG_LINEWIDTH, MAX_DATA_AVG_LINEWIDTH
             )
-            weights = np.ones(avg_window) / avg_window
+            raw_label = f"Val: {_format_value(current_val, is_lower_better)}"
+            ax.plot(
+                x_coords,
+                valid_data,
+                color=color,
+                linewidth=lw,
+                label=raw_label,
+                alpha=alpha,
+            )
+            min_y = min(min_y, np.min(valid_data))
+            max_y = max(max_y, np.max(valid_data))
+            plotted_legend = True
+
+        for i, avg_win in enumerate(reversed(plotted_windows)):
+            rank = i
+            alpha = _interpolate_visual_property(
+                rank, total_ranks, MIN_ALPHA, MAX_ALPHA
+            )
+            lw = _interpolate_visual_property(
+                rank, total_ranks, MIN_DATA_AVG_LINEWIDTH, MAX_DATA_AVG_LINEWIDTH
+            )
+            weights = np.ones(avg_win) / avg_win
             rolling_avg = np.convolve(valid_data, weights, mode="valid")
-            avg_x_coords = np.arange(avg_window - 1, n_points)
-            linestyle = "-"
-            if len(avg_x_coords) == len(rolling_avg):
-                last_avg_val = rolling_avg[-1] if len(rolling_avg) > 0 else np.nan
-                avg_label = (
-                    f"Avg {avg_window}: {_format_value(last_avg_val, is_lower_better)}"
-                )
+            avg_x = np.arange(avg_win - 1, n_points)
+            if len(avg_x) == len(rolling_avg):
+                last_avg = rolling_avg[-1] if len(rolling_avg) > 0 else np.nan
+                avg_label = f"Avg {avg_win}: {_format_value(last_avg, is_lower_better)}"
                 ax.plot(
-                    avg_x_coords,
+                    avg_x,
                     rolling_avg,
                     color=color,
-                    linewidth=current_avg_lw,
-                    alpha=current_alpha,
-                    linestyle=linestyle,
+                    linewidth=lw,
+                    alpha=alpha,
+                    linestyle="-",
                     label=avg_label,
                 )
                 if len(rolling_avg) > 0:
-                    min_y_overall = min(min_y_overall, np.min(rolling_avg))
-                    max_y_overall = max(max_y_overall, np.max(rolling_avg))
-                plotted_legend_items = True
+                    min_y = min(min_y, np.min(rolling_avg))
+                    max_y = max(max_y, np.max(rolling_avg))
+                plotted_legend = True
 
-        # Plot Trend Line
-        if trend_params is not None and n_points >= 2:
+        if trend_params and n_points >= 2:
             slope, intercept = trend_params
             x_trend = np.array([0, n_points - 1])
             y_trend = slope * x_trend + intercept
@@ -9245,7 +7901,7 @@ def render_single_plot(
                 label=trend_label,
                 zorder=TREND_LINE_ZORDER,
             )
-            plotted_legend_items = True
+            plotted_legend = True
 
         ax.tick_params(axis="both", which="major")
         ax.grid(
@@ -9253,56 +7909,43 @@ def render_single_plot(
             linestyle=plt.rcParams["grid.linestyle"],
             alpha=plt.rcParams["grid.alpha"],
         )
-
-        if np.isfinite(min_y_overall) and np.isfinite(max_y_overall):
-            if abs(max_y_overall - min_y_overall) < 1e-6:
-                epsilon = max(abs(min_y_overall * 0.01), 1e-6)
-                ax.set_ylim(min_y_overall - epsilon, max_y_overall + epsilon)
-            else:
-                ax.set_ylim(min_y_overall, max_y_overall)
-
-        if y_log_scale and min_y_overall > 1e-9:
+        if np.isfinite(min_y) and np.isfinite(max_y):
+            yrange = max(max_y - min_y, 1e-6)
+            pad = yrange * 0.05
+            ax.set_ylim(min_y - pad, max_y + pad)
+        if y_log_scale and min_y > 1e-9:
             ax.set_yscale("log")
-            current_bottom, current_top = ax.get_ylim()
-            new_bottom = max(current_bottom, 1e-9)
-            if new_bottom >= current_top:
-                new_bottom = current_top / 10
-            ax.set_ylim(bottom=new_bottom, top=current_top)
+            bottom, top = ax.get_ylim()
+            new_bottom = max(bottom, 1e-9)
+            if new_bottom >= top:
+                new_bottom = top / 10
+            ax.set_ylim(bottom=new_bottom, top=top)
         else:
             ax.set_yscale("linear")
-
         if n_points > 1:
             ax.set_xlim(0, n_points - 1)
         elif n_points == 1:
             ax.set_xlim(-0.5, 0.5)
-
         if n_points > 1000:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=4))
 
-            def format_func(value, tick_number):
-                val_int = int(value)
-                if val_int >= 1_000_000:
-                    return f"{val_int/1_000_000:.1f}M"
-                if val_int >= 1_000:
-                    return f"{val_int/1_000:.0f}k"
-                return f"{val_int}"
+            def fmt_func(v, _):
+                val = int(v)
+                return (
+                    f"{val/1e6:.1f}M"
+                    if val >= 1e6
+                    else (f"{val/1e3:.0f}k" if val >= 1e3 else f"{val}")
+                )
 
-            ax.xaxis.set_major_formatter(plt.FuncFormatter(format_func))
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(fmt_func))
         elif n_points > 10:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
-
-        if plotted_legend_items:
-            ax.legend(
-                loc="center left",
-                bbox_to_anchor=(0, 0.5),
-                title=best_val_str,
-                fontsize=plt.rcParams["legend.fontsize"],
-            )
+        if plotted_legend:
+            ax.legend(loc="center left", bbox_to_anchor=(0, 0.5), title=best_val_str)
 
     except Exception as plot_err:
         print(f"ERROR during render_single_plot for '{label}': {plot_err}")
         traceback.print_exc()
-        error_text_color = normalize_color_for_matplotlib(VisConfig.RED)
         ax.text(
             0.5,
             0.5,
@@ -9311,16 +7954,15 @@ def render_single_plot(
             va="center",
             transform=ax.transAxes,
             fontsize=8,
-            color=error_text_color,
+            color=normalize_color_for_matplotlib(VisConfig.RED),
         )
         ax.set_yticks([])
         ax.set_xticks([])
         ax.grid(False)
 
-    bg_color_with_alpha = (*trend_indicator_color, TREND_BACKGROUND_ALPHA)
-    ax.patch.set_facecolor(bg_color_with_alpha)
-    ax.patch.set_edgecolor(trend_indicator_color)
-    ax.patch.set_linewidth(trend_indicator_lw)
+    ax.patch.set_facecolor((*trend_color, TREND_BACKGROUND_ALPHA))
+    ax.patch.set_edgecolor(trend_color)
+    ax.patch.set_linewidth(trend_lw)
 
 
 File: ui\renderer.py
@@ -9361,80 +8003,47 @@ class UIRenderer:
         if hasattr(self.left_panel, "button_status_renderer"):
             self.left_panel.button_status_renderer.input_handler_ref = input_handler
 
-    def check_hover(self, mouse_pos: Tuple[int, int], app_state_str: str):
-        """Placeholder for hover checks if needed later."""
-        pass
-
     def force_redraw(self):
         """Forces components like the plotter to redraw on the next frame."""
         self.plotter.last_plot_update_time = 0
 
-    def render_all(
-        self,
-        app_state: str,
-        is_process_running: bool,
-        status: str,
-        stats_summary: Dict[str, Any],
-        envs: List[GameState],
-        num_envs: int,
-        env_config: EnvConfig,
-        cleanup_confirmation_active: bool,
-        cleanup_message: str,
-        last_cleanup_message_time: float,
-        tensorboard_log_dir: Optional[str],
-        plot_data: Dict[str, Deque],
-        demo_env: Optional[GameState] = None,
-        update_progress_details: Dict[str, Any] = {},
-        agent_param_count: int = 0,
-        worker_counts: Dict[str, int] = {},
-        best_game_state_data: Optional[Dict[str, Any]] = None,  # Added best state data
-    ):
+    def render_all(self, **kwargs):  # Use kwargs for flexibility
         """Renders UI based on the application state."""
         try:
+            app_state_str = kwargs.get("app_state", AppState.UNKNOWN.value)
             current_app_state = (
-                AppState(app_state)
-                if app_state in AppState._value2member_map_
+                AppState(app_state_str)
+                if app_state_str in AppState._value2member_map_
                 else AppState.UNKNOWN
             )
 
             if current_app_state == AppState.MAIN_MENU:
-                self._render_main_menu(
-                    is_process_running=is_process_running,
-                    status=status,
-                    stats_summary=stats_summary,
-                    envs=envs,
-                    num_envs=num_envs,
-                    env_config=env_config,
-                    cleanup_message=cleanup_message,
-                    last_cleanup_message_time=last_cleanup_message_time,
-                    tensorboard_log_dir=tensorboard_log_dir,
-                    plot_data=plot_data,
-                    update_progress_details=update_progress_details,
-                    app_state=app_state,
-                    agent_param_count=agent_param_count,
-                    worker_counts=worker_counts,
-                    best_game_state_data=best_game_state_data,  # Pass best state data
-                )
+                self._render_main_menu(**kwargs)
             elif current_app_state == AppState.PLAYING:
-                if demo_env:
-                    self.demo_renderer.render(demo_env, env_config, is_debug=False)
-                else:
-                    self._render_simple_message("Demo Env Error!", VisConfig.RED)
+                self._render_demo_mode(
+                    kwargs.get("demo_env"), kwargs.get("env_config"), is_debug=False
+                )
             elif current_app_state == AppState.DEBUG:
-                if demo_env:
-                    self.demo_renderer.render(demo_env, env_config, is_debug=True)
-                else:
-                    self._render_simple_message("Debug Env Error!", VisConfig.RED)
+                self._render_demo_mode(
+                    kwargs.get("demo_env"), kwargs.get("env_config"), is_debug=True
+                )
             elif current_app_state == AppState.INITIALIZING:
-                self._render_initializing_screen(status)
+                self._render_initializing_screen(
+                    kwargs.get("status", "Initializing...")
+                )
             elif current_app_state == AppState.ERROR:
-                self._render_error_screen(status)
+                self._render_error_screen(kwargs.get("status", "Unknown Error"))
 
-            if cleanup_confirmation_active and current_app_state != AppState.ERROR:
+            # Render overlays on top
+            if (
+                kwargs.get("cleanup_confirmation_active")
+                and current_app_state != AppState.ERROR
+            ):
                 self.overlays.render_cleanup_confirmation()
-            elif not cleanup_confirmation_active:
+            elif not kwargs.get("cleanup_confirmation_active"):
                 self.overlays.render_status_message(
-                    cleanup_message, last_cleanup_message_time
+                    kwargs.get("cleanup_message", ""),
+                    kwargs.get("last_cleanup_message_time", 0.0),
                 )
 
             pygame.display.flip()
@@ -9450,27 +8059,39 @@ class UIRenderer:
             except Exception:
                 pass
 
-    def _render_main_menu(
-        self,
-        is_process_running: bool,
-        status: str,
-        stats_summary: Dict[str, Any],
-        envs: List[GameState],
-        num_envs: int,
-        env_config: EnvConfig,
-        cleanup_message: str,
-        last_cleanup_message_time: float,
-        tensorboard_log_dir: Optional[str],
-        plot_data: Dict[str, Deque],
-        update_progress_details: Dict[str, Any],
-        app_state: str,
-        agent_param_count: int,
-        worker_counts: Dict[str, int],
-        best_game_state_data: Optional[Dict[str, Any]],  # Added best state data
-    ):
+    def _render_main_menu(self, **kwargs):
         """Renders the main dashboard view."""
         self.screen.fill(VisConfig.BLACK)
         current_width, current_height = self.screen.get_size()
+        lp_width, ga_width = self._calculate_panel_widths(current_width)
+
+        self.left_panel.render(
+            panel_width=lp_width,
+            is_process_running=kwargs.get("is_process_running", False),
+            status=kwargs.get("status", ""),
+            stats_summary=kwargs.get("stats_summary", {}),
+            plot_data=kwargs.get("plot_data", {}),
+            app_state=kwargs.get("app_state", ""),
+            update_progress_details=kwargs.get("update_progress_details", {}),
+            agent_param_count=kwargs.get("agent_param_count", 0),
+            worker_counts=kwargs.get("worker_counts", {}),
+        )
+        if ga_width > 0:
+            self.game_area.render(
+                envs=kwargs.get("envs", []),
+                num_envs=kwargs.get("num_envs", 0),
+                env_config=kwargs.get("env_config"),
+                panel_width=ga_width,
+                panel_x_offset=lp_width,
+                is_running=kwargs.get("is_process_running", False),
+                best_game_state_data=kwargs.get("best_game_state_data"),
+                stats_summary=kwargs.get(
+                    "stats_summary", {}
+                ),  # Pass summary for placeholder
+            )
+
+    def _calculate_panel_widths(self, current_width: int) -> Tuple[int, int]:
+        """Calculates the widths for the left and game area panels."""
         left_panel_ratio = max(0.1, min(0.9, self.vis_config.LEFT_PANEL_RATIO))
         lp_width = int(current_width * left_panel_ratio)
         ga_width = current_width - lp_width
@@ -9481,54 +8102,48 @@ class UIRenderer:
         elif current_width <= min_lp_width:
             lp_width = current_width
             ga_width = 0
+        return lp_width, ga_width
 
-        self.left_panel.render(
-            panel_width=lp_width,
-            is_process_running=is_process_running,
-            status=status,
-            stats_summary=stats_summary,
-            tensorboard_log_dir=tensorboard_log_dir,
-            plot_data=plot_data,
-            app_state=app_state,
-            update_progress_details=update_progress_details,
-            agent_param_count=agent_param_count,
-            worker_counts=worker_counts,
-        )
-        if ga_width > 0:
-            self.game_area.render(
-                envs=envs,  # Pass empty list when running
-                num_envs=num_envs,
-                env_config=env_config,
-                panel_width=ga_width,
-                panel_x_offset=lp_width,
-                is_running=is_process_running,
-                best_game_state_data=best_game_state_data,  # Pass best state data
-            )
+    def _render_demo_mode(
+        self,
+        demo_env: Optional[GameState],
+        env_config: Optional[EnvConfig],
+        is_debug: bool,
+    ):
+        """Renders the demo or debug mode."""
+        if demo_env and env_config:
+            self.demo_renderer.render(demo_env, env_config, is_debug=is_debug)
+        else:
+            mode = "Debug" if is_debug else "Demo"
+            self._render_simple_message(f"{mode} Env Error!", VisConfig.RED)
 
     def _render_initializing_screen(self, status_message: str = "Initializing..."):
         self._render_simple_message(status_message, VisConfig.WHITE)
 
     def _render_error_screen(self, status_message: str):
+        """Renders the error screen."""
         try:
             self.screen.fill((40, 0, 0))
             font_title = pygame.font.SysFont(None, 70)
             font_msg = pygame.font.SysFont(None, 30)
             title_surf = font_title.render("APPLICATION ERROR", True, VisConfig.RED)
-            title_rect = title_surf.get_rect(
-                center=(self.screen.get_width() // 2, self.screen.get_height() // 3)
-            )
             msg_surf = font_msg.render(
                 f"Status: {status_message}", True, VisConfig.YELLOW
-            )
-            msg_rect = msg_surf.get_rect(
-                center=(self.screen.get_width() // 2, title_rect.bottom + 30)
             )
             exit_surf = font_msg.render(
                 "Press ESC or close window to exit.", True, VisConfig.WHITE
             )
+
+            title_rect = title_surf.get_rect(
+                center=(self.screen.get_width() // 2, self.screen.get_height() // 3)
+            )
+            msg_rect = msg_surf.get_rect(
+                center=(self.screen.get_width() // 2, title_rect.bottom + 30)
+            )
             exit_rect = exit_surf.get_rect(
                 center=(self.screen.get_width() // 2, self.screen.get_height() * 0.8)
             )
+
             self.screen.blit(title_surf, title_rect)
             self.screen.blit(msg_surf, msg_rect)
             self.screen.blit(exit_surf, exit_rect)
@@ -9537,6 +8152,7 @@ class UIRenderer:
             self._render_simple_message(f"Error State: {status_message}", VisConfig.RED)
 
     def _render_simple_message(self, message: str, color: Tuple[int, int, int]):
+        """Renders a simple centered message."""
         try:
             self.screen.fill(VisConfig.BLACK)
             font = pygame.font.SysFont(None, 50)
@@ -10717,676 +9333,323 @@ File: ui\panels\game_area.py
 import pygame
 import math
 import traceback
-import numpy as np  # Import numpy
-from typing import List, Tuple, Optional, Dict, Any  # Added Optional, Dict, Any
+import numpy as np
+from typing import List, Tuple, Optional, Dict, Any
 
 from config import (
-    VisConfig,
-    EnvConfig,
-    BLACK,
-    BLUE,
-    RED,
-    GRAY,
-    YELLOW,
-    LIGHTG,
-    WHITE,  # Added WHITE
-    MCTS_MINI_GRID_BG_COLOR,
-    MCTS_MINI_GRID_LINE_COLOR,
-    MCTS_MINI_GRID_OCCUPIED_COLOR,
+    VisConfig, EnvConfig, TrainConfig, BLACK, BLUE, RED, GRAY, YELLOW, LIGHTG, WHITE
 )
 from environment.game_state import GameState
 from environment.shape import Shape
 from environment.triangle import Triangle
 
-
 class GameAreaRenderer:
+    """Renders the right panel: multi-env view (idle) or best state/placeholder (running)."""
+
     def __init__(self, screen: pygame.Surface, vis_config: VisConfig):
         self.screen = screen
         self.vis_config = vis_config
         self.fonts = self._init_fonts()
-        # Cache a placeholder surface for inactive state
-        self.placeholder_surface: pygame.Surface | None = None
-        self.last_placeholder_size: Tuple[int, int] = (0, 0)
-        self.last_placeholder_message: str = ""  # Cache the message too
-        # Cache for best state rendering
         self.best_state_surface: pygame.Surface | None = None
         self.last_best_state_size: Tuple[int, int] = (0, 0)
         self.last_best_state_score: Optional[int] = None
+        self.last_best_state_step: Optional[int] = None
+        self.placeholder_surface: pygame.Surface | None = None
+        self.last_placeholder_size: Tuple[int, int] = (0, 0)
+        self.last_placeholder_message: str = ""
 
     def _init_fonts(self):
+        """Initializes fonts used in the game area."""
         fonts = {}
-        try:
-            fonts["env_score"] = pygame.font.SysFont(None, 18)
-            fonts["env_overlay"] = pygame.font.SysFont(None, 36)
-            fonts["ui"] = pygame.font.SysFont(None, 24)
-            fonts["placeholder"] = pygame.font.SysFont(None, 30)
-            fonts["best_state_title"] = pygame.font.SysFont(
-                None, 32
-            )  # Font for best state title
-            fonts["best_state_score"] = pygame.font.SysFont(
-                None, 28
-            )  # Font for best state score
-        except Exception as e:
-            print(f"Warning: SysFont error: {e}. Using default.")
-            fonts["env_score"] = pygame.font.Font(None, 18)
-            fonts["env_overlay"] = pygame.font.Font(None, 36)
-            fonts["ui"] = pygame.font.Font(None, 24)
-            fonts["placeholder"] = pygame.font.Font(None, 30)
-            fonts["best_state_title"] = pygame.font.Font(None, 32)
-            fonts["best_state_score"] = pygame.font.Font(None, 28)
+        font_configs = {
+            "env_score": 18, "env_overlay": 36, "ui": 24, "placeholder": 30,
+            "placeholder_detail": 22, "best_state_title": 32, "best_state_score": 28,
+            "best_state_step": 20,
+        }
+        for key, size in font_configs.items():
+            try: fonts[key] = pygame.font.SysFont(None, size)
+            except Exception:
+                try: fonts[key] = pygame.font.Font(None, size)
+                except Exception as e: print(f"ERROR: Font '{key}' failed: {e}"); fonts[key] = None
+        # Ensure essential fonts have fallbacks
+        if fonts.get("ui") is None: fonts["ui"] = pygame.font.Font(None, 24)
+        if fonts.get("placeholder") is None: fonts["placeholder"] = pygame.font.Font(None, 30)
         return fonts
 
-    def render(
-        self,
-        envs: List[GameState],
-        num_envs: int,
-        env_config: EnvConfig,
-        panel_width: int,
-        panel_x_offset: int,
-        is_running: bool = False,
-        best_game_state_data: Optional[Dict[str, Any]] = None,  # Added best state data
-    ):
+    def render(self, panel_width: int, panel_x_offset: int, **kwargs): # Use kwargs
+        """Renders the game area panel based on running state."""
         current_height = self.screen.get_height()
         ga_rect = pygame.Rect(panel_x_offset, 0, panel_width, current_height)
+        if ga_rect.width <= 0 or ga_rect.height <= 0: return
 
-        if ga_rect.width <= 0 or ga_rect.height <= 0:
-            return
-
-        # If workers are running, display best state or specific placeholder
+        is_running = kwargs.get("is_running", False)
         if is_running:
-            if best_game_state_data:
-                # If we have data for the best state, render it
-                self._render_best_game_state(ga_rect, best_game_state_data, env_config)
-            else:
-                # If no best state data yet, show "Running..." placeholder
-                self._render_running_placeholder(
-                    ga_rect, "Running Self-Play / Training..."
-                )
-            return  # Don't render individual envs when running
-
-        # --- Original rendering logic if workers are NOT running ---
-        # (This part remains unchanged)
-        if num_envs <= 0:
-            pygame.draw.rect(self.screen, (10, 10, 10), ga_rect)
-            pygame.draw.rect(self.screen, (50, 50, 50), ga_rect, 1)
-            return
-
-        render_limit = self.vis_config.NUM_ENVS_TO_RENDER
-        num_to_render = min(num_envs, render_limit) if render_limit > 0 else num_envs
-
-        if num_to_render <= 0:
-            pygame.draw.rect(self.screen, (10, 10, 10), ga_rect)
-            pygame.draw.rect(self.screen, (50, 50, 50), ga_rect, 1)
-            return
-
-        cols_env, rows_env, cell_w, cell_h = self._calculate_grid_layout(
-            ga_rect, num_to_render
-        )
-
-        min_cell_dim = 30
-        if cell_w > min_cell_dim and cell_h > min_cell_dim:
-            self._render_env_grid(
-                envs,
-                num_to_render,
-                env_config,
-                ga_rect,
-                cols_env,
-                rows_env,
-                cell_w,
-                cell_h,
-            )
+            self._render_running_state(ga_rect, kwargs.get("best_game_state_data"),
+                                       kwargs.get("stats_summary"), kwargs.get("env_config"))
         else:
-            self._render_too_small_message(ga_rect, cell_w, cell_h)
+            self._render_idle_state(ga_rect, kwargs.get("envs", []), kwargs.get("num_envs", 0),
+                                    kwargs.get("env_config"))
 
-        if num_to_render < num_envs and len(envs) > 0:
-            self._render_render_limit_text(ga_rect, num_to_render, num_envs)
+    def _render_running_state(self, ga_rect: pygame.Rect, best_state_data: Optional[Dict[str, Any]],
+                              stats_summary: Optional[Dict[str, Any]], env_config: Optional[EnvConfig]):
+        """Renders the panel when the process is running."""
+        if best_state_data and env_config:
+            self._render_best_game_state(ga_rect, best_state_data, env_config)
+        else:
+            message = "Running AlphaZero..."
+            details = []
+            if stats_summary:
+                game_num = stats_summary.get("current_self_play_game_number", 0)
+                train_steps = stats_summary.get("training_steps_performed", 0)
+                buffer_size = stats_summary.get("buffer_size", 0)
+                min_buffer = TrainConfig().MIN_BUFFER_SIZE_TO_TRAIN
+                details.append(f"Playing Game: {game_num}" if game_num > 0 else "Waiting for first game...")
+                details.append(f"Training Steps: {train_steps:,}".replace(",", "_"))
+                details.append(f"Buffer: {buffer_size:,}/{min_buffer:,}".replace(",", "_"))
+            else: details.append("Waiting for stats...")
+            self._render_running_placeholder(ga_rect, message, details)
 
-    def _render_running_placeholder(self, ga_rect: pygame.Rect, message: str):
-        """Renders a placeholder message, caching the surface."""
+    def _render_idle_state(self, ga_rect: pygame.Rect, envs: List[GameState], num_envs: int,
+                           env_config: Optional[EnvConfig]):
+        """Renders the panel when the process is idle."""
+        render_limit = self.vis_config.NUM_ENVS_TO_RENDER
+        if render_limit <= 0 or not env_config:
+            self._render_placeholder(ga_rect, "Idle - Multi-Env View Disabled")
+            return
+
+        effective_num_envs = len(envs) if envs else num_envs
+        if effective_num_envs <= 0: self._render_placeholder(ga_rect, "No Environments"); return
+        num_to_render = min(effective_num_envs, render_limit)
+        if num_to_render <= 0: self._render_placeholder(ga_rect, "No Environments to Render"); return
+
+        cols_env, rows_env, cell_w, cell_h = self._calculate_grid_layout(ga_rect, num_to_render)
+        if cell_w > 30 and cell_h > 30:
+            self._render_env_grid(envs, num_to_render, env_config, ga_rect, cols_env, rows_env, cell_w, cell_h)
+        else: self._render_too_small_message(ga_rect, cell_w, cell_h)
+        if num_to_render < effective_num_envs: self._render_render_limit_text(ga_rect, num_to_render, effective_num_envs)
+
+    def _render_placeholder(self, ga_rect: pygame.Rect, message: str):
+        """Renders a simple placeholder message."""
+        pygame.draw.rect(self.screen, (20, 20, 25), ga_rect)
+        pygame.draw.rect(self.screen, (60, 60, 70), ga_rect, 1)
+        font = self.fonts.get("placeholder")
+        if font:
+            text_surf = font.render(message, True, LIGHTG)
+            self.screen.blit(text_surf, text_surf.get_rect(center=ga_rect.center))
+
+    def _render_running_placeholder(self, ga_rect: pygame.Rect, message: str, details: List[str]):
+        """Renders a placeholder with more details, caching the surface."""
         current_size = ga_rect.size
-        # Re-render placeholder only if size or message changes
-        if (
-            self.placeholder_surface is None
-            or self.last_placeholder_size != current_size
-            or self.last_placeholder_message != message
-        ):
+        full_message_key = f"{message}::{'|'.join(details)}"
+        if (self.placeholder_surface is None or self.last_placeholder_size != current_size or
+                self.last_placeholder_message != full_message_key):
             self.placeholder_surface = pygame.Surface(current_size)
             self.placeholder_surface.fill((20, 20, 25))
-            pygame.draw.rect(
-                self.placeholder_surface,
-                (60, 60, 70),
-                self.placeholder_surface.get_rect(),
-                1,
-            )
-            placeholder_font = self.fonts.get("placeholder")
-            if placeholder_font:
-                text_surf = placeholder_font.render(message, True, LIGHTG)
-                text_rect = text_surf.get_rect(
-                    center=self.placeholder_surface.get_rect().center
-                )
-                self.placeholder_surface.blit(text_surf, text_rect)
-            self.last_placeholder_size = current_size
-            self.last_placeholder_message = message  # Cache the message
+            pygame.draw.rect(self.placeholder_surface, (60, 60, 70), self.placeholder_surface.get_rect(), 1)
+            font_p = self.fonts.get("placeholder"); font_d = self.fonts.get("placeholder_detail")
+            center_x = self.placeholder_surface.get_rect().centerx
+            h_needed = (font_p.get_linesize() + 5 if font_p else 0) + (len(details) * font_d.get_linesize() if font_d else 0)
+            current_y = self.placeholder_surface.get_rect().centery - h_needed // 2
+            if font_p:
+                surf = font_p.render(message, True, LIGHTG); rect = surf.get_rect(centerx=center_x, top=current_y)
+                self.placeholder_surface.blit(surf, rect); current_y = rect.bottom + 5
+            if font_d:
+                for line in details:
+                    surf = font_d.render(line, True, WHITE); rect = surf.get_rect(centerx=center_x, top=current_y)
+                    self.placeholder_surface.blit(surf, rect); current_y += font_d.get_linesize()
+            self.last_placeholder_size = current_size; self.last_placeholder_message = full_message_key
+        if self.placeholder_surface: self.screen.blit(self.placeholder_surface, ga_rect.topleft)
 
-        if self.placeholder_surface:
-            self.screen.blit(self.placeholder_surface, ga_rect.topleft)
+    def _render_best_game_state(self, ga_rect: pygame.Rect, state_data: Dict[str, Any], env_config: EnvConfig):
+        """Renders the best game state grid, caching the surface."""
+        current_size = ga_rect.size; score = state_data.get("score"); step = state_data.get("step")
+        if (self.best_state_surface is None or self.last_best_state_size != current_size or
+                self.last_best_state_score != score or self.last_best_state_step != step):
+            self.best_state_surface = pygame.Surface(current_size); self.best_state_surface.fill((25, 25, 30))
+            title_h = 60; grid_rect = pygame.Rect(0, title_h, current_size[0], current_size[1] - title_h)
+            try: self._render_grid_from_data(self.best_state_surface.subsurface(grid_rect), state_data, env_config)
+            except ValueError as e: print(f"Subsurface error (best state): {e}"); pygame.draw.rect(self.best_state_surface, RED, grid_rect, 1)
+            font_t = self.fonts.get("best_state_title"); font_s = self.fonts.get("best_state_score"); font_st = self.fonts.get("best_state_step")
+            if font_t and font_s and font_st:
+                surf_t = font_t.render("Best Game State Found", True, YELLOW); rect_t = surf_t.get_rect(centerx=current_size[0]//2, top=5)
+                surf_s = font_s.render(f"Score: {score}", True, WHITE); rect_s = surf_s.get_rect(centerx=current_size[0]//2, top=rect_t.bottom+2)
+                surf_st = font_st.render(f"Step: {step:,}".replace(",","_"), True, LIGHTG); rect_st = surf_st.get_rect(centerx=current_size[0]//2, top=rect_s.bottom+1)
+                self.best_state_surface.blit(surf_t, rect_t); self.best_state_surface.blit(surf_s, rect_s); self.best_state_surface.blit(surf_st, rect_st)
+            pygame.draw.rect(self.best_state_surface, YELLOW, self.best_state_surface.get_rect(), 1)
+            self.last_best_state_size = current_size; self.last_best_state_score = score; self.last_best_state_step = step
+        if self.best_state_surface: self.screen.blit(self.best_state_surface, ga_rect.topleft)
+        else: self._render_placeholder(ga_rect, "Error rendering best state")
 
-    def _render_best_game_state(
-        self, ga_rect: pygame.Rect, state_data: Dict[str, Any], env_config: EnvConfig
-    ):
-        """Renders the best game state grid in the game area."""
-        current_size = ga_rect.size
-        current_score = state_data.get("score")
-
-        # Check if cache needs update (size change or score change)
-        if (
-            self.best_state_surface is None
-            or self.last_best_state_size != current_size
-            or self.last_best_state_score != current_score
-        ):
-
-            self.best_state_surface = pygame.Surface(current_size)
-            self.best_state_surface.fill((25, 25, 30))  # Slightly different background
-
-            # Render the grid using the stored data
-            grid_rect = pygame.Rect(
-                0, 50, current_size[0], current_size[1] - 60
-            )  # Leave space for title
-            try:
-                grid_subsurface = self.best_state_surface.subsurface(grid_rect)
-                self._render_grid_from_data(grid_subsurface, state_data, env_config)
-            except ValueError as e:
-                print(f"Error creating subsurface for best state grid: {e}")
-                pygame.draw.rect(self.best_state_surface, RED, grid_rect, 1)
-
-            # Render Title and Score
-            title_font = self.fonts.get("best_state_title")
-            score_font = self.fonts.get("best_state_score")
-            if title_font and score_font:
-                title_surf = title_font.render("Best Game State", True, YELLOW)
-                score_surf = score_font.render(f"Score: {current_score}", True, WHITE)
-
-                title_rect = title_surf.get_rect(centerx=current_size[0] // 2, top=5)
-                score_rect = score_surf.get_rect(
-                    centerx=current_size[0] // 2, top=title_rect.bottom + 2
-                )
-
-                self.best_state_surface.blit(title_surf, title_rect)
-                self.best_state_surface.blit(score_surf, score_rect)
-
-            pygame.draw.rect(
-                self.best_state_surface, YELLOW, self.best_state_surface.get_rect(), 1
-            )  # Border
-
-            self.last_best_state_size = current_size
-            self.last_best_state_score = current_score
-
-        if self.best_state_surface:
-            self.screen.blit(self.best_state_surface, ga_rect.topleft)
-        else:  # Fallback if surface creation failed
-            self._render_running_placeholder(ga_rect, "Error rendering best state")
-
-    def _render_grid_from_data(
-        self, surf: pygame.Surface, state_data: Dict[str, Any], env_config: EnvConfig
-    ):
+    def _render_grid_from_data(self, surf: pygame.Surface, state_data: Dict[str, Any], env_config: EnvConfig):
         """Renders a grid based on stored occupancy/color data."""
         try:
-            occupancy = state_data.get("occupancy")
-            colors = state_data.get("colors")
-            death = state_data.get("death")
-            is_up = state_data.get("is_up")
-            rows = state_data.get("rows", env_config.ROWS)
-            cols = state_data.get("cols", env_config.COLS)
-
-            if occupancy is None or colors is None or death is None or is_up is None:
-                print("Error: Missing data for rendering best grid state.")
-                pygame.draw.rect(surf, RED, surf.get_rect(), 2)
-                return
-
-            padding = (
-                self.vis_config.ENV_GRID_PADDING * 2
-            )  # More padding for the large view
-            drawable_w, drawable_h = max(1, surf.get_width() - 2 * padding), max(
-                1, surf.get_height() - 2 * padding
-            )
-            grid_rows, grid_cols_eff_width = rows, cols * 0.75 + 0.25
-
-            if grid_rows <= 0 or grid_cols_eff_width <= 0:
-                return
-            scale_w, scale_h = drawable_w / grid_cols_eff_width, drawable_h / grid_rows
-            final_scale = min(scale_w, scale_h)
-            if final_scale <= 0:
-                return
-
-            final_grid_pixel_w, final_grid_pixel_h = (
-                grid_cols_eff_width * final_scale,
-                grid_rows * final_scale,
-            )
-            tri_cell_w, tri_cell_h = max(1, final_scale), max(1, final_scale)
-            grid_ox, grid_oy = (
-                padding + (drawable_w - final_grid_pixel_w) / 2,
-                padding + (drawable_h - final_grid_pixel_h) / 2,
-            )
-
+            occ = state_data.get("occupancy"); colors = state_data.get("colors"); death = state_data.get("death")
+            is_up = state_data.get("is_up"); rows = state_data.get("rows", env_config.ROWS); cols = state_data.get("cols", env_config.COLS)
+            if occ is None or colors is None or death is None or is_up is None: raise ValueError("Missing data for grid render")
+            occ, death, is_up = np.asarray(occ, bool), np.asarray(death, bool), np.asarray(is_up, bool)
+            pad = self.vis_config.ENV_GRID_PADDING * 2; dw, dh = max(1, surf.get_width()-2*pad), max(1, surf.get_height()-2*pad)
+            gr, gcw = rows, cols * 0.75 + 0.25; scale = min(dw/gcw, dh/gr) if gr > 0 and gcw > 0 else 0
+            if scale <= 0: return
+            fpw, fph = gcw * scale, gr * scale; tcw, tch = max(1, scale), max(1, scale)
+            ox, oy = pad + (dw - fpw) / 2, pad + (dh - fph) / 2
             for r in range(rows):
                 for c in range(cols):
-                    if death[r, c]:
-                        continue  # Skip death cells
-
-                    temp_tri = Triangle(r, c, is_up=is_up[r, c])
+                    if death[r, c]: continue
+                    tri = Triangle(r, c, is_up=is_up[r, c])
                     try:
-                        pts = temp_tri.get_points(
-                            ox=grid_ox,
-                            oy=grid_oy,
-                            cw=int(tri_cell_w),
-                            ch=int(tri_cell_h),
-                        )
-                        color = VisConfig.LIGHTG  # Default empty color
-                        if occupancy[r, c]:
-                            cell_color = colors[r, c]
-                            # Handle potential None or non-tuple colors safely
-                            if isinstance(cell_color, tuple) and len(cell_color) == 3:
-                                color = cell_color
-                            else:
-                                color = (
-                                    VisConfig.RED
-                                )  # Fallback color if stored color is invalid
-                        pygame.draw.polygon(surf, color, pts)
-                        pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)  # Grid lines
-                    except Exception as e:
-                        # print(f"Minor error drawing triangle {r},{c}: {e}")
-                        pass  # Ignore minor drawing errors for single triangles
+                        pts = tri.get_points(ox=ox, oy=oy, cw=int(tcw), ch=int(tch))
+                        color = VisConfig.LIGHTG
+                        if occ[r, c]: cell_color = colors[r][c]; color = tuple(cell_color) if isinstance(cell_color, (list, tuple)) and len(cell_color)==3 else VisConfig.RED
+                        pygame.draw.polygon(surf, color, pts); pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
+                    except Exception: pass
+        except Exception as e: print(f"Error rendering grid from data: {e}"); pygame.draw.rect(surf, RED, surf.get_rect(), 2)
 
-        except Exception as e:
-            print(f"Error rendering grid from data: {e}")
-            traceback.print_exc()
-            pygame.draw.rect(surf, RED, surf.get_rect(), 2)
+    def _calculate_grid_layout(self, ga_rect: pygame.Rect, num_to_render: int) -> Tuple[int, int, int, int]:
+        """Calculates layout for multiple small environment grids."""
+        if ga_rect.width <= 0 or ga_rect.height <= 0: return 0, 0, 0, 0
+        aspect = ga_rect.width / max(1, ga_rect.height); cols = max(1, int(math.sqrt(num_to_render * aspect)))
+        rows = max(1, math.ceil(num_to_render / cols)); sp = self.vis_config.ENV_SPACING
+        cw = max(1, (ga_rect.width - (cols + 1) * sp) // cols); ch = max(1, (ga_rect.height - (rows + 1) * sp) // rows)
+        return cols, rows, cw, ch
 
-    def _calculate_grid_layout(
-        self, ga_rect: pygame.Rect, num_to_render: int
-    ) -> Tuple[int, int, int, int]:
-        if ga_rect.width <= 0 or ga_rect.height <= 0:
-            return 0, 0, 0, 0
-        aspect_ratio = ga_rect.width / max(1, ga_rect.height)
-        cols_env = max(1, int(math.sqrt(num_to_render * aspect_ratio)))
-        rows_env = max(1, math.ceil(num_to_render / cols_env))
-        total_spacing_w = (cols_env + 1) * self.vis_config.ENV_SPACING
-        total_spacing_h = (rows_env + 1) * self.vis_config.ENV_SPACING
-        cell_w = max(1, (ga_rect.width - total_spacing_w) // cols_env)
-        cell_h = max(1, (ga_rect.height - total_spacing_h) // rows_env)
-        return cols_env, rows_env, cell_w, cell_h
-
-    def _render_env_grid(
-        self, envs, num_to_render, env_config, ga_rect, cols, rows, cell_w, cell_h
-    ):
-        env_idx = 0
+    def _render_env_grid(self, envs, num_to_render, env_config, ga_rect, cols, rows, cell_w, cell_h):
+        """Renders the grid of small environment previews."""
+        env_idx = 0; sp = self.vis_config.ENV_SPACING
         for r in range(rows):
             for c in range(cols):
-                if env_idx >= num_to_render:
-                    break
-                env_x = ga_rect.x + self.vis_config.ENV_SPACING * (c + 1) + c * cell_w
-                env_y = ga_rect.y + self.vis_config.ENV_SPACING * (r + 1) + r * cell_h
-                env_rect = pygame.Rect(env_x, env_y, cell_w, cell_h)
-                clipped_env_rect = env_rect.clip(self.screen.get_rect())
-
-                if clipped_env_rect.width <= 0 or clipped_env_rect.height <= 0:
-                    env_idx += 1
-                    continue
-
-                if env_idx < len(envs):
-                    try:
-                        sub_surf = self.screen.subsurface(clipped_env_rect)
-                        self._render_single_env(sub_surf, envs[env_idx], env_config)
-                    except ValueError as subsurface_error:
-                        print(
-                            f"Warning: Subsurface error env {env_idx} ({clipped_env_rect}): {subsurface_error}"
-                        )
-                        pygame.draw.rect(self.screen, (0, 0, 50), clipped_env_rect, 1)
-                    except Exception as e_render_env:
-                        print(f"Error rendering env {env_idx}: {e_render_env}")
-                        traceback.print_exc()
-                        pygame.draw.rect(self.screen, (50, 0, 50), clipped_env_rect, 1)
-                else:
-                    pygame.draw.rect(self.screen, (20, 20, 20), clipped_env_rect)
-                    pygame.draw.rect(self.screen, (60, 60, 60), clipped_env_rect, 1)
+                if env_idx >= num_to_render: break
+                env_x = ga_rect.x + sp * (c + 1) + c * cell_w; env_y = ga_rect.y + sp * (r + 1) + r * cell_h
+                env_rect = pygame.Rect(env_x, env_y, cell_w, cell_h); clip_rect = env_rect.clip(self.screen.get_rect())
+                if clip_rect.width <= 0 or clip_rect.height <= 0: env_idx += 1; continue
+                if env_idx < len(envs) and envs[env_idx] is not None:
+                    try: self._render_single_env(self.screen.subsurface(clip_rect), envs[env_idx], env_config)
+                    except Exception as e: print(f"Error rendering env {env_idx}: {e}"); pygame.draw.rect(self.screen, (50,0,50), clip_rect, 1)
+                else: pygame.draw.rect(self.screen, (20,20,20), clip_rect); pygame.draw.rect(self.screen, (60,60,60), clip_rect, 1)
                 env_idx += 1
-            if env_idx >= num_to_render:
-                break
+            if env_idx >= num_to_render: break
 
-    def _render_single_env(
-        self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
-    ):
-        cell_w, cell_h = surf.get_width(), surf.get_height()
-        if cell_w <= 0 or cell_h <= 0:
-            return
-
-        bg_color = VisConfig.GRAY
-        if env.is_line_clearing():
-            bg_color = VisConfig.LINE_CLEAR_FLASH_COLOR
-        elif env.is_game_over_flashing():
-            bg_color = VisConfig.GAME_OVER_FLASH_COLOR
-        elif env.is_blinking():
-            bg_color = VisConfig.YELLOW
-        elif env.is_over():
-            bg_color = VisConfig.DARK_RED
-        elif env.is_frozen():
-            bg_color = (30, 30, 100)
-        surf.fill(bg_color)
-
-        shape_area_height_ratio = 0.20
-        grid_area_height = math.floor(cell_h * (1.0 - shape_area_height_ratio))
-        shape_area_height = cell_h - grid_area_height
-        shape_area_y = grid_area_height
-
+    def _render_single_env(self, surf: pygame.Surface, env: GameState, env_config: EnvConfig):
+        """Renders a single small environment preview."""
+        cw, ch = surf.get_width(), surf.get_height(); bg = VisConfig.GRAY
+        if env.is_line_clearing(): bg = VisConfig.LINE_CLEAR_FLASH_COLOR
+        elif env.is_game_over_flashing(): bg = VisConfig.GAME_OVER_FLASH_COLOR
+        elif env.is_blinking(): bg = VisConfig.YELLOW
+        elif env.is_over(): bg = VisConfig.DARK_RED
+        elif env.is_frozen(): bg = (30, 30, 100)
+        surf.fill(bg)
+        shape_h_ratio = 0.20; grid_h = math.floor(ch * (1.0 - shape_h_ratio)); shape_h = ch - grid_h; shape_y = grid_h
         grid_surf, shape_surf = None, None
-        if grid_area_height > 0 and cell_w > 0:
-            try:
-                grid_surf = surf.subsurface(pygame.Rect(0, 0, cell_w, grid_area_height))
-            except ValueError:
-                pygame.draw.rect(
-                    surf, VisConfig.RED, pygame.Rect(0, 0, cell_w, grid_area_height), 1
-                )
-        if shape_area_height > 0 and cell_w > 0:
-            try:
-                shape_rect = pygame.Rect(0, shape_area_y, cell_w, shape_area_height)
-                shape_surf = surf.subsurface(shape_rect)
-                shape_surf.fill((35, 35, 35))
-            except ValueError:
-                pygame.draw.rect(
-                    surf,
-                    VisConfig.RED,
-                    pygame.Rect(0, shape_area_y, cell_w, shape_area_height),
-                    1,
-                )
+        if grid_h > 0 and cw > 0: 
+            try: 
+                grid_surf = surf.subsurface(pygame.Rect(0, 0, cw, grid_h)) 
+            except ValueError: 
+                pass
+        if shape_h > 0 and cw > 0: 
+            try: shape_surf = surf.subsurface(pygame.Rect(0, shape_y, cw, shape_h)); shape_surf.fill((35,35,35)) 
+            except ValueError: pass
+        if grid_surf: self._render_single_env_grid(grid_surf, env, env_config)
+        if shape_surf: self._render_shape_previews(shape_surf, env)
+        try: score_surf = self.fonts["env_score"].render(f"GS: {env.game_score}", True, WHITE, (0,0,0,180)); surf.blit(score_surf, (2,2))
+        except Exception: pass
+        if env.is_over(): self._render_overlay_text(surf, "GAME OVER", RED)
+        elif env.is_line_clearing() and env.last_line_clear_info: lines, tris, _ = env.last_line_clear_info; self._render_overlay_text(surf, f"{lines} {'Line' if lines==1 else 'Lines'} Cleared! ({tris} Tris)", BLUE)
 
-        if grid_surf:
-            self._render_single_env_grid(grid_surf, env, env_config)
-        if shape_surf:
-            self._render_shape_previews(shape_surf, env)
-
+    def _render_overlay_text(self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]):
+        """Renders overlay text like 'GAME OVER'."""
         try:
-            score_text = f"GS: {env.game_score}"
-            score_surf = self.fonts["env_score"].render(
-                score_text, True, VisConfig.WHITE, (0, 0, 0, 180)
-            )
-            surf.blit(score_surf, (2, 2))
-        except Exception as e:
-            print(f"Error rendering score: {e}")
+            font = self.fonts["env_overlay"]; max_w = surf.get_width()*0.9; size = 36
+            surf_txt = font.render(text, True, WHITE)
+            while surf_txt.get_width() > max_w and size > 10: size -= 2; font = pygame.font.SysFont(None, size); surf_txt = font.render(text, True, WHITE)
+            bg_rgba = (color[0]//2, color[1]//2, color[2]//2, 220)
+            surf_bg = font.render(text, True, WHITE, bg_rgba); rect = surf_bg.get_rect(center=surf.get_rect().center)
+            surf.blit(surf_bg, rect)
+        except Exception as e: print(f"Error rendering overlay '{text}': {e}")
 
-        if env.is_over():
-            self._render_overlay_text(surf, "GAME OVER", VisConfig.RED)
-        elif env.is_line_clearing() and env.last_line_clear_info:
-            lines, tris, score = env.last_line_clear_info
-            line_str = "Line" if lines == 1 else "Lines"
-            clear_msg = f"{lines} {line_str} Cleared! ({tris} Tris)"
-            self._render_overlay_text(surf, clear_msg, BLUE)
-
-    def _render_overlay_text(
-        self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
-    ):
-        try:
-            overlay_font = self.fonts["env_overlay"]
-            max_width = surf.get_width() * 0.9
-            font_size = 36
-            text_surf = overlay_font.render(text, True, VisConfig.WHITE)
-            while text_surf.get_width() > max_width and font_size > 10:
-                font_size -= 2
-                overlay_font = pygame.font.SysFont(None, font_size)
-                text_surf = overlay_font.render(text, True, VisConfig.WHITE)
-            bg_color_rgba = (color[0] // 2, color[1] // 2, color[2] // 2, 220)
-            text_surf_with_bg = overlay_font.render(
-                text, True, VisConfig.WHITE, bg_color_rgba
-            )
-            text_rect = text_surf_with_bg.get_rect(center=surf.get_rect().center)
-            surf.blit(text_surf_with_bg, text_rect)
-        except Exception as e:
-            print(f"Error rendering overlay text '{text}': {e}")
-
-    def _render_single_env_grid(
-        self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
-    ):
+    def _render_single_env_grid(self, surf: pygame.Surface, env: GameState, env_config: EnvConfig):
         """Renders the hexagonal grid for a single environment."""
         try:
-            padding = self.vis_config.ENV_GRID_PADDING
-            drawable_w, drawable_h = max(1, surf.get_width() - 2 * padding), max(
-                1, surf.get_height() - 2 * padding
-            )
-            grid_rows, grid_cols_eff_width = (
-                env_config.ROWS,
-                env_config.COLS * 0.75 + 0.25,
-            )
-            if grid_rows <= 0 or grid_cols_eff_width <= 0:
-                return
-            scale_w, scale_h = drawable_w / grid_cols_eff_width, drawable_h / grid_rows
-            final_scale = min(scale_w, scale_h)
-            if final_scale <= 0:
-                return
-            final_grid_pixel_w, final_grid_pixel_h = (
-                grid_cols_eff_width * final_scale,
-                grid_rows * final_scale,
-            )
-            tri_cell_w, tri_cell_h = max(1, final_scale), max(1, final_scale)
-            grid_ox, grid_oy = (
-                padding + (drawable_w - final_grid_pixel_w) / 2,
-                padding + (drawable_h - final_grid_pixel_h) / 2,
-            )
-            is_highlighting = env.is_highlighting_cleared()
-            cleared_coords = (
-                set(env.get_cleared_triangle_coords()) if is_highlighting else set()
-            )
-            highlight_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
-
+            pad = self.vis_config.ENV_GRID_PADDING; dw, dh = max(1, surf.get_width()-2*pad), max(1, surf.get_height()-2*pad)
+            gr, gcw = env_config.ROWS, env_config.COLS * 0.75 + 0.25; scale = min(dw/gcw, dh/gr) if gr > 0 and gcw > 0 else 0
+            if scale <= 0: return
+            fpw, fph = gcw * scale, gr * scale; tcw, tch = max(1, scale), max(1, scale)
+            ox, oy = pad + (dw - fpw) / 2, pad + (dh - fph) / 2
+            is_hl = env.is_highlighting_cleared(); cleared = set(env.get_cleared_triangle_coords()) if is_hl else set()
+            hl_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
             if hasattr(env, "grid") and hasattr(env.grid, "triangles"):
                 for r in range(env.grid.rows):
                     for c in range(env.grid.cols):
-                        if not (
-                            0 <= r < len(env.grid.triangles)
-                            and 0 <= c < len(env.grid.triangles[r])
-                        ):
-                            continue
+                        if not (0 <= r < len(env.grid.triangles) and 0 <= c < len(env.grid.triangles[r])): continue
                         t = env.grid.triangles[r][c]
                         if not t.is_death and hasattr(t, "get_points"):
                             try:
-                                pts = t.get_points(
-                                    ox=grid_ox,
-                                    oy=grid_oy,
-                                    cw=int(tri_cell_w),
-                                    ch=int(tri_cell_h),
-                                )
+                                pts = t.get_points(ox=ox, oy=oy, cw=int(tcw), ch=int(tch))
                                 color = VisConfig.LIGHTG
-                                if is_highlighting and (r, c) in cleared_coords:
-                                    color = highlight_color
-                                elif t.is_occupied:
-                                    color = t.color if t.color else VisConfig.RED
-                                pygame.draw.polygon(surf, color, pts)
-                                pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
-                            except Exception:
-                                pass
-            else:
-                pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
-                err_txt = self.fonts["ui"].render(
-                    "Invalid Grid Data", True, VisConfig.RED
-                )
-                surf.blit(err_txt, err_txt.get_rect(center=surf.get_rect().center))
-        except Exception as e:
-            pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
-
-    def render_mini_grid(
-        self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
-    ):
-        """Renders a simplified grid onto a smaller surface (for MCTS nodes)."""
-        try:
-            padding = 1
-            drawable_w, drawable_h = max(1, surf.get_width() - 2 * padding), max(
-                1, surf.get_height() - 2 * padding
-            )
-            grid_rows, grid_cols_eff_width = (
-                env_config.ROWS,
-                env_config.COLS * 0.75 + 0.25,
-            )
-            if grid_rows <= 0 or grid_cols_eff_width <= 0:
-                return
-            scale_w, scale_h = drawable_w / grid_cols_eff_width, drawable_h / grid_rows
-            final_scale = min(scale_w, scale_h)
-            if final_scale <= 0:
-                return
-            final_grid_pixel_w, final_grid_pixel_h = (
-                grid_cols_eff_width * final_scale,
-                grid_rows * final_scale,
-            )
-            tri_cell_w, tri_cell_h = max(1, final_scale), max(1, final_scale)
-            grid_ox, grid_oy = (
-                padding + (drawable_w - final_grid_pixel_w) / 2,
-                padding + (drawable_h - final_grid_pixel_h) / 2,
-            )
-
-            surf.fill(MCTS_MINI_GRID_BG_COLOR)
-
-            grid = env.grid
-            for r in range(grid.rows):
-                for c in range(grid.cols):
-                    if not (
-                        0 <= r < len(grid.triangles) and 0 <= c < len(grid.triangles[r])
-                    ):
-                        continue
-                    t = grid.triangles[r][c]
-                    if not t.is_death and hasattr(t, "get_points"):
-                        try:
-                            pts = t.get_points(
-                                ox=grid_ox,
-                                oy=grid_oy,
-                                cw=int(tri_cell_w),
-                                ch=int(tri_cell_h),
-                            )
-                            color = MCTS_MINI_GRID_BG_COLOR
-                            if t.is_occupied:
-                                color = MCTS_MINI_GRID_OCCUPIED_COLOR
-                            pygame.draw.polygon(surf, color, pts)
-                            pygame.draw.polygon(surf, MCTS_MINI_GRID_LINE_COLOR, pts, 1)
-                        except Exception:
-                            pass
-        except Exception as e:
-            print(f"Error rendering mini-grid: {e}")
-            pygame.draw.line(surf, RED, (0, 0), surf.get_size(), 1)
+                                if is_hl and (r, c) in cleared: color = hl_color
+                                elif t.is_occupied: color = t.color if t.color else VisConfig.RED
+                                pygame.draw.polygon(surf, color, pts); pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
+                            except Exception: pass
+            else: pygame.draw.rect(surf, RED, surf.get_rect(), 2)
+        except Exception: pygame.draw.rect(surf, RED, surf.get_rect(), 2)
 
     def _render_shape_previews(self, surf: pygame.Surface, env: GameState):
-        available_shapes = env.get_shapes()
-        if not available_shapes:
-            return
-        surf_w, surf_h = surf.get_width(), surf.get_height()
-        if surf_w <= 0 or surf_h <= 0:
-            return
-        num_shapes = len(available_shapes)
-        padding = 4
-        total_padding = (num_shapes + 1) * padding
-        available_width = surf_w - total_padding
-        if available_width <= 0:
-            return
-        width_per_shape = available_width / num_shapes
-        height_limit = surf_h - 2 * padding
-        preview_dim = max(5, min(width_per_shape, height_limit))
-        start_x = (
-            padding
-            + (surf_w - (num_shapes * preview_dim + (num_shapes - 1) * padding)) / 2
-        )
-        start_y = padding + (surf_h - preview_dim) / 2
-        current_x = start_x
-
-        for shape in available_shapes:
-            preview_rect = pygame.Rect(current_x, start_y, preview_dim, preview_dim)
-            if preview_rect.right > surf_w - padding:
-                break
-            if shape is None:
-                pygame.draw.rect(surf, (50, 50, 50), preview_rect, 1, border_radius=2)
-                current_x += preview_dim + padding
-                continue
+        """Renders the small shape previews below the grid."""
+        shapes = env.get_shapes(); sw, sh = surf.get_width(), surf.get_height()
+        if not shapes or sw <= 0 or sh <= 0: return
+        num = len(shapes); pad = 4; total_pad = (num + 1) * pad; avail_w = sw - total_pad
+        if avail_w <= 0: return
+        w_per = avail_w / num; h_lim = sh - 2 * pad; dim = max(5, min(w_per, h_lim))
+        start_x = pad + (sw - (num * dim + (num - 1) * pad)) / 2; start_y = pad + (sh - dim) / 2; curr_x = start_x
+        for shape in shapes:
+            rect = pygame.Rect(curr_x, start_y, dim, dim)
+            if rect.right > sw - pad: break
+            if shape is None: pygame.draw.rect(surf, (50,50,50), rect, 1, border_radius=2); curr_x += dim + pad; continue
             try:
-                temp_shape_surf = pygame.Surface(
-                    (preview_dim, preview_dim), pygame.SRCALPHA
-                )
-                temp_shape_surf.fill((0, 0, 0, 0))
-                min_r, min_c, max_r, max_c = shape.bbox()
-                shape_h, shape_w_eff = max(1, max_r - min_r + 1), max(
-                    1, (max_c - min_c + 1) * 0.75 + 0.25
-                )
-                scale_h, scale_w = preview_dim / shape_h, preview_dim / shape_w_eff
-                cell_size = max(1, min(scale_h, scale_w))
-                self._render_single_shape(temp_shape_surf, shape, int(cell_size))
-                surf.blit(temp_shape_surf, preview_rect.topleft)
-                current_x += preview_dim + padding
-            except Exception as e:
-                pygame.draw.rect(surf, VisConfig.RED, preview_rect, 1)
-                current_x += preview_dim + padding
+                temp_surf = pygame.Surface((dim, dim), pygame.SRCALPHA); temp_surf.fill((0,0,0,0))
+                min_r, min_c, max_r, max_c = shape.bbox(); sh_h, sh_w = max(1, max_r-min_r+1), max(1, (max_c-min_c+1)*0.75+0.25)
+                scale = max(1, min(dim/sh_h, dim/sh_w)) if sh_h > 0 and sh_w > 0 else 1
+                self._render_single_shape(temp_surf, shape, int(scale))
+                surf.blit(temp_surf, rect.topleft); curr_x += dim + pad
+            except Exception: pygame.draw.rect(surf, RED, rect, 1); curr_x += dim + pad
 
     def _render_single_shape(self, surf: pygame.Surface, shape: Shape, cell_size: int):
-        if not shape or not shape.triangles or cell_size <= 0:
-            return
-        min_r, min_c, max_r, max_c = shape.bbox()
-        shape_h, shape_w_eff = max(1, max_r - min_r + 1), max(
-            1, (max_c - min_c + 1) * 0.75 + 0.25
-        )
-        if shape_w_eff <= 0 or shape_h <= 0:
-            return
-        total_w, total_h = shape_w_eff * cell_size, shape_h * cell_size
-        offset_x = (surf.get_width() - total_w) / 2 - min_c * (cell_size * 0.75)
-        offset_y = (surf.get_height() - total_h) / 2 - min_r * cell_size
+        """Renders a single shape scaled to fit."""
+        if not shape or not shape.triangles or cell_size <= 0: return
+        min_r, min_c, max_r, max_c = shape.bbox(); sh_h, sh_w = max(1, max_r-min_r+1), max(1, (max_c-min_c+1)*0.75+0.25)
+        if sh_w <= 0 or sh_h <= 0: return
+        total_w, total_h = sh_w * cell_size, sh_h * cell_size
+        ox = (surf.get_width() - total_w) / 2 - min_c * (cell_size * 0.75); oy = (surf.get_height() - total_h) / 2 - min_r * cell_size
         for dr, dc, up in shape.triangles:
             tri = Triangle(row=dr, col=dc, is_up=up)
-            try:
-                pts = tri.get_points(
-                    ox=offset_x, oy=offset_y, cw=cell_size, ch=cell_size
-                )
-                pygame.draw.polygon(surf, shape.color, pts)
-            except Exception:
-                pass
+            try: pts = tri.get_points(ox=ox, oy=oy, cw=cell_size, ch=cell_size); pygame.draw.polygon(surf, shape.color, pts)
+            except Exception: pass
 
     def _render_too_small_message(self, ga_rect: pygame.Rect, cell_w: int, cell_h: int):
-        try:
-            err_surf = self.fonts["ui"].render(
-                f"Envs Too Small ({cell_w}x{cell_h})", True, VisConfig.GRAY
-            )
-            self.screen.blit(err_surf, err_surf.get_rect(center=ga_rect.center))
-        except Exception as e:
-            print(f"Error rendering 'too small' message: {e}")
+        """Renders a message if the env cells are too small."""
+        font = self.fonts.get("ui")
+        if font:
+            surf = font.render(f"Envs Too Small ({cell_w}x{cell_h})", True, GRAY)
+            self.screen.blit(surf, surf.get_rect(center=ga_rect.center))
 
-    def _render_render_limit_text(
-        self, ga_rect: pygame.Rect, num_rendered: int, num_total: int
-    ):
-        try:
-            info_surf = self.fonts["ui"].render(
-                f"Rendering {num_rendered}/{num_total} Envs",
-                True,
-                VisConfig.YELLOW,
-                VisConfig.BLACK,
-            )
-            self.screen.blit(
-                info_surf,
-                info_surf.get_rect(bottomright=(ga_rect.right - 5, ga_rect.bottom - 5)),
-            )
-        except Exception as e:
-            print(f"Error rendering limit text: {e}")
-
+    def _render_render_limit_text(self, ga_rect: pygame.Rect, num_rendered: int, num_total: int):
+        """Renders text indicating not all envs are shown."""
+        font = self.fonts.get("ui")
+        if font:
+            surf = font.render(f"Rendering {num_rendered}/{num_total} Envs", True, YELLOW, BLACK)
+            self.screen.blit(surf, surf.get_rect(bottomright=(ga_rect.right - 5, ga_rect.bottom - 5)))
 
 File: ui\panels\left_panel.py
 # File: ui/panels/left_panel.py
 import pygame
-from typing import Dict, Any, Optional, Deque
+from typing import Dict, Any, Optional, Deque, Tuple
 
-from config import (
-    VisConfig,
-    RNNConfig,
-    TransformerConfig,
-    ModelConfig,
-)
-from config.general import DEVICE
-
+from config import VisConfig
 from ui.plotter import Plotter
 from ui.input_handler import InputHandler
 from .left_panel_components import (
     ButtonStatusRenderer,
     InfoTextRenderer,
-    TBStatusRenderer,
     PlotAreaRenderer,
+    NotificationRenderer,
 )
 from app_state import AppState
 
@@ -11401,15 +9664,13 @@ class LeftPanelRenderer:
         self.fonts = self._init_fonts()
         self.input_handler: Optional[InputHandler] = None
 
+        # Initialize components
         self.button_status_renderer = ButtonStatusRenderer(self.screen, self.fonts)
         self.info_text_renderer = InfoTextRenderer(self.screen, self.fonts)
-        self.tb_status_renderer = TBStatusRenderer(self.screen, self.fonts)
+        self.notification_renderer = NotificationRenderer(self.screen, self.fonts)
         self.plot_area_renderer = PlotAreaRenderer(
             self.screen, self.fonts, self.plotter
         )
-        self.rnn_config = RNNConfig()
-        self.transformer_config = TransformerConfig()
-        self.model_config_net = ModelConfig.Network()
 
     def _init_fonts(self):
         """Initializes fonts used in the left panel."""
@@ -11417,13 +9678,12 @@ class LeftPanelRenderer:
         font_configs = {
             "ui": 24,
             "status": 28,
-            "logdir": 16,
-            "plot_placeholder": 20,
+            "detail": 16,
+            "resource": 16,
             "notification_label": 16,
-            "plot_title_values": 8,
-            "progress_bar": 14,
             "notification": 18,
-            "tb_status": 16,
+            "plot_placeholder": 20,
+            "plot_title_values": 8,
         }
         for key, size in font_configs.items():
             try:
@@ -11432,32 +9692,17 @@ class LeftPanelRenderer:
                 try:
                     fonts[key] = pygame.font.Font(None, size)
                 except Exception as e:
-                    print(
-                        f"ERROR: Font '{key}' failed to load with SysFont and Font(None): {e}"
-                    )
-                    fonts[key] = None  # Set to None if both fail
-            if fonts[key] is None:
-                print(f"ERROR: Font '{key}' could not be loaded.")
+                    print(f"ERROR: Font '{key}' failed: {e}")
+                    fonts[key] = None
+        # Ensure essential fonts have fallbacks
+        if fonts.get("ui") is None:
+            fonts["ui"] = pygame.font.Font(None, 24)
+        if fonts.get("status") is None:
+            fonts["status"] = pygame.font.Font(None, 28)
         return fonts
 
-    def render(
-        self,
-        panel_width: int,
-        is_process_running: bool,
-        status: str,
-        stats_summary: Dict[str, Any],
-        tensorboard_log_dir: Optional[str],  # This is the string path
-        plot_data: Dict[str, Deque],
-        app_state: str,
-        update_progress_details: Dict[str, Any],
-        agent_param_count: int,
-        worker_counts: Dict[str, int],
-    ):
-        """Renders the entire left panel within the given width."""
-        current_height = self.screen.get_height()
-        lp_rect = pygame.Rect(0, 0, panel_width, current_height)
-
-        # Simplified status mapping
+    def _get_background_color(self, status: str) -> Tuple[int, int, int]:
+        """Determines background color based on status."""
         status_color_map = {
             "Ready": (30, 30, 30),
             "Confirm Cleanup": (50, 20, 20),
@@ -11466,75 +9711,104 @@ class LeftPanelRenderer:
             "Playing Demo": (30, 30, 40),
             "Debugging Grid": (40, 30, 40),
             "Initializing": (40, 40, 40),
-            "Running AlphaZero": (30, 50, 30),  # Combined running state
+            "Running AlphaZero": (30, 50, 30),
         }
         base_status = status.split(" (")[0] if "(" in status else status
-        bg_color = status_color_map.get(base_status, (30, 30, 30))
+        return status_color_map.get(base_status, (30, 30, 30))
 
+    def render(self, panel_width: int, **kwargs):  # Use kwargs
+        """Renders the entire left panel within the given width."""
+        current_height = self.screen.get_height()
+        lp_rect = pygame.Rect(0, 0, panel_width, current_height)
+        status = kwargs.get("status", "")
+        bg_color = self._get_background_color(status)
         pygame.draw.rect(self.screen, bg_color, lp_rect)
-        current_y = 10  # Start with a definite integer
 
-        # Render Buttons and Status
-        try:
-            next_y = self.button_status_renderer.render(  # Should return int
-                y_start=current_y,
-                panel_width=panel_width,
-                app_state=app_state,
-                is_process_running=is_process_running,
-                status=status,
-                stats_summary=stats_summary,
-                update_progress_details=update_progress_details,
-            )
-            current_y = next_y  # Assign the returned int
-        except Exception as e:
-            print(f"Error in button_status_renderer: {e}")
-            current_y += 50  # Fallback increment
+        current_y = 10
+        render_order = [
+            (self.button_status_renderer.render, 60),
+            (self.info_text_renderer.render, 80),
+            (self.notification_renderer.render, 90),
+        ]
 
-        # Render Info Text
-        try:
-            next_y = self.info_text_renderer.render(  # Should return int
-                current_y + 5,  # int + int = int
-                stats_summary,
-                panel_width,
-                agent_param_count,
-                worker_counts,
-            )
-            current_y = next_y  # Assign the returned int
-        except Exception as e:
-            print(f"Error in info_text_renderer: {e}")
-            current_y += 50  # Fallback increment
-
-        # Render TB Status - Pass the string path and panel_width
-        try:
-            # Pass panel_width here
-            next_y_val, _ = self.tb_status_renderer.render(
-                current_y + 10, tensorboard_log_dir, panel_width
-            )
-            current_y = next_y_val  # Assign the returned int
-        except Exception as e:
-            print(f"Error in tb_status_renderer: {e}")
-            current_y += 20  # Fallback increment
-
-        # Render Plots
-        if app_state == AppState.MAIN_MENU.value:
-            # Ensure current_y is an int before adding 5
-            if isinstance(current_y, (int, float)):
-                plot_y_start = int(current_y) + 5  # This line should now work
-                try:
-                    self.plot_area_renderer.render(
-                        y_start=plot_y_start,
+        # Render static components
+        for render_func, fallback_height in render_order:
+            try:
+                # --- Pass only the required arguments ---
+                if render_func == self.button_status_renderer.render:
+                    next_y = render_func(
+                        y_start=current_y,
                         panel_width=panel_width,
-                        screen_height=current_height,
-                        plot_data=plot_data,
+                        app_state=kwargs.get("app_state", ""),
+                        is_process_running=kwargs.get("is_process_running", False),
                         status=status,
+                        stats_summary=kwargs.get("stats_summary", {}),
+                        update_progress_details=kwargs.get(
+                            "update_progress_details", {}
+                        ),
                     )
-                except Exception as e:
-                    print(f"Error in plot_area_renderer: {e}")
-            else:
-                print(
-                    f"Error: current_y is not a number before plotting. Type: {type(current_y)}, Value: {current_y}"
+                elif render_func == self.info_text_renderer.render:
+                    next_y = render_func(
+                        y_start=current_y + 5,
+                        stats_summary=kwargs.get("stats_summary", {}),
+                        panel_width=panel_width,
+                        agent_param_count=kwargs.get("agent_param_count", 0),
+                        worker_counts=kwargs.get("worker_counts", {}),
+                    )
+                elif render_func == self.notification_renderer.render:
+                    notification_rect = pygame.Rect(
+                        10, current_y + 5, panel_width - 20, fallback_height
+                    )
+                    render_func(notification_rect, kwargs.get("stats_summary", {}))
+                    next_y = notification_rect.bottom
+                else:  # Default case if more components added (might need adjustment)
+                    next_y = render_func(
+                        y_start=current_y + 5, panel_width=panel_width, **kwargs
+                    )  # Keep kwargs for unknown future components
+
+                current_y = (
+                    next_y
+                    if isinstance(next_y, (int, float))
+                    else current_y + fallback_height + 5
                 )
-                # Optionally render an error message or skip plotting
+            except Exception as e:
+                print(f"Error rendering component {render_func.__name__}: {e}")
+                current_y += fallback_height + 5  # Fallback increment
+
+        # Render Plots (only in Main Menu state)
+        if kwargs.get("app_state") == AppState.MAIN_MENU.value:
+            plot_y_start = current_y + 5
+            try:
+                self.plot_area_renderer.render(
+                    y_start=plot_y_start,
+                    panel_width=panel_width,
+                    screen_height=current_height,
+                    plot_data=kwargs.get("plot_data", {}),
+                    status=status,
+                )
+            except Exception as e:
+                print(f"Error in plot_area_renderer: {e}")
+        else:
+            self._render_plot_placeholder(current_y + 5, panel_width, current_height)
+
+    def _render_plot_placeholder(
+        self, y_start: int, panel_width: int, screen_height: int
+    ):
+        """Renders a placeholder when plots are disabled."""
+        plot_area_height = screen_height - y_start - 10
+        plot_area_width = panel_width - 20
+        if plot_area_width > 10 and plot_area_height > 10:
+            plot_area_rect = pygame.Rect(10, y_start, plot_area_width, plot_area_height)
+            pygame.draw.rect(self.screen, (40, 40, 40), plot_area_rect, 1)
+            placeholder_font = self.fonts.get("plot_placeholder")
+            if placeholder_font:
+                placeholder_surf = placeholder_font.render(
+                    "Plots disabled outside Main Menu", True, (100, 100, 100)
+                )
+                placeholder_rect = placeholder_surf.get_rect(
+                    center=plot_area_rect.center
+                )
+                self.screen.blit(placeholder_surf, placeholder_rect)
 
 
 File: ui\panels\__init__.py
@@ -11551,7 +9825,19 @@ import time
 import math
 from typing import Dict, Tuple, Any, Optional, TYPE_CHECKING
 
-from config import WHITE, YELLOW, RED, GOOGLE_COLORS, LIGHTG, GREEN, DARK_GREEN
+from config import (
+    WHITE,
+    YELLOW,
+    RED,
+    GOOGLE_COLORS,
+    LIGHTG,
+    GREEN,
+    DARK_GREEN,
+    BLUE,
+)  # Added BLUE
+from config.core import (
+    TrainConfig,
+)  # Import TrainConfig to get MIN_BUFFER_SIZE_TO_TRAIN
 from utils.helpers import format_eta
 from ui.input_handler import InputHandler
 
@@ -11560,18 +9846,20 @@ if TYPE_CHECKING:
 
 
 class ButtonStatusRenderer:
-    """Renders the top buttons and compact status block."""
+    """Renders the top buttons and compact status block, including buffering progress."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
         self.fonts = fonts
         self.status_font = fonts.get("status", pygame.font.Font(None, 28))
-        self.status_label_font = fonts.get(
-            "notification_label", pygame.font.Font(None, 16)
-        )
+        self.detail_font = fonts.get("detail", pygame.font.Font(None, 16))
+        self.progress_font = fonts.get(
+            "detail", pygame.font.Font(None, 14)
+        )  # Use detail font for progress text
         self.ui_font = fonts.get("ui", pygame.font.Font(None, 24))
         self.input_handler_ref: Optional[InputHandler] = None
         self.app_ref: Optional["MainApp"] = None
+        self.train_config = TrainConfig()  # Store train config
 
     def _draw_button(
         self,
@@ -11582,7 +9870,7 @@ class ButtonStatusRenderer:
         is_active: bool = False,
         enabled: bool = True,
     ):
-        """Helper to draw a single button, optionally grayed out or in active state."""
+        """Helper to draw a single button."""
         final_color = base_color
         if not enabled:
             final_color = tuple(max(30, c // 2) for c in base_color[:3])
@@ -11594,18 +9882,76 @@ class ButtonStatusRenderer:
         if self.ui_font:
             label_surface = self.ui_font.render(text, True, text_color)
             self.screen.blit(label_surface, label_surface.get_rect(center=rect.center))
-        else:
+        else:  # Fallback if font fails
             pygame.draw.line(self.screen, RED, rect.topleft, rect.bottomright, 2)
             pygame.draw.line(self.screen, RED, rect.topright, rect.bottomleft, 2)
 
-    def _render_compact_status(
-        self, y_start: int, panel_width: int, status: str, stats_summary: Dict[str, Any]
+    def _render_progress_bar(
+        self,
+        y_pos: int,
+        panel_width: int,
+        current_value: int,
+        target_value: int,
+        label: str,
     ) -> int:
-        """Renders the compact status block below buttons."""
+        """Renders a progress bar."""
+        if not self.progress_font:
+            return y_pos
+
+        bar_height = 18
+        bar_width = panel_width * 0.8  # Use 80% of panel width
+        bar_x = (panel_width - bar_width) / 2
+        bar_rect = pygame.Rect(bar_x, y_pos, bar_width, bar_height)
+
+        # Calculate progress percentage
+        progress = 0.0
+        if target_value > 0:
+            progress = min(1.0, max(0.0, current_value / target_value))
+
+        # Draw background and border
+        bg_color = (50, 50, 50)
+        border_color = LIGHTG
+        pygame.draw.rect(self.screen, bg_color, bar_rect, border_radius=3)
+
+        # Draw fill
+        fill_width = int(bar_width * progress)
+        fill_rect = pygame.Rect(bar_x, y_pos, fill_width, bar_height)
+        fill_color = BLUE  # Use blue for buffering progress
+        pygame.draw.rect(
+            self.screen,
+            fill_color,
+            fill_rect,
+            border_top_left_radius=3,
+            border_bottom_left_radius=3,
+            border_top_right_radius=3 if progress >= 1.0 else 0,
+            border_bottom_right_radius=3 if progress >= 1.0 else 0,
+        )
+
+        # Draw border after fill
+        pygame.draw.rect(self.screen, border_color, bar_rect, 1, border_radius=3)
+
+        # Draw text label (e.g., "Buffering: 500 / 1000")
+        progress_text = f"{label}: {current_value:,}/{target_value:,}".replace(",", "_")
+        text_surf = self.progress_font.render(progress_text, True, WHITE)
+        text_rect = text_surf.get_rect(center=bar_rect.center)
+        self.screen.blit(text_surf, text_rect)
+
+        return int(bar_rect.bottom)  # Return bottom y coordinate
+
+    def _render_compact_status(
+        self,
+        y_start: int,
+        panel_width: int,
+        status: str,
+        stats_summary: Dict[str, Any],
+        is_running: bool,
+    ) -> int:
+        """Renders the compact status block, including buffering progress if applicable."""
         x_margin, current_y = 10, y_start
         line_height_status = self.status_font.get_linesize()
-        line_height_label = self.status_label_font.get_linesize()
+        line_height_detail = self.detail_font.get_linesize()
 
+        # 1. Render Status Text
         status_text = f"Status: {status}"
         status_color = YELLOW
         if "Error" in status:
@@ -11632,25 +9978,52 @@ class ButtonStatusRenderer:
             current_y += line_height_status
         except Exception as e:
             print(f"Error rendering status text: {e}")
-            current_y += 20  # Fallback increment
+            current_y += 20
 
+        # 2. Render Global Step and Episodes
         global_step = stats_summary.get("global_step", 0)
         total_episodes = stats_summary.get("total_episodes", 0)
+        buffer_size = stats_summary.get("buffer_size", 0)
 
         global_step_str = f"{global_step:,}".replace(",", "_")
-        eps_str = f"~{total_episodes} Eps"
+        eps_str = f"{total_episodes:,}".replace(",", "_")
 
-        line2_text = f"{global_step_str} Steps | {eps_str}"
-        try:
-            line2_surface = self.status_label_font.render(line2_text, True, LIGHTG)
-            line2_rect = line2_surface.get_rect(topleft=(x_margin, current_y))
-            self.screen.blit(line2_surface, line2_rect)
-            current_y += line_height_label + 2
-        except Exception as e:
-            print(f"Error rendering step/ep text: {e}")
-            current_y += 15  # Fallback increment
+        # Show only Step/Episodes if training has started, otherwise show buffer size
+        is_buffering = (
+            is_running
+            and global_step == 0
+            and buffer_size < self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
+        )
 
-        return int(current_y)  # Ensure return is int
+        if not is_buffering:
+            line2_text = f"Step: {global_step_str} | Episodes: {eps_str}"
+            try:
+                line2_surface = self.detail_font.render(line2_text, True, LIGHTG)
+                line2_rect = line2_surface.get_rect(topleft=(x_margin, current_y))
+                clip_width = max(0, panel_width - line2_rect.left - x_margin)
+                blit_area = (
+                    pygame.Rect(0, 0, clip_width, line2_rect.height)
+                    if line2_rect.width > clip_width
+                    else None
+                )
+                self.screen.blit(line2_surface, line2_rect, area=blit_area)
+                current_y += line_height_detail + 2
+            except Exception as e:
+                print(f"Error rendering step/ep text: {e}")
+                current_y += 15
+        else:
+            # 3. Render Buffering Progress Bar (only if buffering)
+            current_y += 2  # Add a small gap before the progress bar
+            next_y_after_bar = self._render_progress_bar(
+                current_y,
+                panel_width,
+                buffer_size,
+                self.train_config.MIN_BUFFER_SIZE_TO_TRAIN,
+                "Buffering",
+            )
+            current_y = next_y_after_bar + 5  # Add padding after the bar
+
+        return int(current_y)
 
     def render(
         self,
@@ -11661,11 +10034,11 @@ class ButtonStatusRenderer:
         status: str,
         stats_summary: Dict[str, Any],
         update_progress_details: Dict[str, Any],
-    ) -> int:  # Ensure return type hint is int
+    ) -> int:
         """Renders buttons and status. Returns next_y."""
         from app_state import AppState
 
-        next_y = y_start  # Start with an int
+        next_y = y_start
 
         # Get button rects from InputHandler
         run_stop_btn_rect = (
@@ -11689,14 +10062,12 @@ class ButtonStatusRenderer:
             else pygame.Rect(0, 0, 0, 0)
         )
 
-        # Check worker status
-        is_running = (
-            self.app_ref.worker_manager.is_any_worker_running()
-            if self.app_ref
-            else False
-        )
+        # Determine if workers are running
+        is_running = "Running AlphaZero" in status
+        if not is_running and self.app_ref:
+            is_running = self.app_ref.worker_manager.is_any_worker_running()
 
-        # Render Combined Run/Stop Button
+        # Render Buttons
         run_stop_text = "Stop Run" if is_running else "Run AlphaZero"
         run_stop_base_color = (40, 80, 40)
         run_stop_active_color = (100, 40, 40)
@@ -11709,7 +10080,6 @@ class ButtonStatusRenderer:
             enabled=(app_state == AppState.MAIN_MENU.value),
         )
 
-        # Render Other Buttons
         other_buttons_enabled = (
             app_state == AppState.MAIN_MENU.value
         ) and not is_running
@@ -11732,18 +10102,15 @@ class ButtonStatusRenderer:
             demo_btn_rect.bottom,
             debug_btn_rect.bottom,
         )
-        # Ensure button_bottom is an int before adding
         next_y = int(button_bottom) + 10
 
-        # Render Status Block
+        # Render Status Block (which now includes buffering progress)
         status_block_y = next_y
-        next_y = self._render_compact_status(  # This now returns int
-            status_block_y, panel_width, status, stats_summary
+        next_y = self._render_compact_status(
+            status_block_y, panel_width, status, stats_summary, is_running
         )
 
-        return int(
-            next_y
-        )  # Explicitly cast just in case, though _render_compact_status should return int
+        return int(next_y)
 
 
 File: ui\panels\left_panel_components\info_text_renderer.py
@@ -11751,60 +10118,33 @@ File: ui\panels\left_panel_components\info_text_renderer.py
 import pygame
 import time
 from typing import Dict, Any, Tuple
+import logging
 
-from config import RNNConfig, TransformerConfig, ModelConfig, WHITE, LIGHTG, GRAY
+from config import WHITE, LIGHTG, GRAY
+
+# Import the module itself, not the variable directly
+import config.general as config_general
+
+logger = logging.getLogger(__name__)
 
 
 class InfoTextRenderer:
-    """Renders essential non-plotted information text."""
+    """Renders essential non-plotted information text.
+    Refactored for AlphaZero focus and worker counts. Resource usage removed."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
         self.fonts = fonts
-        self.rnn_config = RNNConfig()
-        self.transformer_config = TransformerConfig()
-        self.model_config_net = ModelConfig.Network()
-        self.resource_font = fonts.get("logdir", pygame.font.Font(None, 16))
+        self.ui_font = fonts.get("ui", pygame.font.Font(None, 24))
+        self.detail_font = fonts.get("detail", pygame.font.Font(None, 16))
+        # Resource font removed
         self.stats_summary_cache: Dict[str, Any] = {}
 
     def _get_network_description(self) -> str:
         """Builds a description string based on network components."""
         return "AlphaZero Neural Network"
 
-    def _get_network_details(self) -> str:
-        """Builds a detailed string of network configuration."""
-        details = []
-        cnn_str = str(self.model_config_net.CONV_CHANNELS).replace(" ", "")
-        mlp_str = str(self.model_config_net.COMBINED_FC_DIMS).replace(" ", "")
-        shape_mlp_cfg_str = str(self.model_config_net.SHAPE_FEATURE_MLP_DIMS).replace(
-            " ", ""
-        )
-        details.append(f"CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}")
-        # Add more details if needed, e.g., activation functions, batchnorm use
-        return ", ".join(details)
-
-    def _get_live_resource_usage(self) -> Dict[str, str]:
-        """Fetches live CPU, Memory, and GPU Memory usage from cached summary."""
-        from config.general import DEVICE
-
-        usage = {"CPU": "N/A", "Mem": "N/A", "GPU Mem": "N/A"}
-        cpu_val = self.stats_summary_cache.get("current_cpu_usage")
-        mem_val = self.stats_summary_cache.get("current_memory_usage")
-        gpu_val = self.stats_summary_cache.get("current_gpu_memory_usage_percent")
-
-        if cpu_val is not None:
-            usage["CPU"] = f"{cpu_val:.1f}%"
-        if mem_val is not None:
-            usage["Mem"] = f"{mem_val:.1f}%"
-
-        device_type = DEVICE.type if DEVICE else "cpu"
-        if gpu_val is not None:
-            usage["GPU Mem"] = (
-                f"{gpu_val:.1f}%" if device_type == "cuda" else "N/A (CPU)"
-            )
-        elif device_type != "cuda":
-            usage["GPU Mem"] = "N/A (CPU)"
-        return usage
+    # _get_live_resource_usage method removed
 
     def render(
         self,
@@ -11812,30 +10152,27 @@ class InfoTextRenderer:
         stats_summary: Dict[str, Any],
         panel_width: int,
         agent_param_count: int,
-        worker_counts: Dict[str, int],  # Keep for potential future worker info
+        worker_counts: Dict[str, int],
     ) -> int:
         """Renders the info text block. Returns next_y."""
-        from config.general import DEVICE
-
         self.stats_summary_cache = stats_summary
-        ui_font, detail_font, resource_font = (
-            self.fonts.get("ui"),
-            self.fonts.get("logdir"),
-            self.resource_font,
-        )
-        if not ui_font or not detail_font or not resource_font:
+
+        if not self.ui_font or not self.detail_font:
+            logger.warning("Missing fonts for InfoTextRenderer.")
             return y_start
 
-        line_height_ui, line_height_detail, line_height_resource = (
-            ui_font.get_linesize(),
-            detail_font.get_linesize(),
-            resource_font.get_linesize(),
+        line_height_ui = self.ui_font.get_linesize()
+        # line_height_resource removed
+
+        # Access DEVICE through the imported module
+        logger.info(
+            f"[InfoTextRenderer] Reading DEVICE at render time: {config_general.DEVICE}"
         )
-        device_type_str = DEVICE.type.upper() if DEVICE else "CPU"
-        network_desc, network_details = (
-            self._get_network_description(),
-            self._get_network_details(),
+        device_type_str = (
+            config_general.DEVICE.type.upper() if config_general.DEVICE else "CPU"
         )
+
+        network_desc = self._get_network_description()
         param_str = (
             f"{agent_param_count / 1e6:.2f} M" if agent_param_count > 0 else "N/A"
         )
@@ -11845,28 +10182,33 @@ class InfoTextRenderer:
             if start_time_unix > 0
             else "N/A"
         )
-        # Worker info placeholder (adapt later based on actual workers)
-        worker_str = "Self-Play: ?, Training: ?"  # Placeholder
+        sp_workers = worker_counts.get("SelfPlay", 0)
+        tr_workers = worker_counts.get("Training", 0)
+        worker_str = f"SP: {sp_workers}, TR: {tr_workers}"
 
         info_lines = [
-            ("Device", device_type_str),
+            ("Device", device_type_str),  # Uses the correctly accessed value now
             ("Network", network_desc),
             ("Params", param_str),
-            # ("Workers", worker_str), # Can add back when workers are implemented
+            ("Workers", worker_str),
             ("Run Started", start_time_str),
         ]
-        last_y, x_pos_key, x_pos_val_offset, current_y = y_start, 10, 5, y_start + 5
 
+        last_y, x_pos_key, x_pos_val_offset, current_y = y_start, 10, 5, y_start
+
+        # Render Key-Value Info Lines
         for idx, (key, value_str) in enumerate(info_lines):
             line_y = current_y + idx * line_height_ui
             try:
-                key_surf = ui_font.render(f"{key}:", True, LIGHTG)
+                key_surf = self.ui_font.render(f"{key}:", True, LIGHTG)
                 key_rect = key_surf.get_rect(topleft=(x_pos_key, line_y))
                 self.screen.blit(key_surf, key_rect)
-                value_surf = ui_font.render(f"{value_str}", True, WHITE)
+
+                value_surf = self.ui_font.render(f"{value_str}", True, WHITE)
                 value_rect = value_surf.get_rect(
                     topleft=(key_rect.right + x_pos_val_offset, line_y)
                 )
+
                 clip_width = max(0, panel_width - value_rect.left - 10)
                 blit_area = (
                     pygame.Rect(0, 0, clip_width, value_rect.height)
@@ -11874,46 +10216,17 @@ class InfoTextRenderer:
                     else None
                 )
                 self.screen.blit(value_surf, value_rect, area=blit_area)
+
                 last_y = key_rect.union(value_rect).bottom
             except Exception as e:
-                print(f"Error rendering stat line '{key}': {e}")
+                logger.error(f"Error rendering stat line '{key}': {e}")
                 last_y = line_y + line_height_ui
 
-        current_y = last_y + 2
-        try:
-            detail_surf = detail_font.render(network_details, True, WHITE)
-            detail_rect = detail_surf.get_rect(topleft=(x_pos_key, current_y))
-            clip_width_detail = max(0, panel_width - detail_rect.left - 10)
-            blit_area_detail = (
-                pygame.Rect(0, 0, clip_width_detail, detail_rect.height)
-                if detail_rect.width > clip_width_detail
-                else None
-            )
-            self.screen.blit(detail_surf, detail_rect, area=blit_area_detail)
-            last_y = detail_rect.bottom
-        except Exception as e:
-            print(f"Error rendering network details: {e}")
-            last_y = current_y + line_height_detail
-
         current_y = last_y + 4
-        resource_usage = self._get_live_resource_usage()
-        resource_str = f"Live Usage | CPU: {resource_usage['CPU']} | Mem: {resource_usage['Mem']} | GPU Mem: {resource_usage['GPU Mem']}"
-        try:
-            resource_surf = resource_font.render(resource_str, True, WHITE)
-            resource_rect = resource_surf.get_rect(topleft=(x_pos_key, current_y))
-            clip_width_resource = max(0, panel_width - resource_rect.left - 10)
-            blit_area_resource = (
-                pygame.Rect(0, 0, clip_width_resource, resource_rect.height)
-                if resource_rect.width > clip_width_resource
-                else None
-            )
-            self.screen.blit(resource_surf, resource_rect, area=blit_area_resource)
-            last_y = resource_rect.bottom
-        except Exception as e:
-            print(f"Error rendering resource usage: {e}")
-            last_y = current_y + line_height_resource
 
-        return last_y
+        # Live Resource Usage rendering removed
+
+        return int(last_y)
 
 
 File: ui\panels\left_panel_components\notification_renderer.py
@@ -11921,16 +10234,19 @@ File: ui\panels\left_panel_components\notification_renderer.py
 import pygame
 import time
 from typing import Dict, Any, Tuple, Optional
-from config import VisConfig, StatsConfig
+from config import VisConfig, StatsConfig, WHITE, LIGHTG, GRAY, YELLOW, RED, GREEN
 import numpy as np
 
 
 class NotificationRenderer:
-    """Renders the notification area with best scores/loss."""
+    """Renders the notification area with best scores/loss.
+    Refactored for AlphaZero focus."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
         self.fonts = fonts
+        self.label_font = fonts.get("notification_label", pygame.font.Font(None, 16))
+        self.value_font = fonts.get("notification", pygame.font.Font(None, 18))
 
     def _format_steps_ago(self, current_step: int, best_step: int) -> str:
         """Formats the difference in steps into a readable string."""
@@ -11954,22 +10270,23 @@ class NotificationRenderer:
         best_step: int,
         val_format: str,
         current_step: int,
+        lower_is_better: bool = False,  # Added flag for loss vs score
     ) -> pygame.Rect:
         """Renders a single line within the notification area."""
-        label_font = self.fonts.get("notification_label")
-        value_font = self.fonts.get("notification")
-        if not label_font or not value_font:
+        if not self.label_font or not self.value_font:
             return pygame.Rect(0, y_pos, 0, 0)
 
         padding = 5
-        label_color, value_color = VisConfig.LIGHTG, VisConfig.WHITE
-        prev_color, time_color = VisConfig.GRAY, (180, 180, 100)
+        label_color, value_color = LIGHTG, WHITE
+        prev_color, time_color = GRAY, (180, 180, 100)
 
-        label_surf = label_font.render(label, True, label_color)
+        # 1. Render Label
+        label_surf = self.label_font.render(label, True, label_color)
         label_rect = label_surf.get_rect(topleft=(area_rect.left + padding, y_pos))
         self.screen.blit(label_surf, label_rect)
         current_x = label_rect.right + 4
 
+        # 2. Render Current Best Value
         current_val_str = "N/A"
         val_as_float: Optional[float] = None
         if isinstance(current_val, (int, float, np.number)):
@@ -11981,14 +10298,15 @@ class NotificationRenderer:
         if val_as_float is not None and np.isfinite(val_as_float):
             try:
                 current_val_str = val_format.format(val_as_float)
-            except (ValueError, TypeError) as fmt_err:
+            except (ValueError, TypeError):
                 current_val_str = "ErrFmt"
 
-        val_surf = value_font.render(current_val_str, True, value_color)
+        val_surf = self.value_font.render(current_val_str, True, value_color)
         val_rect = val_surf.get_rect(topleft=(current_x, y_pos))
         self.screen.blit(val_surf, val_rect)
         current_x = val_rect.right + 4
 
+        # 3. Render Previous Best Value (Optional)
         prev_val_str = "(N/A)"
         prev_val_as_float: Optional[float] = None
         if isinstance(prev_val, (int, float, np.number)):
@@ -11998,20 +10316,30 @@ class NotificationRenderer:
                 prev_val_as_float = None
 
         if prev_val_as_float is not None and np.isfinite(prev_val_as_float):
-            try:
-                prev_val_str = f"({val_format.format(prev_val_as_float)})"
-            except (ValueError, TypeError):
-                prev_val_str = "(ErrFmt)"
+            # Only show previous if it's different and valid
+            if val_as_float is None or not np.isclose(val_as_float, prev_val_as_float):
+                try:
+                    prev_val_str = f"({val_format.format(prev_val_as_float)})"
+                except (ValueError, TypeError):
+                    prev_val_str = "(ErrFmt)"
+            else:
+                prev_val_str = ""  # Don't show if same as current
 
-        prev_surf = label_font.render(prev_val_str, True, prev_color)
-        prev_rect = prev_surf.get_rect(topleft=(current_x, y_pos + 1))
-        self.screen.blit(prev_surf, prev_rect)
-        current_x = prev_rect.right + 6
+        prev_rect = pygame.Rect(current_x, y_pos + 1, 0, 0)  # Initialize rect
+        if prev_val_str:
+            prev_surf = self.label_font.render(prev_val_str, True, prev_color)
+            prev_rect = prev_surf.get_rect(topleft=(current_x, y_pos + 1))
+            self.screen.blit(prev_surf, prev_rect)
+            current_x = prev_rect.right + 6
+        else:
+            current_x += 6  # Add spacing even if not shown
 
+        # 4. Render Time Since Best
         steps_ago_str = self._format_steps_ago(current_step, best_step)
-        time_surf = label_font.render(steps_ago_str, True, time_color)
+        time_surf = self.label_font.render(steps_ago_str, True, time_color)
         time_rect = time_surf.get_rect(topleft=(current_x, y_pos + 1))
 
+        # Clip time text if needed
         available_width = area_rect.right - time_rect.left - padding
         clip_rect = pygame.Rect(0, 0, max(0, available_width), time_rect.height)
         if time_rect.width > available_width > 0:
@@ -12019,6 +10347,7 @@ class NotificationRenderer:
         elif available_width > 0:
             self.screen.blit(time_surf, time_rect)
 
+        # Return the union rect for hover detection if needed
         union_rect = label_rect.union(val_rect).union(prev_rect).union(time_rect)
         union_rect.width = min(union_rect.width, area_rect.width - 2 * padding)
         return union_rect
@@ -12026,69 +10355,61 @@ class NotificationRenderer:
     def render(
         self, area_rect: pygame.Rect, stats_summary: Dict[str, Any]
     ) -> Dict[str, pygame.Rect]:
-        """Renders the notification content."""
+        """Renders the notification content with relevant AlphaZero bests."""
         stat_rects: Dict[str, pygame.Rect] = {}
         pygame.draw.rect(self.screen, (45, 45, 45), area_rect, border_radius=3)
-        pygame.draw.rect(self.screen, VisConfig.LIGHTG, area_rect, 1, border_radius=3)
+        pygame.draw.rect(self.screen, LIGHTG, area_rect, 1, border_radius=3)
         stat_rects["Notification Area"] = area_rect
 
-        value_font = self.fonts.get("notification")
-        if not value_font:
+        if not self.value_font:
             return stat_rects
 
         padding = 5
-        line_height = value_font.get_linesize()
+        line_height = self.value_font.get_linesize()
         current_step = stats_summary.get("global_step", 0)
         y = area_rect.top + padding
 
-        rect_rl = self._render_line(
-            area_rect,
-            y,
-            "RL Score:",
-            stats_summary.get("best_score", -float("inf")),
-            stats_summary.get("previous_best_score", -float("inf")),
-            stats_summary.get("best_score_step", 0),
-            "{:.2f}",
-            current_step,
-        )
-        stat_rects["Best RL Score Info"] = rect_rl.clip(area_rect)
-        y += line_height
-
+        # Render Best Game Score
         rect_game = self._render_line(
             area_rect,
             y,
-            "Game Score:",
+            "Best Game Score:",
             stats_summary.get("best_game_score", -float("inf")),
             stats_summary.get("previous_best_game_score", -float("inf")),
             stats_summary.get("best_game_score_step", 0),
             "{:.0f}",
             current_step,
+            lower_is_better=False,
         )
         stat_rects["Best Game Score Info"] = rect_game.clip(area_rect)
         y += line_height
 
+        # Render Best Value Loss
         rect_v_loss = self._render_line(
             area_rect,
             y,
-            "Value Loss:",
+            "Best Value Loss:",
             stats_summary.get("best_value_loss", float("inf")),
             stats_summary.get("previous_best_value_loss", float("inf")),
             stats_summary.get("best_value_loss_step", 0),
             "{:.4f}",
             current_step,
+            lower_is_better=True,
         )
         stat_rects["Best Value Loss Info"] = rect_v_loss.clip(area_rect)
         y += line_height
 
+        # Render Best Policy Loss
         rect_p_loss = self._render_line(
             area_rect,
             y,
-            "Policy Loss:",
+            "Best Policy Loss:",
             stats_summary.get("best_policy_loss", float("inf")),
             stats_summary.get("previous_best_policy_loss", float("inf")),
             stats_summary.get("best_policy_loss_step", 0),
             "{:.4f}",
             current_step,
+            lower_is_better=True,
         )
         stat_rects["Best Policy Loss Info"] = rect_p_loss.clip(area_rect)
 
@@ -12108,7 +10429,7 @@ from config import (
     RED,
     GOOGLE_COLORS,
     GRAY,
-)  # Added GRAY
+)
 from ui.plotter import Plotter
 
 
@@ -12124,6 +10445,9 @@ class PlotAreaRenderer:
         self.screen = screen
         self.fonts = fonts
         self.plotter = plotter
+        self.placeholder_font = fonts.get(
+            "plot_placeholder", pygame.font.Font(None, 20)
+        )
 
     def render(
         self,
@@ -12139,33 +10463,38 @@ class PlotAreaRenderer:
         plot_area_width = panel_width - 20
 
         if plot_area_width <= 50 or plot_area_height <= 50:
+            # Optionally render a "too small" message if needed
             return
 
-        plot_surface = self.plotter.get_cached_or_updated_plot(
-            plot_data, plot_area_width, plot_area_height
-        )
         plot_area_rect = pygame.Rect(
             10, plot_area_y_start, plot_area_width, plot_area_height
         )
 
+        # Attempt to get/create the plot surface
+        plot_surface = self.plotter.get_cached_or_updated_plot(
+            plot_data, plot_area_width, plot_area_height
+        )
+
+        # Render the plot or a placeholder
         if plot_surface:
             self.screen.blit(plot_surface, plot_area_rect.topleft)
         else:
+            # Draw border and placeholder text
             pygame.draw.rect(self.screen, (40, 40, 40), plot_area_rect, 1)
-            placeholder_text = "Waiting for data..."
-            if status == "Buffering":
-                placeholder_text = "Buffering... Waiting for plot data..."
-            elif status == "Error":
+            placeholder_text = "Waiting for plot data..."
+            if status == "Error":
                 placeholder_text = "Plotting disabled due to error."
             elif not plot_data or not any(plot_data.values()):
                 placeholder_text = "No plot data yet..."
 
-            placeholder_font = self.fonts.get("plot_placeholder")
-            if placeholder_font:
-                placeholder_surf = placeholder_font.render(placeholder_text, True, GRAY)
+            if self.placeholder_font:
+                placeholder_surf = self.placeholder_font.render(
+                    placeholder_text, True, GRAY
+                )
                 placeholder_rect = placeholder_surf.get_rect(
                     center=plot_area_rect.center
                 )
+                # Clip rendering to the plot area
                 blit_pos = (
                     max(plot_area_rect.left, placeholder_rect.left),
                     max(plot_area_rect.top, placeholder_rect.top),
@@ -12176,7 +10505,7 @@ class PlotAreaRenderer:
                 )
                 if blit_area.width > 0 and blit_area.height > 0:
                     self.screen.blit(placeholder_surf, blit_pos, area=blit_area)
-            else:  # Fallback cross
+            else:  # Fallback cross if font failed
                 pygame.draw.line(
                     self.screen,
                     GRAY,
@@ -12191,218 +10520,11 @@ class PlotAreaRenderer:
                 )
 
 
-File: ui\panels\left_panel_components\pretrain_status_renderer.py
-# File: ui/panels/left_panel_components/pretrain_status_renderer.py
-import pygame
-from typing import Dict, Any, Tuple, Optional
-from config import YELLOW, LIGHTG, GOOGLE_COLORS
-from utils.helpers import format_eta  # Import from new location
-
-
-class PretrainStatusRenderer:
-    """Renders the status and progress of the pre-training phase."""
-
-    def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
-        self.screen = screen
-        self.fonts = fonts
-        self.status_font = fonts.get("pretrain_status", pygame.font.Font(None, 20))
-        self.progress_font = fonts.get(
-            "pretrain_progress_bar", pygame.font.Font(None, 14)
-        )
-        self.detail_font = fonts.get("pretrain_detail", pygame.font.Font(None, 16))
-
-    def render(
-        self, y_start: int, pretrain_info: Dict[str, Any], panel_width: int
-    ) -> Tuple[int, Dict[str, pygame.Rect]]:
-        """Renders the pre-training status block. Returns next_y and stat_rects."""
-        stat_rects: Dict[str, pygame.Rect] = {}
-        if not pretrain_info or not self.status_font or not self.detail_font:
-            return y_start, stat_rects
-
-        x_margin = 10
-        current_y = y_start
-        line_height_status = self.status_font.get_linesize()
-        line_height_detail = self.detail_font.get_linesize()
-
-        phase = pretrain_info.get("phase", "Unknown")
-        status_text = f"Pre-Train: {phase}"
-        status_color = YELLOW
-        detail_text = ""
-
-        overall_eta_str = format_eta(
-            pretrain_info.get("overall_eta_seconds", pretrain_info.get("eta_seconds"))
-        )
-        if phase == "Random Play":
-            games = pretrain_info.get("games_played", 0)
-            target = pretrain_info.get("target_games", 0)
-            pps = pretrain_info.get("plays_per_second", 0.0)
-            num_envs = pretrain_info.get("num_envs", 0)
-            status_text = f"Pre-Train: Random Play ({games:,}/{target:,})"
-            detail_text = (
-                f"{num_envs} Envs | {pps:.1f} Plays/s | ETA: {overall_eta_str}"
-            )
-            status_color = GOOGLE_COLORS[1]
-        elif phase == "Sorting Games":
-            status_text = "Pre-Train: Sorting Games..."
-            status_color = (200, 150, 50)
-        elif phase == "Replaying Top K":
-            replayed = pretrain_info.get("games_replayed", 0)
-            target = pretrain_info.get("target_games", 0)
-            transitions = pretrain_info.get("transitions_collected", 0)
-            status_text = f"Pre-Train: Replaying ({replayed:,}/{target:,})"
-            detail_text = f"Collecting Transitions ({transitions:,})"
-            status_color = (100, 180, 180)
-        elif phase == "Updating Agent":
-            epoch = pretrain_info.get("epoch", 0)
-            total_epochs = pretrain_info.get("total_epochs", 0)
-            status_text = f"Pre-Train: Updating (Epoch {epoch}/{total_epochs})"
-            detail_text = f"Overall ETA: {overall_eta_str}"  # Show ETA here
-            status_color = GOOGLE_COLORS[2]
-
-        # Render Status Line
-        status_surface = self.status_font.render(status_text, True, status_color)
-        status_rect = status_surface.get_rect(topleft=(x_margin, current_y))
-        clip_width_status = max(0, panel_width - status_rect.left - x_margin)
-        if status_rect.width > clip_width_status:
-            self.screen.blit(
-                status_surface,
-                status_rect,
-                area=pygame.Rect(0, 0, clip_width_status, status_rect.height),
-            )
-        else:
-            self.screen.blit(status_surface, status_rect)
-        stat_rects["Pre-training Status"] = status_rect
-        current_y += line_height_status
-
-        # Render Detail Line
-        if detail_text:
-            detail_surface = self.detail_font.render(detail_text, True, LIGHTG)
-            detail_rect = detail_surface.get_rect(topleft=(x_margin + 2, current_y))
-            clip_width_detail = max(0, panel_width - detail_rect.left - x_margin)
-            if detail_rect.width > clip_width_detail:
-                self.screen.blit(
-                    detail_surface,
-                    detail_rect,
-                    area=pygame.Rect(0, 0, clip_width_detail, detail_rect.height),
-                )
-            else:
-                self.screen.blit(detail_surface, detail_rect)
-            current_y += line_height_detail
-        current_y += 5  # Add final padding
-
-        return current_y, stat_rects
-
-
-File: ui\panels\left_panel_components\tb_status_renderer.py
-# File: ui/panels/left_panel_components/tb_status_renderer.py
-import pygame
-import os
-from typing import Dict, Optional, Tuple
-from config import (
-    VisConfig,
-    TensorBoardConfig,  # Keep for potential future use, but not needed now
-    GRAY,
-    LIGHTG,
-    GOOGLE_COLORS,
-    WHITE,
-)
-
-
-class TBStatusRenderer:
-    """Renders the TensorBoard status line."""
-
-    def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
-        self.screen = screen
-        self.fonts = fonts
-
-    def _shorten_path(self, path: str, max_chars: int) -> str:
-        """Attempts to shorten a path string for display."""
-        if len(path) <= max_chars:
-            return path
-        try:
-            # Attempt to get relative path first
-            rel_path = os.path.relpath(path)
-            if len(rel_path) <= max_chars:
-                return rel_path
-        except ValueError:
-            # Fallback if relpath fails (e.g., different drives on Windows)
-            pass
-
-        # If relative path is still too long or failed, use ellipsis for parent dirs
-        parts = path.replace("\\", "/").split("/")
-        if len(parts) >= 2:
-            # Show ".../last_dir/run_id" or similar
-            short_path = os.path.join("...", *parts[-2:])
-            if len(short_path) <= max_chars:
-                return short_path
-
-        # If even that is too long, show ellipsis and end of the basename
-        basename = os.path.basename(path)
-        if len(basename) > max_chars:
-            return "..." + basename[-(max_chars - 3) :]
-        else:
-            return (
-                basename  # Should not happen if previous checks failed, but as fallback
-            )
-
-    def render(
-        self,
-        y_start: int,
-        tb_log_dir: Optional[str],
-        panel_width: int,  # Add panel_width
-    ) -> Tuple[int, Dict[str, pygame.Rect]]:
-        """Renders the TensorBoard status block."""
-        stat_rects: Dict[str, pygame.Rect] = {}
-        tb_status_font = self.fonts.get("tb_status")  # Use the correct font key
-        if not tb_status_font:  # Check font existence
-            print("Warning: TB Status font ('tb_status') not found.")
-            return y_start, stat_rects  # Return original y_start if font missing
-
-        x_margin = 10
-        current_y = y_start
-        line_height = tb_status_font.get_linesize()  # Use the correct font
-
-        if tb_log_dir:
-            # Use panel_width passed as argument
-            max_chars_for_path = max(
-                30, int(panel_width * 0.15)
-            )  # Adjust multiplier as needed
-            tb_path_short = self._shorten_path(tb_log_dir, max_chars_for_path)
-            tb_text = f"TB Logs: {tb_path_short}"
-            tb_color = WHITE
-        else:
-            tb_text = "TB Logs: Not Configured"
-            tb_color = GRAY
-
-        try:
-            tb_surf = tb_status_font.render(tb_text, True, tb_color)
-            tb_rect = tb_surf.get_rect(topleft=(x_margin, current_y))
-
-            # Clip rendering if text exceeds panel width
-            clip_width = max(0, panel_width - tb_rect.left - x_margin)
-            blit_area = None
-            if tb_rect.width > clip_width:
-                blit_area = pygame.Rect(0, 0, clip_width, tb_rect.height)
-
-            self.screen.blit(tb_surf, tb_rect, area=blit_area)
-            stat_rects["TensorBoard Path"] = tb_rect
-            current_y += line_height  # Increment y position correctly
-        except Exception as e:
-            print(f"Error rendering TB status: {e}")
-            # Don't increment current_y if rendering failed, return original y_start
-            return y_start, stat_rects
-
-        return (
-            int(current_y),
-            stat_rects,
-        )  # Return the potentially incremented y position as int
-
-
 File: ui\panels\left_panel_components\__init__.py
 from .button_status_renderer import ButtonStatusRenderer
-from .notification_renderer import NotificationRenderer  
+from .notification_renderer import NotificationRenderer
 from .info_text_renderer import InfoTextRenderer
-from .tb_status_renderer import TBStatusRenderer
+
 from .plot_area_renderer import PlotAreaRenderer
 
 
@@ -12410,7 +10532,6 @@ __all__ = [
     "ButtonStatusRenderer",
     "NotificationRenderer",
     "InfoTextRenderer",
-    "TBStatusRenderer",
     "PlotAreaRenderer",
 ]
 
@@ -12708,14 +10829,13 @@ File: visualization\__init__.py
 
 
 File: workers\self_play_worker.py
-# File: workers/self_play_worker.py
 import threading
 import time
 import queue
 import traceback
-import numpy as np
 import torch
 from typing import TYPE_CHECKING, List, Tuple, Dict, Any, Optional
+import logging
 
 from environment.game_state import GameState, StateType
 from mcts import MCTS
@@ -12726,17 +10846,14 @@ if TYPE_CHECKING:
     from agent.alphazero_net import AlphaZeroNet
     from stats.aggregator import StatsAggregator
 
-# Raw data stored during the game: (state_features, mcts_policy_target, player_perspective)
 ExperienceTuple = Tuple[StateType, Dict[ActionType, float], int]
-# Data put into the queue: (state_features, mcts_policy_target, final_game_outcome)
-ProcessedExperience = Tuple[StateType, Dict[ActionType, float], float]
+ProcessedExperienceBatch = List[Tuple[StateType, Dict[ActionType, float], float]]
+
+logger = logging.getLogger(__name__)
 
 
 class SelfPlayWorker(threading.Thread):
-    """
-    Worker thread that plays games against itself using MCTS and the current agent
-    to generate training data.
-    """
+    """Plays games using MCTS to generate training data."""
 
     def __init__(
         self,
@@ -12764,8 +10881,8 @@ class SelfPlayWorker(threading.Thread):
         self.device = device
         self.games_per_iteration = games_per_iteration
         self.max_game_steps = max_game_steps if max_game_steps else float("inf")
-
-        print(f"[SelfPlayWorker-{self.worker_id}] Initialized.")
+        self.log_prefix = f"[SelfPlayWorker-{self.worker_id}]"
+        logger.info(f"{self.log_prefix} Initialized.")
 
     def get_init_args(self) -> Dict[str, Any]:
         """Returns arguments needed to re-initialize the thread."""
@@ -12788,131 +10905,152 @@ class SelfPlayWorker(threading.Thread):
     def _get_temperature(self, game_step: int) -> float:
         """Calculates the MCTS temperature based on the game step."""
         if game_step < self.mcts_config.TEMPERATURE_ANNEAL_STEPS:
-            progress = game_step / max(
-                1, self.mcts_config.TEMPERATURE_ANNEAL_STEPS
-            )  # Avoid division by zero
-            temp = (
+            progress = game_step / max(1, self.mcts_config.TEMPERATURE_ANNEAL_STEPS)
+            return (
                 self.mcts_config.TEMPERATURE_INITIAL * (1 - progress)
                 + self.mcts_config.TEMPERATURE_FINAL * progress
             )
-            return temp
-        else:
-            return self.mcts_config.TEMPERATURE_FINAL
+        return self.mcts_config.TEMPERATURE_FINAL
+
+    def _play_one_game(self) -> Optional[ProcessedExperienceBatch]:
+        """Plays a single game and returns the processed experience."""
+        current_game_num = self.stats_aggregator.storage.total_episodes + 1
+        logger.info(f"{self.log_prefix} Starting game {current_game_num}")
+        start_time = time.monotonic()
+        game_data: List[ExperienceTuple] = []
+        game = GameState()
+        current_state_features = game.reset()
+        game_steps = 0
+
+        self.stats_aggregator.record_step(
+            {"current_self_play_game_number": current_game_num}
+        )
+
+        while not game.is_over() and game_steps < self.max_game_steps:
+            if self.stop_event.is_set():
+                return None  # Stop early
+
+            self.stats_aggregator.record_step(
+                {"current_self_play_game_steps": game_steps}
+            )
+
+            mcts_start_time = time.monotonic()
+            self.agent.eval()
+            with torch.no_grad():
+                root_node = self.mcts.run_simulations(
+                    root_state=game, num_simulations=self.mcts_config.NUM_SIMULATIONS
+                )
+            mcts_duration = time.monotonic() - mcts_start_time
+            logger.info(
+                f"{self.log_prefix} Game {current_game_num} Step {game_steps}: MCTS took {mcts_duration:.4f}s"
+            )
+
+            temperature = self._get_temperature(game_steps)
+            policy_target = self.mcts.get_policy_target(root_node, temperature)
+            game_data.append(
+                (current_state_features, policy_target, 1)
+            )  # Player 1 perspective
+
+            action = self.mcts.choose_action(root_node, temperature)
+            step_start_time = time.monotonic()
+            _, done = game.step(action)
+            step_duration = time.monotonic() - step_start_time
+            logger.info(
+                f"{self.log_prefix} Game {current_game_num} Step {game_steps}: Game step took {step_duration:.4f}s"
+            )
+
+            current_state_features = game.get_state()
+            game_steps += 1
+
+        if self.stop_event.is_set():
+            return None
+
+        final_outcome = game.get_outcome()
+        processed_data: ProcessedExperienceBatch = [
+            (state, policy, final_outcome * player)
+            for state, policy, player in game_data
+        ]
+
+        game_duration = time.monotonic() - start_time
+        logger.info(
+            f"{self.log_prefix} Game {current_game_num} finished in {game_duration:.2f}s "
+            f"({game_steps} steps). Outcome: {final_outcome}, Score: {game.game_score}. "
+            f"Queueing {len(processed_data)} experiences."
+        )
+
+        # Record episode stats *after* processing data
+        current_global_step = self.stats_aggregator.storage.current_global_step
+        self.stats_aggregator.record_episode(
+            episode_outcome=final_outcome,
+            episode_length=game_steps,
+            episode_num=current_game_num,
+            global_step=current_global_step,
+            game_score=game.game_score,
+            triangles_cleared=game.triangles_cleared_this_episode,
+            game_state_for_best=game,
+        )
+        return processed_data
 
     def run(self):
         """Main loop for the self-play worker."""
-        print(f"[SelfPlayWorker-{self.worker_id}] Starting run loop.")
-        game_count = 0
+        logger.info(f"{self.log_prefix} Starting run loop.")
         while not self.stop_event.is_set():
             try:
-                start_time = time.time()
-                game_data: List[ExperienceTuple] = []
-                game = GameState()  # The GameState object for the current game
-                current_state = game.reset()
-                game_steps = 0
-
-                while not game.is_over() and game_steps < self.max_game_steps:
-                    if self.stop_event.is_set():
-                        break
-
-                    # Ensure agent is in eval mode for MCTS predictions
-                    self.agent.eval()
-                    with torch.no_grad():
-                        root_node = self.mcts.run_simulations(
-                            root_state=game,
-                            num_simulations=self.mcts_config.NUM_SIMULATIONS,
-                        )
-
-                    temperature = self._get_temperature(game_steps)
-                    policy_target = self.mcts.get_policy_target(root_node, temperature)
-
-                    # Store state *before* action is taken
-                    # Player perspective is always 1 for single-player
-                    game_data.append((current_state, policy_target, 1))
-
-                    action = self.mcts.choose_action(root_node, temperature)
-                    _, done = game.step(action)
-                    current_state = game.get_state()  # Get new state features
-                    game_steps += 1
-
-                if self.stop_event.is_set():
+                processed_data = self._play_one_game()
+                if processed_data is None: 
                     break
-
-                final_outcome = game.get_outcome()  # Get final outcome (-1, 0, or 1)
-                processed_data: List[ProcessedExperience] = []
-                for state_features, policy, player in game_data:
-                    # The outcome is the final game result from the perspective of the player at that state
-                    # In single player, player is always 1, so outcome_for_player = final_outcome
-                    outcome_for_player = final_outcome * player
-                    processed_data.append((state_features, policy, outcome_for_player))
-
                 if processed_data:
                     try:
-                        # Put the list of tuples for the entire game into the queue
+                        q_put_start = time.monotonic()
                         self.experience_queue.put(processed_data, timeout=1.0)
+                        q_put_duration = time.monotonic() - q_put_start
+                        logger.info(
+                            f"{self.log_prefix} Added game data to queue (qsize: {self.experience_queue.qsize()}) "
+                            f"in {q_put_duration:.4f}s."
+                        )
                     except queue.Full:
-                        print(
-                            f"[SelfPlayWorker-{self.worker_id}] Warning: Experience queue full. Discarding game data."
+                        logger.warning(
+                            f"{self.log_prefix} Experience queue full. Discarding game data."
                         )
-                        # Optionally sleep briefly to allow training worker to catch up
-                        time.sleep(0.1)
+                        time.sleep(0.01)  
                     except Exception as q_err:
-                        print(
-                            f"[SelfPlayWorker-{self.worker_id}] Error putting data in queue: {q_err}"
+                        logger.error(
+                            f"{self.log_prefix} Error putting data in queue: {q_err}"
                         )
-
-                game_duration = time.time() - start_time
-                # Pass the current global step from the aggregator for accurate best score tracking
-                current_global_step = self.stats_aggregator.storage.current_global_step
-                # Pass the completed game object to record_episode
-                self.stats_aggregator.record_episode(
-                    episode_score=final_outcome,  # Use the final outcome
-                    episode_length=game_steps,
-                    episode_num=self.stats_aggregator.storage.total_episodes + 1,
-                    global_step=current_global_step,
-                    game_score=game.game_score,
-                    triangles_cleared=game.triangles_cleared_this_episode,
-                    game_state_for_best=game,  # Pass the GameState object
-                )
-                game_count += 1
-
             except Exception as e:
-                print(
-                    f"[SelfPlayWorker-{self.worker_id}] CRITICAL ERROR in run loop: {e}"
+                logger.critical(
+                    f"{self.log_prefix} CRITICAL ERROR in run loop: {e}", exc_info=True
                 )
                 traceback.print_exc()
-                time.sleep(5)  # Avoid rapid error loops
 
-        print(f"[SelfPlayWorker-{self.worker_id}] Run loop finished.")
+        logger.info(f"{self.log_prefix} Run loop finished.")
 
 
 File: workers\training_worker.py
-# File: workers/training_worker.py
 import threading
 import time
 import queue
-import traceback
 import numpy as np
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from typing import TYPE_CHECKING, List, Tuple, Dict, Any, Optional
+import logging
 
 from config import TrainConfig
 from utils.types import StateType, ActionType
-from utils.helpers import ensure_numpy
 
 if TYPE_CHECKING:
     from agent.alphazero_net import AlphaZeroNet
     from stats.aggregator import StatsAggregator
 
 ExperienceData = Tuple[StateType, Dict[ActionType, float], float]
+ProcessedExperienceBatch = List[ExperienceData]
+logger = logging.getLogger(__name__)
 
 
 class TrainingWorker(threading.Thread):
-    """
-    Worker thread that samples experience from a queue and trains the neural network.
-    """
+    """Samples experience and trains the neural network."""
 
     def __init__(
         self,
@@ -12932,13 +11070,11 @@ class TrainingWorker(threading.Thread):
         self.stop_event = stop_event
         self.train_config = train_config
         self.device = device
-
-        self.steps_done = (
-            0  # Internal counter for training steps performed by this worker
-        )
-        print(f"[TrainingWorker] Initialized. Device: {self.device}")
-        print(
-            f"[TrainingWorker] Config: Batch={self.train_config.BATCH_SIZE}, LR={self.train_config.LEARNING_RATE}, MinBuffer={self.train_config.MIN_BUFFER_SIZE_TO_TRAIN}"
+        self.log_prefix = "[TrainingWorker]"
+        self.steps_done = 0
+        logger.info(f"{self.log_prefix} Initialized. Device: {self.device}")
+        logger.info(
+            f"{self.log_prefix} Config: Batch={self.train_config.BATCH_SIZE}, LR={self.train_config.LEARNING_RATE}, MinBuffer={self.train_config.MIN_BUFFER_SIZE_TO_TRAIN}"
         )
 
     def get_init_args(self) -> Dict[str, Any]:
@@ -12954,144 +11090,224 @@ class TrainingWorker(threading.Thread):
         }
 
     def _prepare_batch(
-        self, batch_data: List[ExperienceData]
+        self, batch_data: ProcessedExperienceBatch
     ) -> Optional[Tuple[StateType, torch.Tensor, torch.Tensor]]:
         """Converts a list of experience tuples into batched tensors."""
         try:
-            states = {key: [] for key in batch_data[0][0].keys()}
-            policy_targets = []
-            value_targets = []
+            if (
+                not batch_data
+                or not isinstance(batch_data[0], tuple)
+                or len(batch_data[0]) != 3
+            ):
+                return None
+            if not isinstance(batch_data[0][0], dict):
+                return None
 
-            for state_dict, policy_dict, outcome in batch_data:
+            states = {key: [] for key in batch_data[0][0].keys()}
+            policy_targets, value_targets = [], []
+            valid_items = 0
+            for item in batch_data:
+                if not isinstance(item, tuple) or len(item) != 3:
+                    continue
+                state_dict, policy_dict, outcome = item
+                if not isinstance(state_dict, dict) or not isinstance(
+                    policy_dict, dict
+                ):
+                    continue
+                if not (isinstance(outcome, (float, int)) and np.isfinite(outcome)):
+                    continue
+
+                temp_state, valid_state = {}, True
                 for key, value in state_dict.items():
-                    states[key].append(value)
+                    if key in states:
+                        temp_state[key] = value
+                    else:
+                        valid_state = False
+                        break
+                if not valid_state:
+                    continue
+
                 policy_array = np.zeros(self.agent.env_cfg.ACTION_DIM, dtype=np.float32)
-                policy_sum = sum(policy_dict.values())
+                policy_sum = sum(
+                    p
+                    for p in policy_dict.values()
+                    if isinstance(p, (float, int)) and np.isfinite(p)
+                )
                 if policy_sum > 1e-6:
                     for action, prob in policy_dict.items():
-                        if 0 <= action < self.agent.env_cfg.ACTION_DIM:
+                        if (
+                            isinstance(action, int)
+                            and 0 <= action < self.agent.env_cfg.ACTION_DIM
+                            and isinstance(prob, (float, int))
+                            and np.isfinite(prob)
+                        ):
                             policy_array[action] = prob / policy_sum
+
+                for key in states.keys():
+                    states[key].append(temp_state[key])
                 policy_targets.append(policy_array)
                 value_targets.append(outcome)
+                valid_items += 1
+
+            if valid_items == 0:
+                return None
 
             batched_states = {
-                key: torch.from_numpy(np.stack(value_list)).to(self.device)
-                for key, value_list in states.items()
+                k: torch.from_numpy(np.stack(v)).to(self.device)
+                for k, v in states.items()
             }
-            batched_policy_targets = torch.from_numpy(np.stack(policy_targets)).to(
-                self.device
-            )
-            batched_value_targets = (
+            batched_policy = torch.from_numpy(np.stack(policy_targets)).to(self.device)
+            batched_value = (
                 torch.tensor(value_targets, dtype=torch.float32)
                 .unsqueeze(1)
                 .to(self.device)
             )
 
-            return batched_states, batched_policy_targets, batched_value_targets
-
+            if (
+                batched_policy.shape[0] != valid_items
+                or batched_value.shape[0] != valid_items
+            ):
+                return None
+            return batched_states, batched_policy, batched_value
         except Exception as e:
-            print(f"[TrainingWorker] Error preparing batch: {e}")
-            traceback.print_exc()
+            logger.error(f"{self.log_prefix} Error preparing batch: {e}", exc_info=True)
             return None
+
+    def _perform_training_step(
+        self, batch_data: ProcessedExperienceBatch
+    ) -> Optional[Dict[str, float]]:
+        """Performs a single training step."""
+        prep_start = time.monotonic()
+        prepared_batch = self._prepare_batch(batch_data)
+        prep_duration = time.monotonic() - prep_start
+        if prepared_batch is None:
+            logger.warning(
+                f"{self.log_prefix} Failed to prepare batch (took {prep_duration:.4f}s). Skipping step."
+            )
+            return None
+        batch_states, batch_policy_targets, batch_value_targets = prepared_batch
+        logger.info(f"{self.log_prefix} Batch preparation took {prep_duration:.4f}s.")
+
+        try:
+            step_start_time = time.monotonic()
+            self.agent.train()
+            self.optimizer.zero_grad()
+            policy_logits, value_preds = self.agent(batch_states)
+
+            if (
+                policy_logits.shape[0] != batch_policy_targets.shape[0]
+                or value_preds.shape[0] != batch_value_targets.shape[0]
+            ):
+                logger.error(
+                    f"{self.log_prefix} Batch size mismatch after prep! Skipping."
+                )
+                return None
+
+            log_policy_preds = F.log_softmax(policy_logits, dim=1)
+            policy_loss = -torch.sum(
+                batch_policy_targets * log_policy_preds, dim=1
+            ).mean()
+            value_loss = F.mse_loss(value_preds, batch_value_targets)
+            total_loss = (
+                self.train_config.POLICY_LOSS_WEIGHT * policy_loss
+                + self.train_config.VALUE_LOSS_WEIGHT * value_loss
+            )
+
+            total_loss.backward()
+            self.optimizer.step()
+            step_duration = time.monotonic() - step_start_time
+            logger.info(f"{self.log_prefix} Training step took {step_duration:.4f}s.")
+
+            return {
+                "policy_loss": policy_loss.item(),
+                "value_loss": value_loss.item(),
+                "update_time": step_duration,
+            }
+        except Exception as e:
+            logger.critical(
+                f"{self.log_prefix} CRITICAL ERROR during training step {self.steps_done}: {e}",
+                exc_info=True,
+            )
+            return None  # Indicate error
 
     def run(self):
         """Main training loop."""
-        print(f"[TrainingWorker] Starting run loop.")
-        last_log_time = time.time()
-        # Initialize internal step counter from aggregator's global step
+        logger.info(f"{self.log_prefix} Starting run loop.")
+        last_buffer_update_time = 0
+        buffer_update_interval = 1.0
         self.steps_done = self.stats_aggregator.storage.current_global_step
 
         while not self.stop_event.is_set():
             buffer_size = self.experience_queue.qsize()
 
             if buffer_size < self.train_config.MIN_BUFFER_SIZE_TO_TRAIN:
-                time.sleep(1.0)
+                if time.time() - last_buffer_update_time > buffer_update_interval:
+                    self.stats_aggregator.record_step({"buffer_size": buffer_size})
+                    last_buffer_update_time = time.time()
+                time.sleep(0.05)
                 continue
 
-            steps_this_iter = 0
-            iter_policy_loss = 0.0
-            iter_value_loss = 0.0
+            logger.info(
+                f"{self.log_prefix} Starting training iteration. Buffer size: {buffer_size}"
+            )
+            steps_this_iter, iter_policy_loss, iter_value_loss = 0, 0.0, 0.0
+            iter_start_time = time.monotonic()
 
             for _ in range(self.train_config.NUM_TRAINING_STEPS_PER_ITER):
                 if self.stop_event.is_set():
                     break
-
-                batch_data: List[ExperienceData] = []
+                batch_data_list: List[ExperienceData] = []
                 try:
-                    actual_batch_size = min(
-                        self.train_config.BATCH_SIZE, self.experience_queue.qsize()
+                    q_get_start = time.monotonic()
+                    for _ in range(self.train_config.BATCH_SIZE):
+                        batch_data_list.append(self.experience_queue.get(timeout=0.5))
+                    q_get_duration = time.monotonic() - q_get_start
+                    logger.info(
+                        f"{self.log_prefix} Queue get ({len(batch_data_list)} items) took {q_get_duration:.4f}s."
                     )
-                    if actual_batch_size < self.train_config.BATCH_SIZE // 2:
-                        break
-
-                    for _ in range(actual_batch_size):
-                        experience = self.experience_queue.get(timeout=0.1)
-                        batch_data.append(experience)
                 except queue.Empty:
+                    logger.info(f"{self.log_prefix} Queue empty during batch fetch.")
                     break
                 except Exception as e:
-                    print(f"[TrainingWorker] Error getting data from queue: {e}")
+                    logger.error(
+                        f"{self.log_prefix} Error getting data from queue: {e}",
+                        exc_info=True,
+                    )
                     break
 
-                if not batch_data:
+                if not batch_data_list:
                     continue
 
-                prepared_batch = self._prepare_batch(batch_data)
-                if prepared_batch is None:
-                    continue
+                step_result = self._perform_training_step(batch_data_list)
+                if step_result is None:
+                    break  # Error occurred or batch failed
 
-                batch_states, batch_policy_targets, batch_value_targets = prepared_batch
+                self.steps_done += 1
+                steps_this_iter += 1
+                iter_policy_loss += step_result["policy_loss"]
+                iter_value_loss += step_result["value_loss"]
 
-                try:
-                    start_step_time = time.time()
-                    self.agent.train()
-                    self.optimizer.zero_grad()
+                current_lr = self.optimizer.param_groups[0]["lr"]
+                step_stats = {
+                    "global_step": self.steps_done,
+                    "lr": current_lr,
+                    "buffer_size": self.experience_queue.qsize(),
+                    "training_steps_performed": self.steps_done,
+                    **step_result,  # Add losses and update_time
+                }
+                self.stats_aggregator.record_step(step_stats)
 
-                    policy_logits, value_preds = self.agent(batch_states)
-
-                    log_policy_preds = F.log_softmax(policy_logits, dim=1)
-                    policy_loss = -torch.sum(
-                        batch_policy_targets * log_policy_preds, dim=1
-                    ).mean()
-                    value_loss = F.mse_loss(value_preds, batch_value_targets)
-
-                    total_loss = (
-                        self.train_config.POLICY_LOSS_WEIGHT * policy_loss
-                        + self.train_config.VALUE_LOSS_WEIGHT * value_loss
-                    )
-
-                    total_loss.backward()
-                    self.optimizer.step()
-
-                    self.steps_done += 1  # Increment internal counter
-                    steps_this_iter += 1
-                    iter_policy_loss += policy_loss.item()
-                    iter_value_loss += value_loss.item()
-                    step_duration = time.time() - start_step_time
-
-                    current_lr = self.optimizer.param_groups[0]["lr"]
-                    step_stats = {
-                        "global_step": self.steps_done,  # Report the incremented step count
-                        "policy_loss": policy_loss.item(),
-                        "value_loss": value_loss.item(),
-                        "lr": current_lr,
-                        "buffer_size": self.experience_queue.qsize(),
-                        "update_time": step_duration,
-                    }
-                    # This call will update the aggregator's internal global_step
-                    self.stats_aggregator.record_step(step_stats)
-
-                except Exception as e:
-                    print(
-                        f"[TrainingWorker] CRITICAL ERROR during training step {self.steps_done}: {e}"
-                    )
-                    traceback.print_exc()
-                    time.sleep(5)
-                    break
-
+            iter_duration = time.monotonic() - iter_start_time
+            if steps_this_iter > 0:
+                avg_p = iter_policy_loss / steps_this_iter
+                avg_v = iter_value_loss / steps_this_iter
+                logger.info(
+                    f"{self.log_prefix} Iteration complete. Steps: {steps_this_iter}, "
+                    f"Duration: {iter_duration:.2f}s, Avg P.Loss: {avg_p:.4f}, Avg V.Loss: {avg_v:.4f}"
+                )
             time.sleep(0.01)
 
-        print(f"[TrainingWorker] Run loop finished.")
+        logger.info(f"{self.log_prefix} Run loop finished.")
 
 
 File: workers\__init__.py

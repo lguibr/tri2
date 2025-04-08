@@ -10,7 +10,7 @@ from .core import (
     TrainConfig,
     ModelConfig,
     StatsConfig,
-    TensorBoardConfig,
+    # TensorBoardConfig removed
     DemoConfig,
     TransformerConfig,
     MCTSConfig,
@@ -84,7 +84,7 @@ __all__ = [
     "TrainConfig",
     "ModelConfig",
     "StatsConfig",
-    "TensorBoardConfig",
+    # "TensorBoardConfig", # Removed
     "DemoConfig",
     "TransformerConfig",
     "MCTSConfig",

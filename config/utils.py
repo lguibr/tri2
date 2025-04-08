@@ -1,4 +1,3 @@
-# File: config/utils.py
 import torch
 from typing import Dict, Any
 from .core import (
@@ -8,13 +7,11 @@ from .core import (
     TrainConfig,
     ModelConfig,
     StatsConfig,
-    TensorBoardConfig,
     DemoConfig,
     TransformerConfig,
-    MCTSConfig,  # Import MCTSConfig from core
+    MCTSConfig,  
 )
 
-# Import DEVICE and RANDOM_SEED directly, use get_run_id() for the run ID
 from .general import DEVICE, RANDOM_SEED, get_run_id
 
 
@@ -55,7 +52,7 @@ def get_config_dict() -> Dict[str, Any]:
     all_configs.update(flatten_class(TrainConfig, "Train."))
     all_configs.update(flatten_class(ModelConfig.Network, "Model.Net."))
     all_configs.update(flatten_class(StatsConfig, "Stats."))
-    all_configs.update(flatten_class(TensorBoardConfig, "TB."))
+    # all_configs.update(flatten_class(TensorBoardConfig, "TB.")) # Removed
     all_configs.update(flatten_class(DemoConfig, "Demo."))
     all_configs.update(flatten_class(TransformerConfig, "Transformer."))
     all_configs.update(flatten_class(MCTSConfig, "MCTS."))  # Flatten MCTSConfig

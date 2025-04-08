@@ -1,5 +1,3 @@
-# File: stats/stats_recorder.py
-# File: stats/stats_recorder.py
 import time
 from abc import ABC, abstractmethod
 from collections import deque
@@ -11,7 +9,7 @@ from typing import (
     Optional,
     Union,
     TYPE_CHECKING,
-)  # Added TYPE_CHECKING
+)
 import numpy as np
 import torch
 
@@ -31,7 +29,7 @@ class StatsRecorderBase(ABC):
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,  # Added optional GameState
+        game_state_for_best: Optional["GameState"] = None,
     ):
         """Record stats for a completed episode."""
         pass

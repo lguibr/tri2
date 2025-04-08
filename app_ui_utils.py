@@ -1,5 +1,3 @@
-# File: app_ui_utils.py
-import pygame
 from typing import TYPE_CHECKING, Tuple, Optional
 
 if TYPE_CHECKING:

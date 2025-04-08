@@ -1,4 +1,3 @@
-# File: config/core.py
 import torch
 from typing import List, Tuple, Optional
 
@@ -42,18 +41,24 @@ class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
     PUCT_C: float = 1.5
-    NUM_SIMULATIONS: int = 100
+    # --- Increase Simulations for Learning ---
+    NUM_SIMULATIONS: int = 200  # Increased from 15 (Adjust based on performance)
+    # --- Original Value: 100, Previous: 50, 30, 15 ---
     TEMPERATURE_INITIAL: float = 1.0
     TEMPERATURE_FINAL: float = 0.01
-    TEMPERATURE_ANNEAL_STEPS: int = 30
+    TEMPERATURE_ANNEAL_STEPS: int = (
+        30  # Keep relatively low for faster convergence to greedy play
+    )
     DIRICHLET_ALPHA: float = 0.3
     DIRICHLET_EPSILON: float = 0.25
     MAX_SEARCH_DEPTH: int = 100
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 16
-    FPS = 60
+    # --- Render multiple envs again when idle ---
+    NUM_ENVS_TO_RENDER = 8  # Show first 8 envs when run is stopped
+    # --- Original Value: 16, Changed to 0 previously ---
+    FPS = 0  # Keep FPS high for responsiveness, plotting is throttled separately
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
@@ -79,7 +84,6 @@ class VisConfig:
     LINE_CLEAR_FLASH_COLOR = LINE_CLEAR_FLASH_COLOR
     LINE_CLEAR_HIGHLIGHT_COLOR = LINE_CLEAR_HIGHLIGHT_COLOR
     GAME_OVER_FLASH_COLOR = GAME_OVER_FLASH_COLOR
-    # MCTS Colors
     MCTS_NODE_WIN_COLOR = MCTS_NODE_WIN_COLOR
     MCTS_NODE_LOSS_COLOR = MCTS_NODE_LOSS_COLOR
     MCTS_NODE_NEUTRAL_COLOR = MCTS_NODE_NEUTRAL_COLOR
@@ -97,7 +101,6 @@ class VisConfig:
 
 
 class EnvConfig:
-    NUM_ENVS = 1  # AlphaZero typically uses 1 env for self-play generation
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2
@@ -142,24 +145,37 @@ class TransformerConfig:
 class TrainConfig:
     """Configuration parameters for the Training Worker."""
 
-    CHECKPOINT_SAVE_FREQ = 50  # Save every N training steps/epochs
+    CHECKPOINT_SAVE_FREQ = 50  
     LOAD_CHECKPOINT_PATH: Optional[str] = None
 
-    # --- Training Loop Parameters ---
-    BATCH_SIZE: int = 64
-    LEARNING_RATE: float = 1e-4
-    WEIGHT_DECAY: float = 1e-5  # L2 Regularization
-    NUM_TRAINING_STEPS_PER_ITER: int = (
-        100  # How many optimizer steps per training iteration
-    )
-    MIN_BUFFER_SIZE_TO_TRAIN: int = (
-        1000  # Minimum experiences in buffer before training starts
-    )
-    BUFFER_CAPACITY: int = 50_000  # Max size of the experience replay buffer
+    # --- Worker Configuration ---
+    # --- Keep low for now, increase if GPU is underutilized ---
+    NUM_SELF_PLAY_WORKERS: int = 128
 
-    # --- Loss Weights (Optional) ---
+    # --- Training Loop Parameters (Adjusted for LEARNING) ---
+    BATCH_SIZE: int = 128  # Increased batch size
+    LEARNING_RATE: float = 1e-4  # Keep initial LR, may need tuning
+    WEIGHT_DECAY: float = 1e-5
+    NUM_TRAINING_STEPS_PER_ITER: int = 100  # More training steps per iteration
+    # --- Increase Buffer Sizes Significantly ---
+    MIN_BUFFER_SIZE_TO_TRAIN: int = (
+        5000  # Start training only after 5k experiences (Adjust as needed)
+    )
+    BUFFER_CAPACITY: int = 200_000  # Store up to 20k experiences (Adjust as needed)
+    # --- Original Values: Min=1000, Cap=50000 ---
     POLICY_LOSS_WEIGHT: float = 1.0
     VALUE_LOSS_WEIGHT: float = 1.0
+
+    # --- Learning Rate Scheduler ---
+    USE_LR_SCHEDULER: bool = True
+    # Cosine Annealing Scheduler Parameters
+    SCHEDULER_TYPE: str = (
+        "CosineAnnealingLR"  # Or "OneCycleLR", "ReduceLROnPlateau" etc.
+    )
+    SCHEDULER_T_MAX: int = (
+        1_000_000  # Steps for half a cycle (e.g., total expected steps / 2) - ADJUST THIS!
+    )
+    SCHEDULER_ETA_MIN: float = 1e-6  # Minimum learning rate
 
 
 class ModelConfig:
@@ -168,17 +184,14 @@ class ModelConfig:
         HEIGHT = _env_cfg_instance.ROWS
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
-
         CONV_CHANNELS = [64, 128, 256]
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
-
         SHAPE_FEATURE_MLP_DIMS = [128, 128]
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
-
         COMBINED_FC_DIMS = [1024, 256]
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
@@ -186,17 +199,9 @@ class ModelConfig:
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [25, 50, 100]
-    CONSOLE_LOG_FREQ = 1  # Log every N training steps or episodes
-    PLOT_DATA_WINDOW = 100_000
-
-
-class TensorBoardConfig:
-    LOG_HISTOGRAMS = False
-    HISTOGRAM_LOG_FREQ = 20  # Log every N training steps
-    LOG_IMAGES = False
-    IMAGE_LOG_FREQ = 20  # Log every N training steps
-    LOG_DIR: Optional[str] = None
+    STATS_AVG_WINDOW: List[int] = [25, 50, 100]  # Keep multiple windows for averaging
+    CONSOLE_LOG_FREQ = 1  # Log every update/episode completion
+    PLOT_DATA_WINDOW = 100_000  # Keep large plot window
 
 
 class DemoConfig:

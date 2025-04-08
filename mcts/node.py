@@ -1,4 +1,3 @@
-# File: mcts/node.py
 import math
 import numpy as np
 from typing import Dict, Optional, TYPE_CHECKING, Any, List

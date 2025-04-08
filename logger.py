@@ -1,6 +1,5 @@
 import os
-import sys
-from typing import TextIO
+from typing import TextIO, Optional
 
 
 class TeeLogger:

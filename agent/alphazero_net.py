@@ -1,11 +1,10 @@
-# File: agent/alphazero_net.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Tuple, Optional, Any
 
 from config import ModelConfig, EnvConfig
-from utils.types import StateType, ActionType  # Corrected import
+from utils.types import StateType, ActionType
 
 
 class ResidualBlock(nn.Module):

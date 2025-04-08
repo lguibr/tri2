@@ -1,57 +1,69 @@
-# File: stats/aggregator_storage.py
-# File: stats/aggregator_storage.py
 from collections import deque
-from typing import Deque, Dict, Any, List, Optional  # Added Optional
+from typing import Deque, Dict, Any, List, Optional
 import time
 import numpy as np
 
 
 class AggregatorStorage:
-    """Holds the data structures (deques and scalar values) for StatsAggregator."""
+    """Holds the data structures (deques and scalar values) for StatsAggregator.
+    Refactored for AlphaZero focus. Resource usage removed."""
 
     def __init__(self, plot_window: int):
         self.plot_window = plot_window
 
-        # --- Deques for Plotting ---
+        # --- Deques for Plotting (AlphaZero Relevant) ---
+        # Stores recent values for plotting trends. Max length defined by plot_window.
         self.policy_losses: Deque[float] = deque(maxlen=plot_window)
         self.value_losses: Deque[float] = deque(maxlen=plot_window)
-        self.avg_max_qs: Deque[float] = deque(maxlen=plot_window)
-        self.episode_scores: Deque[float] = deque(
+        self.episode_outcomes: Deque[float] = deque(
             maxlen=plot_window
-        )  # Game outcome (-1, 0, 1)
-        self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
-        self.game_scores: Deque[int] = deque(maxlen=plot_window)
+        )  # -1 (loss), 0 (draw), 1 (win)
+        self.episode_lengths: Deque[int] = deque(
+            maxlen=plot_window
+        )  # Steps per episode
+        self.game_scores: Deque[int] = deque(
+            maxlen=plot_window
+        )  # Raw game score per episode
         self.episode_triangles_cleared: Deque[int] = deque(maxlen=plot_window)
-        self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
-        self.beta_values: Deque[float] = deque(maxlen=plot_window)
-        # self.best_rl_score_history: Deque[float] = deque(maxlen=plot_window) # Removed RL score history
-        self.best_game_score_history: Deque[int] = deque(maxlen=plot_window)
-        self.lr_values: Deque[float] = deque(maxlen=plot_window)
-        self.epsilon_values: Deque[float] = deque(maxlen=plot_window)
-        self.cpu_usage: Deque[float] = deque(maxlen=plot_window)
-        self.memory_usage: Deque[float] = deque(maxlen=plot_window)
-        self.gpu_memory_usage_percent: Deque[float] = deque(maxlen=plot_window)
+        self.buffer_sizes: Deque[int] = deque(
+            maxlen=plot_window
+        )  # Replay buffer size over time
+        self.best_game_score_history: Deque[int] = deque(
+            maxlen=plot_window
+        )  # Tracks the best score found so far
+        self.lr_values: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Learning rate over time
 
         # --- Scalar State Variables ---
-        self.total_episodes = 0
-        self.total_triangles_cleared = 0
-        self.current_epsilon: float = 0.0
-        self.current_beta: float = 0.0
-        self.current_buffer_size: int = 0
-        self.current_global_step: int = 0
-        self.current_lr: float = 0.0
-        self.start_time: float = time.time()
-        self.training_target_step: int = 0
-        self.current_cpu_usage: float = 0.0
-        self.current_memory_usage: float = 0.0
-        self.current_gpu_memory_usage_percent: float = 0.0
+        # Tracks overall progress and current state.
+        self.total_episodes: int = 0  # Total completed episodes since start/load
+        self.total_triangles_cleared: int = 0  # Cumulative triangles cleared
+        self.current_buffer_size: int = 0  # Latest known buffer size
+        self.current_global_step: int = 0  # Tracks NN training steps primarily
+        self.current_lr: float = 0.0  # Current learning rate
+        self.start_time: float = time.time()  # Timestamp of aggregator creation/load
+        self.training_target_step: int = (
+            0  # Target training step for completion (if any)
+        )
 
-        # --- Best Value Tracking ---
-        self.best_score: float = -float(
-            "inf"
-        )  # Best game outcome (closer to 1 is better)
-        self.previous_best_score: float = -float("inf")
-        self.best_score_step: int = 0
+        # --- Intermediate Progress Tracking ---
+        # Useful for detailed status updates during runs.
+        self.current_self_play_game_number: int = (
+            0  # Track which game is being played by workers
+        )
+        self.current_self_play_game_steps: int = (
+            0  # Steps within the current self-play game
+        )
+        self.training_steps_performed: int = (
+            0  # Total training steps executed by training worker
+        )
+
+        # --- Best Value Tracking (AlphaZero Relevant) ---
+        # Stores the best values achieved and the step they occurred at.
+        self.best_outcome: float = -float("inf")
+        self.previous_best_outcome: float = -float("inf")
+        self.best_outcome_step: int = 0
         self.best_game_score: float = -float("inf")
         self.previous_best_game_score: float = -float("inf")
         self.best_game_score_step: int = 0
@@ -63,9 +75,8 @@ class AggregatorStorage:
         self.best_policy_loss_step: int = 0
 
         # --- Best Game State Data ---
-        self.best_game_state_data: Optional[Dict[str, Any]] = (
-            None  # Store grid data for best game score
-        )
+        # Stores data needed to visualize the best game state found.
+        self.best_game_state_data: Optional[Dict[str, Any]] = None
 
     def get_deque(self, name: str) -> Deque:
         """Safely gets a deque attribute."""
@@ -76,20 +87,13 @@ class AggregatorStorage:
         deque_names = [
             "policy_losses",
             "value_losses",
-            # "avg_max_qs", # Removed PPO/DQN specific
-            "episode_scores",  # Game outcome
+            "episode_outcomes",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
             "buffer_sizes",
-            # "beta_values", # Removed PER specific
-            # "best_rl_score_history", # Removed RL score
             "best_game_score_history",
             "lr_values",
-            # "epsilon_values", # Removed Epsilon-greedy specific
-            "cpu_usage",
-            "memory_usage",
-            "gpu_memory_usage_percent",
         ]
         return {
             name: self.get_deque(name).copy()
@@ -103,23 +107,16 @@ class AggregatorStorage:
         deque_names = [
             "policy_losses",
             "value_losses",
-            "avg_max_qs",
-            "episode_scores",
+            "episode_outcomes",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
             "buffer_sizes",
-            "beta_values",  # "best_rl_score_history",
             "best_game_score_history",
             "lr_values",
-            "epsilon_values",
-            "cpu_usage",
-            "memory_usage",
-            "gpu_memory_usage_percent",
         ]
         for name in deque_names:
             if hasattr(self, name):
-                # Ensure deque exists before accessing
                 deque_instance = getattr(self, name, None)
                 if deque_instance is not None:
                     state[name] = list(deque_instance)
@@ -127,24 +124,22 @@ class AggregatorStorage:
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
-            "current_epsilon",
-            "current_beta",
             "current_buffer_size",
             "current_global_step",
             "current_lr",
             "start_time",
             "training_target_step",
-            "current_cpu_usage",
-            "current_memory_usage",
-            "current_gpu_memory_usage_percent",
+            "current_self_play_game_number",
+            "current_self_play_game_steps",
+            "training_steps_performed",
         ]
         for key in scalar_keys:
-            state[key] = getattr(self, key, 0)  # Use default 0 if missing
+            state[key] = getattr(self, key, 0)
 
         best_value_keys = [
-            "best_score",
-            "previous_best_score",
-            "best_score_step",
+            "best_outcome",
+            "previous_best_outcome",
+            "best_outcome_step",
             "best_game_score",
             "previous_best_game_score",
             "best_game_score_step",
@@ -156,94 +151,75 @@ class AggregatorStorage:
             "best_policy_loss_step",
         ]
         for key in best_value_keys:
-            # Provide appropriate defaults for inf/-inf
-            default = 0
-            if "loss" in key:
-                default = float("inf")
-            elif "score" in key:
-                default = -float("inf")
+            default = (
+                0
+                if "step" in key
+                else (float("inf") if "loss" in key else -float("inf"))
+            )
             state[key] = getattr(self, key, default)
 
-        # Save best game state data
-        state["best_game_state_data"] = self.best_game_state_data
-
+        if self.best_game_state_data:
+            serializable_data = {
+                k: v.tolist() if isinstance(v, np.ndarray) else v
+                for k, v in self.best_game_state_data.items()
+            }
+            state["best_game_state_data"] = serializable_data
+        else:
+            state["best_game_state_data"] = None
         return state
 
     def load_state_dict(self, state_dict: Dict[str, Any], plot_window: int):
         """Loads the state from a dictionary."""
         self.plot_window = plot_window
-
         deque_names = [
             "policy_losses",
             "value_losses",
-            "avg_max_qs",
-            "episode_scores",
+            "episode_outcomes",
             "episode_lengths",
             "game_scores",
             "episode_triangles_cleared",
             "buffer_sizes",
-            "beta_values",  # "best_rl_score_history",
             "best_game_score_history",
             "lr_values",
-            "epsilon_values",
-            "cpu_usage",
-            "memory_usage",
-            "gpu_memory_usage_percent",
         ]
         for key in deque_names:
-            data_to_load = state_dict.get(key)
-            if data_to_load is not None:
-                try:
-                    if isinstance(data_to_load, (list, tuple)):
-                        setattr(self, key, deque(data_to_load, maxlen=self.plot_window))
-                    else:
-                        print(
-                            f"  -> Warning: Invalid type for deque '{key}'. Initializing empty."
-                        )
-                        setattr(self, key, deque(maxlen=self.plot_window))
-                except Exception as e:
-                    print(f"  -> Error loading deque '{key}': {e}. Initializing empty.")
-                    setattr(self, key, deque(maxlen=self.plot_window))
+            data = state_dict.get(key)
+            if isinstance(data, (list, tuple)):
+                setattr(self, key, deque(data, maxlen=self.plot_window))
             else:
-                # Initialize deque if key is missing in saved state
                 setattr(self, key, deque(maxlen=self.plot_window))
 
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
-            "current_epsilon",
-            "current_beta",
             "current_buffer_size",
             "current_global_step",
             "current_lr",
             "start_time",
             "training_target_step",
-            "current_cpu_usage",
-            "current_memory_usage",
-            "current_gpu_memory_usage_percent",
+            "current_self_play_game_number",
+            "current_self_play_game_steps",
+            "training_steps_performed",
         ]
-        default_values = {
+        defaults = {
             "start_time": time.time(),
             "training_target_step": 0,
             "current_global_step": 0,
             "total_episodes": 0,
             "total_triangles_cleared": 0,
-            "current_epsilon": 0.0,
-            "current_beta": 0.0,
             "current_buffer_size": 0,
             "current_lr": 0.0,
-            "current_cpu_usage": 0.0,
-            "current_memory_usage": 0.0,
-            "current_gpu_memory_usage_percent": 0.0,
+            "current_self_play_game_number": 0,
+            "current_self_play_game_steps": 0,
+            "training_steps_performed": 0,
         }
         for key in scalar_keys:
-            value_to_load = state_dict.get(key, default_values.get(key))
-            setattr(self, key, value_to_load)
+            setattr(self, key, state_dict.get(key, defaults.get(key)))
 
         best_value_keys = [
-            "best_score",
-            "previous_best_score",
-            "best_score_step",
+            "best_outcome",
+            "previous_best_outcome",
+            "best_outcome_step",
             "best_game_score",
             "previous_best_game_score",
             "best_game_score_step",
@@ -254,38 +230,48 @@ class AggregatorStorage:
             "previous_best_policy_loss",
             "best_policy_loss_step",
         ]
-        default_best = {
-            "best_score": -float("inf"),
-            "previous_best_score": -float("inf"),
+        best_defaults = {
+            "best_outcome": -float("inf"),
+            "previous_best_outcome": -float("inf"),
             "best_game_score": -float("inf"),
             "previous_best_game_score": -float("inf"),
             "best_value_loss": float("inf"),
             "previous_best_value_loss": float("inf"),
             "best_policy_loss": float("inf"),
             "previous_best_policy_loss": float("inf"),
-            "best_score_step": 0,
+            "best_outcome_step": 0,
             "best_game_score_step": 0,
             "best_value_loss_step": 0,
             "best_policy_loss_step": 0,
         }
         for key in best_value_keys:
-            setattr(self, key, state_dict.get(key, default_best.get(key)))
+            setattr(self, key, state_dict.get(key, best_defaults.get(key)))
 
-        # Load best game state data
-        self.best_game_state_data = state_dict.get("best_game_state_data", None)
-
-        # Ensure critical attributes exist after loading
-        if not hasattr(self, "current_global_step"):
-            self.current_global_step = 0
-        if not hasattr(self, "training_target_step"):
-            self.training_target_step = 0
-        if not hasattr(self, "best_policy_loss"):
-            self.best_policy_loss = float("inf")
-        if not hasattr(self, "previous_best_policy_loss"):
-            self.previous_best_policy_loss = float("inf")
-        if not hasattr(self, "best_policy_loss_step"):
-            self.best_policy_loss_step = 0
-        if not hasattr(self, "best_game_score"):
-            self.best_game_score = -float("inf")
-        if not hasattr(self, "best_game_state_data"):
+        loaded_best_data = state_dict.get("best_game_state_data")
+        if loaded_best_data:
+            try:
+                self.best_game_state_data = {
+                    k: (
+                        np.array(v)
+                        if isinstance(v, list) and v and isinstance(v[0], list)
+                        else v
+                    )
+                    for k, v in loaded_best_data.items()
+                }
+            except Exception as e:
+                print(f"Error converting loaded best_game_state_data: {e}")
+                self.best_game_state_data = None
+        else:
             self.best_game_state_data = None
+
+        # Ensure critical attributes exist
+        for attr, default in [
+            ("current_global_step", 0),
+            ("best_game_score", -float("inf")),
+            ("best_game_state_data", None),
+            ("training_steps_performed", 0),
+            ("current_self_play_game_number", 0),
+            ("current_self_play_game_steps", 0),
+        ]:
+            if not hasattr(self, attr):
+                setattr(self, attr, default)

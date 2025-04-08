@@ -1,11 +1,9 @@
-# File: config/validation.py
 from .core import (
     EnvConfig,
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
-    TensorBoardConfig,
     VisConfig,
     TransformerConfig,
     MCTSConfig,
@@ -15,7 +13,6 @@ from .general import (
     get_run_id,
     get_run_log_dir,
     get_run_checkpoint_dir,
-    get_model_save_path,
 )
 
 
@@ -23,7 +20,6 @@ def print_config_info_and_validate():
     env_config_instance = EnvConfig()
     rnn_config_instance = RNNConfig()
     transformer_config_instance = TransformerConfig()
-    vis_config_instance = VisConfig()
     train_config_instance = TrainConfig()
     mcts_config_instance = MCTSConfig()
 
@@ -36,10 +32,7 @@ def print_config_info_and_validate():
     print(f"Log Directory: {run_log_dir}")
     print(f"Checkpoint Directory: {run_checkpoint_dir}")
     print(f"Device: {DEVICE}")
-    print(
-        f"TB Logging: Histograms={'ON' if TensorBoardConfig.LOG_HISTOGRAMS else 'OFF'}, "
-        f"Images={'ON' if TensorBoardConfig.LOG_IMAGES else 'OFF'}"
-    )
+    # Removed TensorBoard logging status print
 
     if train_config_instance.LOAD_CHECKPOINT_PATH:
         print(
@@ -78,29 +71,34 @@ def print_config_info_and_validate():
     )
 
     print(
-        f"MCTS: Sims={mcts_config_instance.NUM_SIMULATIONS}, "
+        f"MCTS: Sims={mcts_config_instance.NUM_SIMULATIONS}, "  # Updated Sims
         f"PUCT_C={mcts_config_instance.PUCT_C:.2f}, "
         f"Temp={mcts_config_instance.TEMPERATURE_INITIAL:.2f}->{mcts_config_instance.TEMPERATURE_FINAL:.2f}, "
         f"Dirichlet(α={mcts_config_instance.DIRICHLET_ALPHA:.2f}, ε={mcts_config_instance.DIRICHLET_EPSILON:.2f})"
     )
 
+    # Add LR Scheduler Info
+    scheduler_info = "DISABLED"
+    if train_config_instance.USE_LR_SCHEDULER:
+        scheduler_info = f"{train_config_instance.SCHEDULER_TYPE} (T_max={train_config_instance.SCHEDULER_T_MAX:,}, eta_min={train_config_instance.SCHEDULER_ETA_MIN:.1e})"
     print(
         f"Training: Batch={train_config_instance.BATCH_SIZE}, LR={train_config_instance.LEARNING_RATE:.1e}, "
-        f"WD={train_config_instance.WEIGHT_DECAY:.1e}, Buffer={train_config_instance.BUFFER_CAPACITY:,}, "
-        f"MinBuffer={train_config_instance.MIN_BUFFER_SIZE_TO_TRAIN:,}, Steps/Iter={train_config_instance.NUM_TRAINING_STEPS_PER_ITER}"
+        f"WD={train_config_instance.WEIGHT_DECAY:.1e}, Scheduler={scheduler_info}"
     )
+    print(
+        f"Buffer: Capacity={train_config_instance.BUFFER_CAPACITY:,}, MinSize={train_config_instance.MIN_BUFFER_SIZE_TO_TRAIN:,}, Steps/Iter={train_config_instance.NUM_TRAINING_STEPS_PER_ITER}"
+    )
+    print(
+        f"Workers: Self-Play={train_config_instance.NUM_SELF_PLAY_WORKERS}, Training=1"
+    )  # Updated Workers
     print(
         f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (updates/episodes)"
     )
 
-    if env_config_instance.NUM_ENVS > 1:
-        print(
-            "*" * 70
-            + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. AlphaZero self-play typically uses 1 env. ***\n"
-            "*** Ensure worker implementation handles this correctly if parallel generation is intended. ***\n"
-            + "*" * 70
-        )
-    print(
-        f"--- Rendering {VisConfig.NUM_ENVS_TO_RENDER if VisConfig.NUM_ENVS_TO_RENDER > 0 else 'ALL'} of {env_config_instance.NUM_ENVS} environments ---"
-    )
+    render_info = "Best State (when running)"
+    if VisConfig.NUM_ENVS_TO_RENDER > 0:
+        render_info += f" / First {VisConfig.NUM_ENVS_TO_RENDER} Envs (when idle)"
+    else:
+        render_info += " / Placeholder (when idle)"
+    print(f"--- Rendering {render_info} in Game Area ---")  # Updated Render info
     print("-" * 70)

@@ -10,18 +10,37 @@ import matplotlib.pyplot as plt
 
 from config import VisConfig
 
+# --- Constants ---
+TREND_SLOPE_TOLERANCE = 1e-5
+TREND_MIN_LINEWIDTH = 1
+TREND_MAX_LINEWIDTH = 2
+TREND_COLOR_STABLE = (1.0, 1.0, 0.0)  # Yellow
+TREND_COLOR_INCREASING = (0.0, 0.8, 0.0)  # Green
+TREND_COLOR_DECREASING = (0.8, 0.0, 0.0)  # Red
+TREND_SLOPE_SCALE_FACTOR = 5.0
+TREND_BACKGROUND_ALPHA = 0.15
+TREND_LINE_COLOR = (1.0, 1.0, 1.0)
+TREND_LINE_STYLE = (0, (5, 10))
+TREND_LINE_WIDTH = 0.75
+TREND_LINE_ALPHA = 0.7
+TREND_LINE_ZORDER = 10
+MIN_ALPHA = 0.4
+MAX_ALPHA = 1.0
+MIN_DATA_AVG_LINEWIDTH = 1
+MAX_DATA_AVG_LINEWIDTH = 2
 
+
+# --- Helper Functions ---
 def normalize_color_for_matplotlib(
     color_tuple_0_255: Tuple[int, int, int],
 ) -> Tuple[float, float, float]:
     """Converts RGB tuple (0-255) to Matplotlib format (0.0-1.0)."""
     if isinstance(color_tuple_0_255, tuple) and len(color_tuple_0_255) == 3:
         return tuple(c / 255.0 for c in color_tuple_0_255)
-    else:
-        print(f"Warning: Invalid color tuple {color_tuple_0_255}, using black.")
-        return (0.0, 0.0, 0.0)
+    return (0.0, 0.0, 0.0)  # Default black
 
 
+# --- Matplotlib Style Setup ---
 try:
     plt.style.use("dark_background")
     plt.rcParams.update(
@@ -52,113 +71,65 @@ except Exception as e:
     print(f"Warning: Failed to set Matplotlib style: {e}")
 
 
-TREND_SLOPE_TOLERANCE = 1e-5
-TREND_MIN_LINEWIDTH = 1
-TREND_MAX_LINEWIDTH = 2
-TREND_COLOR_STABLE = normalize_color_for_matplotlib(VisConfig.YELLOW)
-TREND_COLOR_INCREASING = normalize_color_for_matplotlib(
-    (0, 200, 0)
-)  # Green for increasing (good)
-TREND_COLOR_DECREASING = normalize_color_for_matplotlib(
-    (200, 0, 0)
-)  # Red for decreasing (bad)
-TREND_SLOPE_SCALE_FACTOR = 5.0
-TREND_BACKGROUND_ALPHA = 0.15
-
-TREND_LINE_COLOR = (1.0, 1.0, 1.0)
-TREND_LINE_STYLE = (0, (5, 10))
-TREND_LINE_WIDTH = 0.75
-TREND_LINE_ALPHA = 0.7
-TREND_LINE_ZORDER = 10
-
-MIN_ALPHA = 0.4
-MAX_ALPHA = 1.0
-MIN_DATA_AVG_LINEWIDTH = 1
-MAX_DATA_AVG_LINEWIDTH = 2
-
-
+# --- Trend Calculation ---
 def calculate_trend_line(data: np.ndarray) -> Optional[Tuple[float, float]]:
-    """
-    Calculates the slope and intercept of the linear regression line.
-    Returns (slope, intercept) or None if calculation fails.
-    """
-    n_points = len(data)
-    if n_points < 2:
+    """Calculates the slope and intercept of the linear regression line."""
+    n = len(data)
+    x = np.arange(n)
+    mask = np.isfinite(data)
+    if np.sum(mask) < 2:
         return None
     try:
-        x_coords = np.arange(n_points)
-        finite_mask = np.isfinite(data)
-        if np.sum(finite_mask) < 2:
+        coeffs = np.polyfit(x[mask], data[mask], 1)
+        if not all(np.isfinite(c) for c in coeffs):
             return None
-        coeffs = np.polyfit(x_coords[finite_mask], data[finite_mask], 1)
-        slope = coeffs[0]
-        intercept = coeffs[1]
-        if not (np.isfinite(slope) and np.isfinite(intercept)):
-            return None
-        return slope, intercept
+        return coeffs[0], coeffs[1]  # slope, intercept
     except (np.linalg.LinAlgError, ValueError):
         return None
 
 
 def get_trend_color(slope: float, lower_is_better: bool) -> Tuple[float, float, float]:
-    """
-    Maps a slope to a color (Red -> Yellow(Stable) -> Green).
-    Adjusts based on whether lower values are better (e.g., for loss).
-    """
+    """Maps slope to color (Red -> Yellow -> Green)."""
     if abs(slope) < TREND_SLOPE_TOLERANCE:
         return TREND_COLOR_STABLE
-
-    # If lower is better, decreasing slope is good (green), increasing is bad (red)
-    effective_slope = -slope if lower_is_better else slope
-
-    norm_slope = math.atan(effective_slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0)
-    norm_slope = np.clip(norm_slope, -1.0, 1.0)
-
-    if norm_slope > 0:  # Good trend (increasing score or decreasing loss)
-        t = norm_slope
-        color = tuple(
-            TREND_COLOR_STABLE[i] * (1 - t) + TREND_COLOR_INCREASING[i] * t
-            for i in range(3)
-        )
-    else:  # Bad trend (decreasing score or increasing loss)
-        t = abs(norm_slope)
-        color = tuple(
-            TREND_COLOR_STABLE[i] * (1 - t) + TREND_COLOR_DECREASING[i] * t
-            for i in range(3)
-        )
+    eff_slope = -slope if lower_is_better else slope
+    norm_slope = np.clip(
+        math.atan(eff_slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0), -1.0, 1.0
+    )
+    t = abs(norm_slope)
+    base, target = (
+        (TREND_COLOR_STABLE, TREND_COLOR_INCREASING)
+        if norm_slope > 0
+        else (TREND_COLOR_STABLE, TREND_COLOR_DECREASING)
+    )
+    color = tuple(base[i] * (1 - t) + target[i] * t for i in range(3))
     return tuple(np.clip(c, 0.0, 1.0) for c in color)
 
 
 def get_trend_linewidth(slope: float) -> float:
-    """Maps the *magnitude* of a slope to a border linewidth."""
+    """Maps slope magnitude to border linewidth."""
     if abs(slope) < TREND_SLOPE_TOLERANCE:
         return TREND_MIN_LINEWIDTH
-    norm_slope_mag = abs(math.atan(slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0))
-    norm_slope_mag = np.clip(norm_slope_mag, 0.0, 1.0)
-    linewidth = TREND_MIN_LINEWIDTH + norm_slope_mag * (
-        TREND_MAX_LINEWIDTH - TREND_MIN_LINEWIDTH
+    norm_mag = np.clip(
+        abs(math.atan(slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0)), 0.0, 1.0
     )
-    return linewidth
+    return TREND_MIN_LINEWIDTH + norm_mag * (TREND_MAX_LINEWIDTH - TREND_MIN_LINEWIDTH)
 
 
+# --- Visual Property Interpolation ---
 def _interpolate_visual_property(
     rank: int, total_ranks: int, min_val: float, max_val: float
 ) -> float:
-    """
-    Linearly interpolates alpha or linewidth based on rank.
-    Rank 0 corresponds to max_val (most prominent).
-    Rank (total_ranks - 1) corresponds to min_val (least prominent).
-    """
+    """Linearly interpolates alpha/linewidth based on rank."""
     if total_ranks <= 1:
         return float(max_val)
-    inverted_rank = (total_ranks - 1) - rank
-    fraction = inverted_rank / max(1, total_ranks - 1)
-    f_min_val = float(min_val)
-    f_max_val = float(max_val)
-    value = f_min_val + (f_max_val - f_min_val) * fraction
+    inv_rank = (total_ranks - 1) - rank
+    fraction = inv_rank / max(1, total_ranks - 1)
+    value = float(min_val) + (float(max_val) - float(min_val)) * fraction
     return float(np.clip(value, min_val, max_val))
 
 
+# --- Value Formatting ---
 def _format_value(value: float, is_loss: bool) -> str:
     """Formats value based on magnitude and whether it's a loss."""
     if not np.isfinite(value):
@@ -166,12 +137,12 @@ def _format_value(value: float, is_loss: bool) -> str:
     if abs(value) < 1e-3 and value != 0:
         return f"{value:.1e}"
     if abs(value) >= 1000:
-        return f"{value:.2g}"
+        return f"{value:,.0f}".replace(",", "_")
     if is_loss:
         return f"{value:.3f}"
     if abs(value) < 10:
         return f"{value:.2f}"
-    return f"{value:.2f}"
+    return f"{value:.1f}"
 
 
 def _format_slope(slope: float) -> str:
@@ -179,14 +150,15 @@ def _format_slope(slope: float) -> str:
     if not np.isfinite(slope):
         return "N/A"
     sign = "+" if slope >= 0 else ""
-    if abs(slope) < 1e-4:
+    abs_slope = abs(slope)
+    if abs_slope < 1e-4:
         return f"{sign}{slope:.1e}"
-    elif abs(slope) < 0.1:
+    if abs_slope < 0.1:
         return f"{sign}{slope:.3f}"
-    else:
-        return f"{sign}{slope:.2f}"
+    return f"{sign}{slope:.2f}"
 
 
+# --- Main Plotting Function ---
 def render_single_plot(
     ax,
     data: List[Union[float, int]],
@@ -197,26 +169,16 @@ def render_single_plot(
     placeholder_text: Optional[str] = None,
     y_log_scale: bool = False,
 ):
-    """
-    Renders data with linearly scaled alpha/linewidth. Trend line is thin, white, dashed.
-    Title is just the label. Detailed values moved to legend. Best value shown as legend title.
-    Applies a background tint and border to the entire subplot based on trend desirability.
-    Legend now includes current values and trend slope, placed at center-left.
-    Handles empty data explicitly to show placeholder.
-    """
+    """Renders data with rolling averages, trend line, and informative legend."""
     try:
         data_np = np.array(data, dtype=float)
-        finite_mask = np.isfinite(data_np)
-        valid_data = data_np[finite_mask]
+        valid_data = data_np[np.isfinite(data_np)]
     except (ValueError, TypeError):
         valid_data = np.array([])
-
     n_points = len(valid_data)
-    placeholder_text_color = normalize_color_for_matplotlib(VisConfig.GRAY)
-
     is_lower_better = "loss" in label.lower()
 
-    if n_points == 0:
+    if n_points == 0:  # Handle empty data
         if show_placeholder:
             p_text = placeholder_text if placeholder_text else f"{label}\n(No data)"
             ax.text(
@@ -227,11 +189,11 @@ def render_single_plot(
                 va="center",
                 transform=ax.transAxes,
                 fontsize=8,
-                color=placeholder_text_color,
+                color=normalize_color_for_matplotlib(VisConfig.GRAY),
             )
         ax.set_yticks([])
         ax.set_xticks([])
-        ax.set_title(f"{label} (N/A)", fontsize=plt.rcParams["axes.titlesize"])
+        ax.set_title(f"{label} (N/A)")
         ax.grid(False)
         ax.patch.set_facecolor(plt.rcParams["axes.facecolor"])
         ax.patch.set_edgecolor(plt.rcParams["axes.edgecolor"])
@@ -239,92 +201,73 @@ def render_single_plot(
         return
 
     trend_params = calculate_trend_line(valid_data)
-    trend_slope = trend_params[0] if trend_params is not None else 0.0
-
-    trend_indicator_color = get_trend_color(trend_slope, is_lower_better)
-    trend_indicator_lw = get_trend_linewidth(trend_slope)
-
+    trend_slope = trend_params[0] if trend_params else 0.0
+    trend_color = get_trend_color(trend_slope, is_lower_better)
+    trend_lw = get_trend_linewidth(trend_slope)
     plotted_windows = sorted([w for w in rolling_window_sizes if n_points >= w])
     total_ranks = 1 + len(plotted_windows)
-
     current_val = valid_data[-1]
     best_val = np.min(valid_data) if is_lower_better else np.max(valid_data)
     best_val_str = f"Best: {_format_value(best_val, is_lower_better)}"
-
-    ax.set_title(
-        label,
-        loc="left",
-        fontsize=plt.rcParams["axes.titlesize"],
-        pad=plt.rcParams.get("axes.titlepad", 6),
-    )
+    ax.set_title(label, loc="left")
 
     try:
         x_coords = np.arange(n_points)
-        plotted_legend_items = False
-        min_y_overall = float("inf")
-        max_y_overall = float("-inf")
-
-        # Plot Raw Data
-        raw_data_rank = total_ranks - 1
-        raw_data_alpha = _interpolate_visual_property(
-            raw_data_rank, total_ranks, MIN_ALPHA, MAX_ALPHA
+        plotted_legend = False
+        min_y, max_y = float("inf"), float("-inf")
+        plot_raw = len(plotted_windows) == 0 or n_points < min(
+            rolling_window_sizes, default=10
         )
-        raw_data_lw = _interpolate_visual_property(
-            raw_data_rank,
-            total_ranks,
-            MIN_DATA_AVG_LINEWIDTH,
-            MAX_DATA_AVG_LINEWIDTH,
-        )
-        raw_label = f"Raw: {_format_value(current_val, is_lower_better)}"
-        ax.plot(
-            x_coords,
-            valid_data,
-            color=color,
-            linewidth=raw_data_lw,
-            label=raw_label,
-            alpha=raw_data_alpha,
-        )
-        min_y_overall = min(min_y_overall, np.min(valid_data))
-        max_y_overall = max(max_y_overall, np.max(valid_data))
-        plotted_legend_items = True
-
-        # Plot Rolling Averages
-        for i, avg_window in enumerate(plotted_windows):
-            avg_rank = len(plotted_windows) - 1 - i
-            current_alpha = _interpolate_visual_property(
-                avg_rank, total_ranks, MIN_ALPHA, MAX_ALPHA
+        if plot_raw:
+            rank = 0
+            alpha = _interpolate_visual_property(
+                rank, total_ranks, MIN_ALPHA, MAX_ALPHA
             )
-            current_avg_lw = _interpolate_visual_property(
-                avg_rank,
-                total_ranks,
-                MIN_DATA_AVG_LINEWIDTH,
-                MAX_DATA_AVG_LINEWIDTH,
+            lw = _interpolate_visual_property(
+                rank, total_ranks, MIN_DATA_AVG_LINEWIDTH, MAX_DATA_AVG_LINEWIDTH
             )
-            weights = np.ones(avg_window) / avg_window
+            raw_label = f"Val: {_format_value(current_val, is_lower_better)}"
+            ax.plot(
+                x_coords,
+                valid_data,
+                color=color,
+                linewidth=lw,
+                label=raw_label,
+                alpha=alpha,
+            )
+            min_y = min(min_y, np.min(valid_data))
+            max_y = max(max_y, np.max(valid_data))
+            plotted_legend = True
+
+        for i, avg_win in enumerate(reversed(plotted_windows)):
+            rank = i
+            alpha = _interpolate_visual_property(
+                rank, total_ranks, MIN_ALPHA, MAX_ALPHA
+            )
+            lw = _interpolate_visual_property(
+                rank, total_ranks, MIN_DATA_AVG_LINEWIDTH, MAX_DATA_AVG_LINEWIDTH
+            )
+            weights = np.ones(avg_win) / avg_win
             rolling_avg = np.convolve(valid_data, weights, mode="valid")
-            avg_x_coords = np.arange(avg_window - 1, n_points)
-            linestyle = "-"
-            if len(avg_x_coords) == len(rolling_avg):
-                last_avg_val = rolling_avg[-1] if len(rolling_avg) > 0 else np.nan
-                avg_label = (
-                    f"Avg {avg_window}: {_format_value(last_avg_val, is_lower_better)}"
-                )
+            avg_x = np.arange(avg_win - 1, n_points)
+            if len(avg_x) == len(rolling_avg):
+                last_avg = rolling_avg[-1] if len(rolling_avg) > 0 else np.nan
+                avg_label = f"Avg {avg_win}: {_format_value(last_avg, is_lower_better)}"
                 ax.plot(
-                    avg_x_coords,
+                    avg_x,
                     rolling_avg,
                     color=color,
-                    linewidth=current_avg_lw,
-                    alpha=current_alpha,
-                    linestyle=linestyle,
+                    linewidth=lw,
+                    alpha=alpha,
+                    linestyle="-",
                     label=avg_label,
                 )
                 if len(rolling_avg) > 0:
-                    min_y_overall = min(min_y_overall, np.min(rolling_avg))
-                    max_y_overall = max(max_y_overall, np.max(rolling_avg))
-                plotted_legend_items = True
+                    min_y = min(min_y, np.min(rolling_avg))
+                    max_y = max(max_y, np.max(rolling_avg))
+                plotted_legend = True
 
-        # Plot Trend Line
-        if trend_params is not None and n_points >= 2:
+        if trend_params and n_points >= 2:
             slope, intercept = trend_params
             x_trend = np.array([0, n_points - 1])
             y_trend = slope * x_trend + intercept
@@ -339,7 +282,7 @@ def render_single_plot(
                 label=trend_label,
                 zorder=TREND_LINE_ZORDER,
             )
-            plotted_legend_items = True
+            plotted_legend = True
 
         ax.tick_params(axis="both", which="major")
         ax.grid(
@@ -347,56 +290,43 @@ def render_single_plot(
             linestyle=plt.rcParams["grid.linestyle"],
             alpha=plt.rcParams["grid.alpha"],
         )
-
-        if np.isfinite(min_y_overall) and np.isfinite(max_y_overall):
-            if abs(max_y_overall - min_y_overall) < 1e-6:
-                epsilon = max(abs(min_y_overall * 0.01), 1e-6)
-                ax.set_ylim(min_y_overall - epsilon, max_y_overall + epsilon)
-            else:
-                ax.set_ylim(min_y_overall, max_y_overall)
-
-        if y_log_scale and min_y_overall > 1e-9:
+        if np.isfinite(min_y) and np.isfinite(max_y):
+            yrange = max(max_y - min_y, 1e-6)
+            pad = yrange * 0.05
+            ax.set_ylim(min_y - pad, max_y + pad)
+        if y_log_scale and min_y > 1e-9:
             ax.set_yscale("log")
-            current_bottom, current_top = ax.get_ylim()
-            new_bottom = max(current_bottom, 1e-9)
-            if new_bottom >= current_top:
-                new_bottom = current_top / 10
-            ax.set_ylim(bottom=new_bottom, top=current_top)
+            bottom, top = ax.get_ylim()
+            new_bottom = max(bottom, 1e-9)
+            if new_bottom >= top:
+                new_bottom = top / 10
+            ax.set_ylim(bottom=new_bottom, top=top)
         else:
             ax.set_yscale("linear")
-
         if n_points > 1:
             ax.set_xlim(0, n_points - 1)
         elif n_points == 1:
             ax.set_xlim(-0.5, 0.5)
-
         if n_points > 1000:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=4))
 
-            def format_func(value, tick_number):
-                val_int = int(value)
-                if val_int >= 1_000_000:
-                    return f"{val_int/1_000_000:.1f}M"
-                if val_int >= 1_000:
-                    return f"{val_int/1_000:.0f}k"
-                return f"{val_int}"
+            def fmt_func(v, _):
+                val = int(v)
+                return (
+                    f"{val/1e6:.1f}M"
+                    if val >= 1e6
+                    else (f"{val/1e3:.0f}k" if val >= 1e3 else f"{val}")
+                )
 
-            ax.xaxis.set_major_formatter(plt.FuncFormatter(format_func))
+            ax.xaxis.set_major_formatter(plt.FuncFormatter(fmt_func))
         elif n_points > 10:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
-
-        if plotted_legend_items:
-            ax.legend(
-                loc="center left",
-                bbox_to_anchor=(0, 0.5),
-                title=best_val_str,
-                fontsize=plt.rcParams["legend.fontsize"],
-            )
+        if plotted_legend:
+            ax.legend(loc="center left", bbox_to_anchor=(0, 0.5), title=best_val_str)
 
     except Exception as plot_err:
         print(f"ERROR during render_single_plot for '{label}': {plot_err}")
         traceback.print_exc()
-        error_text_color = normalize_color_for_matplotlib(VisConfig.RED)
         ax.text(
             0.5,
             0.5,
@@ -405,13 +335,12 @@ def render_single_plot(
             va="center",
             transform=ax.transAxes,
             fontsize=8,
-            color=error_text_color,
+            color=normalize_color_for_matplotlib(VisConfig.RED),
         )
         ax.set_yticks([])
         ax.set_xticks([])
         ax.grid(False)
 
-    bg_color_with_alpha = (*trend_indicator_color, TREND_BACKGROUND_ALPHA)
-    ax.patch.set_facecolor(bg_color_with_alpha)
-    ax.patch.set_edgecolor(trend_indicator_color)
-    ax.patch.set_linewidth(trend_indicator_lw)
+    ax.patch.set_facecolor((*trend_color, TREND_BACKGROUND_ALPHA))
+    ax.patch.set_edgecolor(trend_color)
+    ax.patch.set_linewidth(trend_lw)

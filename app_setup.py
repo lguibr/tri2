@@ -1,4 +1,3 @@
-# File: app_setup.py
 import os
 import pygame
 from typing import Tuple, Dict, Any

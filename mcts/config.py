@@ -1,4 +1,3 @@
-# File: mcts/config.py
 class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 

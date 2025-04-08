@@ -2,114 +2,157 @@
 import pygame
 import math
 import traceback
-import numpy as np  # Import numpy
-from typing import List, Tuple, Optional, Dict, Any  # Added Optional, Dict, Any
+import numpy as np
+from typing import List, Tuple, Optional, Dict, Any
+import logging
 
 from config import (
     VisConfig,
     EnvConfig,
+    TrainConfig,
     BLACK,
     BLUE,
     RED,
     GRAY,
     YELLOW,
     LIGHTG,
-    WHITE,  # Added WHITE
-    MCTS_MINI_GRID_BG_COLOR,
-    MCTS_MINI_GRID_LINE_COLOR,
-    MCTS_MINI_GRID_OCCUPIED_COLOR,
+    WHITE,
 )
 from environment.game_state import GameState
 from environment.shape import Shape
 from environment.triangle import Triangle
 
+logger = logging.getLogger(__name__)
+
 
 class GameAreaRenderer:
+    """Renders the right panel: multi-env view (idle) or best state/placeholder (running)."""
+
     def __init__(self, screen: pygame.Surface, vis_config: VisConfig):
         self.screen = screen
         self.vis_config = vis_config
         self.fonts = self._init_fonts()
-        # Cache a placeholder surface for inactive state
-        self.placeholder_surface: pygame.Surface | None = None
-        self.last_placeholder_size: Tuple[int, int] = (0, 0)
-        self.last_placeholder_message: str = ""  # Cache the message too
-        # Cache for best state rendering
-        self.best_state_surface: pygame.Surface | None = None
+        # --- Surface Caching ---
+        self.best_state_surface_cache: pygame.Surface | None = None
         self.last_best_state_size: Tuple[int, int] = (0, 0)
         self.last_best_state_score: Optional[int] = None
+        self.last_best_state_step: Optional[int] = None
+        self.placeholder_surface_cache: pygame.Surface | None = None
+        self.last_placeholder_size: Tuple[int, int] = (0, 0)
+        self.last_placeholder_message_key: str = ""  # Combined message and details
 
     def _init_fonts(self):
+        """Initializes fonts used in the game area."""
         fonts = {}
-        try:
-            fonts["env_score"] = pygame.font.SysFont(None, 18)
-            fonts["env_overlay"] = pygame.font.SysFont(None, 36)
-            fonts["ui"] = pygame.font.SysFont(None, 24)
-            fonts["placeholder"] = pygame.font.SysFont(None, 30)
-            fonts["best_state_title"] = pygame.font.SysFont(
-                None, 32
-            )  # Font for best state title
-            fonts["best_state_score"] = pygame.font.SysFont(
-                None, 28
-            )  # Font for best state score
-        except Exception as e:
-            print(f"Warning: SysFont error: {e}. Using default.")
-            fonts["env_score"] = pygame.font.Font(None, 18)
-            fonts["env_overlay"] = pygame.font.Font(None, 36)
+        font_configs = {
+            "env_score": 18,
+            "env_overlay": 36,
+            "ui": 24,
+            "placeholder": 30,
+            "placeholder_detail": 22,
+            "best_state_title": 32,
+            "best_state_score": 28,
+            "best_state_step": 20,
+        }
+        for key, size in font_configs.items():
+            try:
+                fonts[key] = pygame.font.SysFont(None, size)
+            except Exception:
+                try:
+                    fonts[key] = pygame.font.Font(None, size)
+                except Exception as e:
+                    logger.error(f"ERROR: Font '{key}' failed: {e}")
+                    fonts[key] = None
+        # Ensure essential fonts have fallbacks
+        if fonts.get("ui") is None:
             fonts["ui"] = pygame.font.Font(None, 24)
+        if fonts.get("placeholder") is None:
             fonts["placeholder"] = pygame.font.Font(None, 30)
-            fonts["best_state_title"] = pygame.font.Font(None, 32)
-            fonts["best_state_score"] = pygame.font.Font(None, 28)
         return fonts
 
-    def render(
-        self,
-        envs: List[GameState],
-        num_envs: int,
-        env_config: EnvConfig,
-        panel_width: int,
-        panel_x_offset: int,
-        is_running: bool = False,
-        best_game_state_data: Optional[Dict[str, Any]] = None,  # Added best state data
-    ):
+    def render(self, panel_width: int, panel_x_offset: int, **kwargs):  # Use kwargs
+        """Renders the game area panel based on running state."""
         current_height = self.screen.get_height()
         ga_rect = pygame.Rect(panel_x_offset, 0, panel_width, current_height)
-
         if ga_rect.width <= 0 or ga_rect.height <= 0:
             return
 
-        # If workers are running, display best state or specific placeholder
+        is_running = kwargs.get("is_running", False)
         if is_running:
-            if best_game_state_data:
-                # If we have data for the best state, render it
-                self._render_best_game_state(ga_rect, best_game_state_data, env_config)
-            else:
-                # If no best state data yet, show "Running..." placeholder
-                self._render_running_placeholder(
-                    ga_rect, "Running Self-Play / Training..."
-                )
-            return  # Don't render individual envs when running
+            self._render_running_state(
+                ga_rect,
+                kwargs.get("best_game_state_data"),
+                kwargs.get("stats_summary"),
+                kwargs.get("env_config"),
+            )
+        else:
+            # Clear caches when idle to ensure they regenerate if needed later
+            self.best_state_surface_cache = None
+            self.placeholder_surface_cache = None
+            self._render_idle_state(
+                ga_rect,
+                kwargs.get("envs", []),
+                kwargs.get("num_envs", 0),
+                kwargs.get("env_config"),
+            )
 
-        # --- Original rendering logic if workers are NOT running ---
-        # (This part remains unchanged)
-        if num_envs <= 0:
-            pygame.draw.rect(self.screen, (10, 10, 10), ga_rect)
-            pygame.draw.rect(self.screen, (50, 50, 50), ga_rect, 1)
+    def _render_running_state(
+        self,
+        ga_rect: pygame.Rect,
+        best_state_data: Optional[Dict[str, Any]],
+        stats_summary: Optional[Dict[str, Any]],
+        env_config: Optional[EnvConfig],
+    ):
+        """Renders the panel when the process is running."""
+        if best_state_data and env_config:
+            self._render_best_game_state(ga_rect, best_state_data, env_config)
+        else:
+            message = "Running AlphaZero..."
+            details = []
+            if stats_summary:
+                game_num = stats_summary.get("current_self_play_game_number", 0)
+                train_steps = stats_summary.get("training_steps_performed", 0)
+                buffer_size = stats_summary.get("buffer_size", 0)
+                min_buffer = TrainConfig().MIN_BUFFER_SIZE_TO_TRAIN
+                details.append(
+                    f"Playing Game: {game_num}"
+                    if game_num > 0
+                    else "Waiting for first game..."
+                )
+                details.append(f"Training Steps: {train_steps:,}".replace(",", "_"))
+                details.append(
+                    f"Buffer: {buffer_size:,}/{min_buffer:,}".replace(",", "_")
+                )
+            else:
+                details.append("Waiting for stats...")
+            self._render_running_placeholder(ga_rect, message, details)
+
+    def _render_idle_state(
+        self,
+        ga_rect: pygame.Rect,
+        envs: List[GameState],
+        num_envs: int,
+        env_config: Optional[EnvConfig],
+    ):
+        """Renders the panel when the process is idle."""
+        render_limit = self.vis_config.NUM_ENVS_TO_RENDER
+        if render_limit <= 0 or not env_config:
+            self._render_placeholder(ga_rect, "Idle - Multi-Env View Disabled")
             return
 
-        render_limit = self.vis_config.NUM_ENVS_TO_RENDER
-        num_to_render = min(num_envs, render_limit) if render_limit > 0 else num_envs
-
+        effective_num_envs = len(envs) if envs else num_envs
+        if effective_num_envs <= 0:
+            self._render_placeholder(ga_rect, "No Environments")
+            return
+        num_to_render = min(effective_num_envs, render_limit)
         if num_to_render <= 0:
-            pygame.draw.rect(self.screen, (10, 10, 10), ga_rect)
-            pygame.draw.rect(self.screen, (50, 50, 50), ga_rect, 1)
+            self._render_placeholder(ga_rect, "No Environments to Render")
             return
 
         cols_env, rows_env, cell_w, cell_h = self._calculate_grid_layout(
             ga_rect, num_to_render
         )
-
-        min_cell_dim = 30
-        if cell_w > min_cell_dim and cell_h > min_cell_dim:
+        if cell_w > 30 and cell_h > 30:
             self._render_env_grid(
                 envs,
                 num_to_render,
@@ -122,218 +165,250 @@ class GameAreaRenderer:
             )
         else:
             self._render_too_small_message(ga_rect, cell_w, cell_h)
+        if num_to_render < effective_num_envs:
+            self._render_render_limit_text(ga_rect, num_to_render, effective_num_envs)
 
-        if num_to_render < num_envs and len(envs) > 0:
-            self._render_render_limit_text(ga_rect, num_to_render, num_envs)
+    def _render_placeholder(self, ga_rect: pygame.Rect, message: str):
+        """Renders a simple placeholder message."""
+        pygame.draw.rect(self.screen, (20, 20, 25), ga_rect)
+        pygame.draw.rect(self.screen, (60, 60, 70), ga_rect, 1)
+        font = self.fonts.get("placeholder")
+        if font:
+            text_surf = font.render(message, True, LIGHTG)
+            self.screen.blit(text_surf, text_surf.get_rect(center=ga_rect.center))
 
-    def _render_running_placeholder(self, ga_rect: pygame.Rect, message: str):
-        """Renders a placeholder message, caching the surface."""
+    def _render_running_placeholder(
+        self, ga_rect: pygame.Rect, message: str, details: List[str]
+    ):
+        """Renders a placeholder with more details, caching the surface."""
         current_size = ga_rect.size
-        # Re-render placeholder only if size or message changes
+        full_message_key = f"{message}::{'|'.join(details)}"  # Use combined key
+
+        # Check cache validity
         if (
-            self.placeholder_surface is None
+            self.placeholder_surface_cache is None
             or self.last_placeholder_size != current_size
-            or self.last_placeholder_message != message
+            or self.last_placeholder_message_key != full_message_key
         ):
-            self.placeholder_surface = pygame.Surface(current_size)
-            self.placeholder_surface.fill((20, 20, 25))
+
+            logger.info(
+                f"[GameArea] Recreating placeholder surface. Size: {current_size}, Key: {full_message_key}"
+            )
+            self.placeholder_surface_cache = pygame.Surface(current_size)
+            self.placeholder_surface_cache.fill((20, 20, 25))
             pygame.draw.rect(
-                self.placeholder_surface,
+                self.placeholder_surface_cache,
                 (60, 60, 70),
-                self.placeholder_surface.get_rect(),
+                self.placeholder_surface_cache.get_rect(),
                 1,
             )
-            placeholder_font = self.fonts.get("placeholder")
-            if placeholder_font:
-                text_surf = placeholder_font.render(message, True, LIGHTG)
-                text_rect = text_surf.get_rect(
-                    center=self.placeholder_surface.get_rect().center
-                )
-                self.placeholder_surface.blit(text_surf, text_rect)
-            self.last_placeholder_size = current_size
-            self.last_placeholder_message = message  # Cache the message
 
-        if self.placeholder_surface:
-            self.screen.blit(self.placeholder_surface, ga_rect.topleft)
+            font_p = self.fonts.get("placeholder")
+            font_d = self.fonts.get("placeholder_detail")
+            center_x = self.placeholder_surface_cache.get_rect().centerx
+            h_needed = (font_p.get_linesize() + 5 if font_p else 0) + (
+                len(details) * font_d.get_linesize() if font_d else 0
+            )
+            current_y = (
+                self.placeholder_surface_cache.get_rect().centery - h_needed // 2
+            )
+
+            if font_p:
+                surf = font_p.render(message, True, LIGHTG)
+                rect = surf.get_rect(centerx=center_x, top=current_y)
+                self.placeholder_surface_cache.blit(surf, rect)
+                current_y = rect.bottom + 5
+            if font_d:
+                for line in details:
+                    surf = font_d.render(line, True, WHITE)
+                    rect = surf.get_rect(centerx=center_x, top=current_y)
+                    self.placeholder_surface_cache.blit(surf, rect)
+                    current_y += font_d.get_linesize()
+
+            self.last_placeholder_size = current_size
+            self.last_placeholder_message_key = full_message_key  # Update cache key
+
+        # Blit cached surface
+        if self.placeholder_surface_cache:
+            self.screen.blit(self.placeholder_surface_cache, ga_rect.topleft)
+        else:  # Fallback if cache creation failed
+            self._render_placeholder(ga_rect, "Error rendering placeholder")
 
     def _render_best_game_state(
         self, ga_rect: pygame.Rect, state_data: Dict[str, Any], env_config: EnvConfig
     ):
-        """Renders the best game state grid in the game area."""
+        """Renders the best game state grid, caching the surface."""
         current_size = ga_rect.size
-        current_score = state_data.get("score")
+        score = state_data.get("score")
+        step = state_data.get("step")
 
-        # Check if cache needs update (size change or score change)
+        # Check cache validity
         if (
-            self.best_state_surface is None
+            self.best_state_surface_cache is None
             or self.last_best_state_size != current_size
-            or self.last_best_state_score != current_score
+            or self.last_best_state_score != score
+            or self.last_best_state_step != step
         ):
 
-            self.best_state_surface = pygame.Surface(current_size)
-            self.best_state_surface.fill((25, 25, 30))  # Slightly different background
+            logger.info(
+                f"[GameArea] Recreating best state surface. Size: {current_size}, Score: {score}, Step: {step}"
+            )
+            self.best_state_surface_cache = pygame.Surface(current_size)
+            self.best_state_surface_cache.fill(
+                (25, 25, 30)
+            )  # Slightly different background
 
-            # Render the grid using the stored data
+            title_h = 60  # Height reserved for title/score/step
             grid_rect = pygame.Rect(
-                0, 50, current_size[0], current_size[1] - 60
-            )  # Leave space for title
+                0, title_h, current_size[0], current_size[1] - title_h
+            )
+
+            # Render the grid onto the cached surface
             try:
-                grid_subsurface = self.best_state_surface.subsurface(grid_rect)
+                grid_subsurface = self.best_state_surface_cache.subsurface(grid_rect)
                 self._render_grid_from_data(grid_subsurface, state_data, env_config)
             except ValueError as e:
-                print(f"Error creating subsurface for best state grid: {e}")
-                pygame.draw.rect(self.best_state_surface, RED, grid_rect, 1)
+                logger.error(f"Subsurface error (best state): {e}")
+                pygame.draw.rect(self.best_state_surface_cache, RED, grid_rect, 1)
+            except Exception as e:
+                logger.error(f"Error rendering best state grid: {e}", exc_info=True)
+                pygame.draw.rect(self.best_state_surface_cache, RED, grid_rect, 2)
 
-            # Render Title and Score
-            title_font = self.fonts.get("best_state_title")
-            score_font = self.fonts.get("best_state_score")
-            if title_font and score_font:
-                title_surf = title_font.render("Best Game State", True, YELLOW)
-                score_surf = score_font.render(f"Score: {current_score}", True, WHITE)
-
-                title_rect = title_surf.get_rect(centerx=current_size[0] // 2, top=5)
-                score_rect = score_surf.get_rect(
-                    centerx=current_size[0] // 2, top=title_rect.bottom + 2
+            # Render title and info onto the cached surface
+            font_t = self.fonts.get("best_state_title")
+            font_s = self.fonts.get("best_state_score")
+            font_st = self.fonts.get("best_state_step")
+            if font_t and font_s and font_st:
+                surf_t = font_t.render("Best Game State Found", True, YELLOW)
+                rect_t = surf_t.get_rect(centerx=current_size[0] // 2, top=5)
+                surf_s = font_s.render(f"Score: {score}", True, WHITE)
+                rect_s = surf_s.get_rect(
+                    centerx=current_size[0] // 2, top=rect_t.bottom + 2
                 )
+                surf_st = font_st.render(
+                    f"Step: {step:,}".replace(",", "_"), True, LIGHTG
+                )
+                rect_st = surf_st.get_rect(
+                    centerx=current_size[0] // 2, top=rect_s.bottom + 1
+                )
+                self.best_state_surface_cache.blit(surf_t, rect_t)
+                self.best_state_surface_cache.blit(surf_s, rect_s)
+                self.best_state_surface_cache.blit(surf_st, rect_st)
 
-                self.best_state_surface.blit(title_surf, title_rect)
-                self.best_state_surface.blit(score_surf, score_rect)
-
+            # Draw border on the cached surface
             pygame.draw.rect(
-                self.best_state_surface, YELLOW, self.best_state_surface.get_rect(), 1
-            )  # Border
+                self.best_state_surface_cache,
+                YELLOW,
+                self.best_state_surface_cache.get_rect(),
+                1,
+            )
 
+            # Update cache keys
             self.last_best_state_size = current_size
-            self.last_best_state_score = current_score
+            self.last_best_state_score = score
+            self.last_best_state_step = step
 
-        if self.best_state_surface:
-            self.screen.blit(self.best_state_surface, ga_rect.topleft)
-        else:  # Fallback if surface creation failed
-            self._render_running_placeholder(ga_rect, "Error rendering best state")
+        # Blit the cached surface
+        if self.best_state_surface_cache:
+            self.screen.blit(self.best_state_surface_cache, ga_rect.topleft)
+        else:  # Fallback if cache creation failed
+            self._render_placeholder(ga_rect, "Error rendering best state")
 
     def _render_grid_from_data(
         self, surf: pygame.Surface, state_data: Dict[str, Any], env_config: EnvConfig
     ):
         """Renders a grid based on stored occupancy/color data."""
         try:
-            occupancy = state_data.get("occupancy")
+            occ = state_data.get("occupancy")
             colors = state_data.get("colors")
             death = state_data.get("death")
             is_up = state_data.get("is_up")
             rows = state_data.get("rows", env_config.ROWS)
             cols = state_data.get("cols", env_config.COLS)
-
-            if occupancy is None or colors is None or death is None or is_up is None:
-                print("Error: Missing data for rendering best grid state.")
-                pygame.draw.rect(surf, RED, surf.get_rect(), 2)
-                return
-
-            padding = (
-                self.vis_config.ENV_GRID_PADDING * 2
-            )  # More padding for the large view
-            drawable_w, drawable_h = max(1, surf.get_width() - 2 * padding), max(
-                1, surf.get_height() - 2 * padding
+            if occ is None or colors is None or death is None or is_up is None:
+                raise ValueError("Missing data for grid render")
+            occ, death, is_up = (
+                np.asarray(occ, bool),
+                np.asarray(death, bool),
+                np.asarray(is_up, bool),
             )
-            grid_rows, grid_cols_eff_width = rows, cols * 0.75 + 0.25
-
-            if grid_rows <= 0 or grid_cols_eff_width <= 0:
-                return
-            scale_w, scale_h = drawable_w / grid_cols_eff_width, drawable_h / grid_rows
-            final_scale = min(scale_w, scale_h)
-            if final_scale <= 0:
-                return
-
-            final_grid_pixel_w, final_grid_pixel_h = (
-                grid_cols_eff_width * final_scale,
-                grid_rows * final_scale,
+            pad = self.vis_config.ENV_GRID_PADDING * 2
+            dw, dh = max(1, surf.get_width() - 2 * pad), max(
+                1, surf.get_height() - 2 * pad
             )
-            tri_cell_w, tri_cell_h = max(1, final_scale), max(1, final_scale)
-            grid_ox, grid_oy = (
-                padding + (drawable_w - final_grid_pixel_w) / 2,
-                padding + (drawable_h - final_grid_pixel_h) / 2,
-            )
-
+            gr, gcw = rows, cols * 0.75 + 0.25
+            scale = min(dw / gcw, dh / gr) if gr > 0 and gcw > 0 else 0
+            if scale <= 0:
+                return
+            fpw, fph = gcw * scale, gr * scale
+            tcw, tch = max(1, scale), max(1, scale)
+            ox, oy = pad + (dw - fpw) / 2, pad + (dh - fph) / 2
             for r in range(rows):
                 for c in range(cols):
                     if death[r, c]:
-                        continue  # Skip death cells
-
-                    temp_tri = Triangle(r, c, is_up=is_up[r, c])
+                        continue
+                    tri = Triangle(r, c, is_up=is_up[r, c])
                     try:
-                        pts = temp_tri.get_points(
-                            ox=grid_ox,
-                            oy=grid_oy,
-                            cw=int(tri_cell_w),
-                            ch=int(tri_cell_h),
-                        )
-                        color = VisConfig.LIGHTG  # Default empty color
-                        if occupancy[r, c]:
-                            cell_color = colors[r, c]
-                            # Handle potential None or non-tuple colors safely
-                            if isinstance(cell_color, tuple) and len(cell_color) == 3:
-                                color = cell_color
-                            else:
-                                color = (
-                                    VisConfig.RED
-                                )  # Fallback color if stored color is invalid
+                        pts = tri.get_points(ox=ox, oy=oy, cw=int(tcw), ch=int(tch))
+                        color = VisConfig.LIGHTG
+                        if occ[r, c]:
+                            cell_color = colors[r][c]
+                            color = (
+                                tuple(cell_color)
+                                if isinstance(cell_color, (list, tuple))
+                                and len(cell_color) == 3
+                                else VisConfig.RED
+                            )
                         pygame.draw.polygon(surf, color, pts)
-                        pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)  # Grid lines
-                    except Exception as e:
-                        # print(f"Minor error drawing triangle {r},{c}: {e}")
-                        pass  # Ignore minor drawing errors for single triangles
-
+                        pygame.draw.polygon(surf, VisConfig.GRAY, pts, 1)
+                    except Exception:
+                        pass
         except Exception as e:
-            print(f"Error rendering grid from data: {e}")
-            traceback.print_exc()
+            logger.error(f"Error rendering grid from data: {e}")
             pygame.draw.rect(surf, RED, surf.get_rect(), 2)
 
     def _calculate_grid_layout(
         self, ga_rect: pygame.Rect, num_to_render: int
     ) -> Tuple[int, int, int, int]:
+        """Calculates layout for multiple small environment grids."""
         if ga_rect.width <= 0 or ga_rect.height <= 0:
             return 0, 0, 0, 0
-        aspect_ratio = ga_rect.width / max(1, ga_rect.height)
-        cols_env = max(1, int(math.sqrt(num_to_render * aspect_ratio)))
-        rows_env = max(1, math.ceil(num_to_render / cols_env))
-        total_spacing_w = (cols_env + 1) * self.vis_config.ENV_SPACING
-        total_spacing_h = (rows_env + 1) * self.vis_config.ENV_SPACING
-        cell_w = max(1, (ga_rect.width - total_spacing_w) // cols_env)
-        cell_h = max(1, (ga_rect.height - total_spacing_h) // rows_env)
-        return cols_env, rows_env, cell_w, cell_h
+        aspect = ga_rect.width / max(1, ga_rect.height)
+        cols = max(1, int(math.sqrt(num_to_render * aspect)))
+        rows = max(1, math.ceil(num_to_render / cols))
+        sp = self.vis_config.ENV_SPACING
+        cw = max(1, (ga_rect.width - (cols + 1) * sp) // cols)
+        ch = max(1, (ga_rect.height - (rows + 1) * sp) // rows)
+        return cols, rows, cw, ch
 
     def _render_env_grid(
         self, envs, num_to_render, env_config, ga_rect, cols, rows, cell_w, cell_h
     ):
+        """Renders the grid of small environment previews."""
         env_idx = 0
+        sp = self.vis_config.ENV_SPACING
         for r in range(rows):
             for c in range(cols):
                 if env_idx >= num_to_render:
                     break
-                env_x = ga_rect.x + self.vis_config.ENV_SPACING * (c + 1) + c * cell_w
-                env_y = ga_rect.y + self.vis_config.ENV_SPACING * (r + 1) + r * cell_h
+                env_x = ga_rect.x + sp * (c + 1) + c * cell_w
+                env_y = ga_rect.y + sp * (r + 1) + r * cell_h
                 env_rect = pygame.Rect(env_x, env_y, cell_w, cell_h)
-                clipped_env_rect = env_rect.clip(self.screen.get_rect())
-
-                if clipped_env_rect.width <= 0 or clipped_env_rect.height <= 0:
+                clip_rect = env_rect.clip(self.screen.get_rect())
+                if clip_rect.width <= 0 or clip_rect.height <= 0:
                     env_idx += 1
                     continue
-
-                if env_idx < len(envs):
+                if env_idx < len(envs) and envs[env_idx] is not None:
                     try:
-                        sub_surf = self.screen.subsurface(clipped_env_rect)
-                        self._render_single_env(sub_surf, envs[env_idx], env_config)
-                    except ValueError as subsurface_error:
-                        print(
-                            f"Warning: Subsurface error env {env_idx} ({clipped_env_rect}): {subsurface_error}"
+                        self._render_single_env(
+                            self.screen.subsurface(clip_rect), envs[env_idx], env_config
                         )
-                        pygame.draw.rect(self.screen, (0, 0, 50), clipped_env_rect, 1)
-                    except Exception as e_render_env:
-                        print(f"Error rendering env {env_idx}: {e_render_env}")
-                        traceback.print_exc()
-                        pygame.draw.rect(self.screen, (50, 0, 50), clipped_env_rect, 1)
+                    except Exception as e:
+                        logger.error(f"Error rendering env {env_idx}: {e}")
+                        pygame.draw.rect(self.screen, (50, 0, 50), clip_rect, 1)
                 else:
-                    pygame.draw.rect(self.screen, (20, 20, 20), clipped_env_rect)
-                    pygame.draw.rect(self.screen, (60, 60, 60), clipped_env_rect, 1)
+                    pygame.draw.rect(self.screen, (20, 20, 20), clip_rect)
+                    pygame.draw.rect(self.screen, (60, 60, 60), clip_rect, 1)
                 env_idx += 1
             if env_idx >= num_to_render:
                 break
@@ -341,126 +416,96 @@ class GameAreaRenderer:
     def _render_single_env(
         self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
     ):
-        cell_w, cell_h = surf.get_width(), surf.get_height()
-        if cell_w <= 0 or cell_h <= 0:
-            return
-
-        bg_color = VisConfig.GRAY
+        """Renders a single small environment preview."""
+        cw, ch = surf.get_width(), surf.get_height()
+        bg = VisConfig.GRAY
         if env.is_line_clearing():
-            bg_color = VisConfig.LINE_CLEAR_FLASH_COLOR
+            bg = VisConfig.LINE_CLEAR_FLASH_COLOR
         elif env.is_game_over_flashing():
-            bg_color = VisConfig.GAME_OVER_FLASH_COLOR
+            bg = VisConfig.GAME_OVER_FLASH_COLOR
         elif env.is_blinking():
-            bg_color = VisConfig.YELLOW
+            bg = VisConfig.YELLOW
         elif env.is_over():
-            bg_color = VisConfig.DARK_RED
+            bg = VisConfig.DARK_RED
         elif env.is_frozen():
-            bg_color = (30, 30, 100)
-        surf.fill(bg_color)
-
-        shape_area_height_ratio = 0.20
-        grid_area_height = math.floor(cell_h * (1.0 - shape_area_height_ratio))
-        shape_area_height = cell_h - grid_area_height
-        shape_area_y = grid_area_height
-
+            bg = (30, 30, 100)
+        surf.fill(bg)
+        shape_h_ratio = 0.20
+        grid_h = math.floor(ch * (1.0 - shape_h_ratio))
+        shape_h = ch - grid_h
+        shape_y = grid_h
         grid_surf, shape_surf = None, None
-        if grid_area_height > 0 and cell_w > 0:
+        if grid_h > 0 and cw > 0:
             try:
-                grid_surf = surf.subsurface(pygame.Rect(0, 0, cell_w, grid_area_height))
+                grid_surf = surf.subsurface(pygame.Rect(0, 0, cw, grid_h))
             except ValueError:
-                pygame.draw.rect(
-                    surf, VisConfig.RED, pygame.Rect(0, 0, cell_w, grid_area_height), 1
-                )
-        if shape_area_height > 0 and cell_w > 0:
+                pass
+        if shape_h > 0 and cw > 0:
             try:
-                shape_rect = pygame.Rect(0, shape_area_y, cell_w, shape_area_height)
-                shape_surf = surf.subsurface(shape_rect)
+                shape_surf = surf.subsurface(pygame.Rect(0, shape_y, cw, shape_h))
                 shape_surf.fill((35, 35, 35))
             except ValueError:
-                pygame.draw.rect(
-                    surf,
-                    VisConfig.RED,
-                    pygame.Rect(0, shape_area_y, cell_w, shape_area_height),
-                    1,
-                )
-
+                pass
         if grid_surf:
             self._render_single_env_grid(grid_surf, env, env_config)
         if shape_surf:
             self._render_shape_previews(shape_surf, env)
-
         try:
-            score_text = f"GS: {env.game_score}"
             score_surf = self.fonts["env_score"].render(
-                score_text, True, VisConfig.WHITE, (0, 0, 0, 180)
+                f"GS: {env.game_score}", True, WHITE, (0, 0, 0, 180)
             )
             surf.blit(score_surf, (2, 2))
-        except Exception as e:
-            print(f"Error rendering score: {e}")
-
+        except Exception:
+            pass
         if env.is_over():
-            self._render_overlay_text(surf, "GAME OVER", VisConfig.RED)
+            self._render_overlay_text(surf, "GAME OVER", RED)
         elif env.is_line_clearing() and env.last_line_clear_info:
-            lines, tris, score = env.last_line_clear_info
-            line_str = "Line" if lines == 1 else "Lines"
-            clear_msg = f"{lines} {line_str} Cleared! ({tris} Tris)"
-            self._render_overlay_text(surf, clear_msg, BLUE)
+            lines, tris, _ = env.last_line_clear_info
+            self._render_overlay_text(
+                surf,
+                f"{lines} {'Line' if lines==1 else 'Lines'} Cleared! ({tris} Tris)",
+                BLUE,
+            )
 
     def _render_overlay_text(
         self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
     ):
+        """Renders overlay text like 'GAME OVER'."""
         try:
-            overlay_font = self.fonts["env_overlay"]
-            max_width = surf.get_width() * 0.9
-            font_size = 36
-            text_surf = overlay_font.render(text, True, VisConfig.WHITE)
-            while text_surf.get_width() > max_width and font_size > 10:
-                font_size -= 2
-                overlay_font = pygame.font.SysFont(None, font_size)
-                text_surf = overlay_font.render(text, True, VisConfig.WHITE)
-            bg_color_rgba = (color[0] // 2, color[1] // 2, color[2] // 2, 220)
-            text_surf_with_bg = overlay_font.render(
-                text, True, VisConfig.WHITE, bg_color_rgba
-            )
-            text_rect = text_surf_with_bg.get_rect(center=surf.get_rect().center)
-            surf.blit(text_surf_with_bg, text_rect)
+            font = self.fonts["env_overlay"]
+            max_w = surf.get_width() * 0.9
+            size = 36
+            surf_txt = font.render(text, True, WHITE)
+            while surf_txt.get_width() > max_w and size > 10:
+                size -= 2
+                font = pygame.font.SysFont(None, size)
+                surf_txt = font.render(text, True, WHITE)
+            bg_rgba = (color[0] // 2, color[1] // 2, color[2] // 2, 220)
+            surf_bg = font.render(text, True, WHITE, bg_rgba)
+            rect = surf_bg.get_rect(center=surf.get_rect().center)
+            surf.blit(surf_bg, rect)
         except Exception as e:
-            print(f"Error rendering overlay text '{text}': {e}")
+            logger.error(f"Error rendering overlay '{text}': {e}")
 
     def _render_single_env_grid(
         self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
     ):
         """Renders the hexagonal grid for a single environment."""
         try:
-            padding = self.vis_config.ENV_GRID_PADDING
-            drawable_w, drawable_h = max(1, surf.get_width() - 2 * padding), max(
-                1, surf.get_height() - 2 * padding
+            pad = self.vis_config.ENV_GRID_PADDING
+            dw, dh = max(1, surf.get_width() - 2 * pad), max(
+                1, surf.get_height() - 2 * pad
             )
-            grid_rows, grid_cols_eff_width = (
-                env_config.ROWS,
-                env_config.COLS * 0.75 + 0.25,
-            )
-            if grid_rows <= 0 or grid_cols_eff_width <= 0:
+            gr, gcw = env_config.ROWS, env_config.COLS * 0.75 + 0.25
+            scale = min(dw / gcw, dh / gr) if gr > 0 and gcw > 0 else 0
+            if scale <= 0:
                 return
-            scale_w, scale_h = drawable_w / grid_cols_eff_width, drawable_h / grid_rows
-            final_scale = min(scale_w, scale_h)
-            if final_scale <= 0:
-                return
-            final_grid_pixel_w, final_grid_pixel_h = (
-                grid_cols_eff_width * final_scale,
-                grid_rows * final_scale,
-            )
-            tri_cell_w, tri_cell_h = max(1, final_scale), max(1, final_scale)
-            grid_ox, grid_oy = (
-                padding + (drawable_w - final_grid_pixel_w) / 2,
-                padding + (drawable_h - final_grid_pixel_h) / 2,
-            )
-            is_highlighting = env.is_highlighting_cleared()
-            cleared_coords = (
-                set(env.get_cleared_triangle_coords()) if is_highlighting else set()
-            )
-            highlight_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
-
+            fpw, fph = gcw * scale, gr * scale
+            tcw, tch = max(1, scale), max(1, scale)
+            ox, oy = pad + (dw - fpw) / 2, pad + (dh - fph) / 2
+            is_hl = env.is_highlighting_cleared()
+            cleared = set(env.get_cleared_triangle_coords()) if is_hl else set()
+            hl_color = self.vis_config.LINE_CLEAR_HIGHLIGHT_COLOR
             if hasattr(env, "grid") and hasattr(env.grid, "triangles"):
                 for r in range(env.grid.rows):
                     for c in range(env.grid.cols):
@@ -473,14 +518,11 @@ class GameAreaRenderer:
                         if not t.is_death and hasattr(t, "get_points"):
                             try:
                                 pts = t.get_points(
-                                    ox=grid_ox,
-                                    oy=grid_oy,
-                                    cw=int(tri_cell_w),
-                                    ch=int(tri_cell_h),
+                                    ox=ox, oy=oy, cw=int(tcw), ch=int(tch)
                                 )
                                 color = VisConfig.LIGHTG
-                                if is_highlighting and (r, c) in cleared_coords:
-                                    color = highlight_color
+                                if is_hl and (r, c) in cleared:
+                                    color = hl_color
                                 elif t.is_occupied:
                                     color = t.color if t.color else VisConfig.RED
                                 pygame.draw.polygon(surf, color, pts)
@@ -488,165 +530,90 @@ class GameAreaRenderer:
                             except Exception:
                                 pass
             else:
-                pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
-                err_txt = self.fonts["ui"].render(
-                    "Invalid Grid Data", True, VisConfig.RED
-                )
-                surf.blit(err_txt, err_txt.get_rect(center=surf.get_rect().center))
-        except Exception as e:
-            pygame.draw.rect(surf, VisConfig.RED, surf.get_rect(), 2)
-
-    def render_mini_grid(
-        self, surf: pygame.Surface, env: GameState, env_config: EnvConfig
-    ):
-        """Renders a simplified grid onto a smaller surface (for MCTS nodes)."""
-        try:
-            padding = 1
-            drawable_w, drawable_h = max(1, surf.get_width() - 2 * padding), max(
-                1, surf.get_height() - 2 * padding
-            )
-            grid_rows, grid_cols_eff_width = (
-                env_config.ROWS,
-                env_config.COLS * 0.75 + 0.25,
-            )
-            if grid_rows <= 0 or grid_cols_eff_width <= 0:
-                return
-            scale_w, scale_h = drawable_w / grid_cols_eff_width, drawable_h / grid_rows
-            final_scale = min(scale_w, scale_h)
-            if final_scale <= 0:
-                return
-            final_grid_pixel_w, final_grid_pixel_h = (
-                grid_cols_eff_width * final_scale,
-                grid_rows * final_scale,
-            )
-            tri_cell_w, tri_cell_h = max(1, final_scale), max(1, final_scale)
-            grid_ox, grid_oy = (
-                padding + (drawable_w - final_grid_pixel_w) / 2,
-                padding + (drawable_h - final_grid_pixel_h) / 2,
-            )
-
-            surf.fill(MCTS_MINI_GRID_BG_COLOR)
-
-            grid = env.grid
-            for r in range(grid.rows):
-                for c in range(grid.cols):
-                    if not (
-                        0 <= r < len(grid.triangles) and 0 <= c < len(grid.triangles[r])
-                    ):
-                        continue
-                    t = grid.triangles[r][c]
-                    if not t.is_death and hasattr(t, "get_points"):
-                        try:
-                            pts = t.get_points(
-                                ox=grid_ox,
-                                oy=grid_oy,
-                                cw=int(tri_cell_w),
-                                ch=int(tri_cell_h),
-                            )
-                            color = MCTS_MINI_GRID_BG_COLOR
-                            if t.is_occupied:
-                                color = MCTS_MINI_GRID_OCCUPIED_COLOR
-                            pygame.draw.polygon(surf, color, pts)
-                            pygame.draw.polygon(surf, MCTS_MINI_GRID_LINE_COLOR, pts, 1)
-                        except Exception:
-                            pass
-        except Exception as e:
-            print(f"Error rendering mini-grid: {e}")
-            pygame.draw.line(surf, RED, (0, 0), surf.get_size(), 1)
+                pygame.draw.rect(surf, RED, surf.get_rect(), 2)
+        except Exception:
+            pygame.draw.rect(surf, RED, surf.get_rect(), 2)
 
     def _render_shape_previews(self, surf: pygame.Surface, env: GameState):
-        available_shapes = env.get_shapes()
-        if not available_shapes:
+        """Renders the small shape previews below the grid."""
+        shapes = env.get_shapes()
+        sw, sh = surf.get_width(), surf.get_height()
+        if not shapes or sw <= 0 or sh <= 0:
             return
-        surf_w, surf_h = surf.get_width(), surf.get_height()
-        if surf_w <= 0 or surf_h <= 0:
+        num = len(shapes)
+        pad = 4
+        total_pad = (num + 1) * pad
+        avail_w = sw - total_pad
+        if avail_w <= 0:
             return
-        num_shapes = len(available_shapes)
-        padding = 4
-        total_padding = (num_shapes + 1) * padding
-        available_width = surf_w - total_padding
-        if available_width <= 0:
-            return
-        width_per_shape = available_width / num_shapes
-        height_limit = surf_h - 2 * padding
-        preview_dim = max(5, min(width_per_shape, height_limit))
-        start_x = (
-            padding
-            + (surf_w - (num_shapes * preview_dim + (num_shapes - 1) * padding)) / 2
-        )
-        start_y = padding + (surf_h - preview_dim) / 2
-        current_x = start_x
-
-        for shape in available_shapes:
-            preview_rect = pygame.Rect(current_x, start_y, preview_dim, preview_dim)
-            if preview_rect.right > surf_w - padding:
+        w_per = avail_w / num
+        h_lim = sh - 2 * pad
+        dim = max(5, min(w_per, h_lim))
+        start_x = pad + (sw - (num * dim + (num - 1) * pad)) / 2
+        start_y = pad + (sh - dim) / 2
+        curr_x = start_x
+        for shape in shapes:
+            rect = pygame.Rect(curr_x, start_y, dim, dim)
+            if rect.right > sw - pad:
                 break
             if shape is None:
-                pygame.draw.rect(surf, (50, 50, 50), preview_rect, 1, border_radius=2)
-                current_x += preview_dim + padding
+                pygame.draw.rect(surf, (50, 50, 50), rect, 1, border_radius=2)
+                curr_x += dim + pad
                 continue
             try:
-                temp_shape_surf = pygame.Surface(
-                    (preview_dim, preview_dim), pygame.SRCALPHA
-                )
-                temp_shape_surf.fill((0, 0, 0, 0))
+                temp_surf = pygame.Surface((dim, dim), pygame.SRCALPHA)
+                temp_surf.fill((0, 0, 0, 0))
                 min_r, min_c, max_r, max_c = shape.bbox()
-                shape_h, shape_w_eff = max(1, max_r - min_r + 1), max(
+                sh_h, sh_w = max(1, max_r - min_r + 1), max(
                     1, (max_c - min_c + 1) * 0.75 + 0.25
                 )
-                scale_h, scale_w = preview_dim / shape_h, preview_dim / shape_w_eff
-                cell_size = max(1, min(scale_h, scale_w))
-                self._render_single_shape(temp_shape_surf, shape, int(cell_size))
-                surf.blit(temp_shape_surf, preview_rect.topleft)
-                current_x += preview_dim + padding
-            except Exception as e:
-                pygame.draw.rect(surf, VisConfig.RED, preview_rect, 1)
-                current_x += preview_dim + padding
+                scale = (
+                    max(1, min(dim / sh_h, dim / sh_w)) if sh_h > 0 and sh_w > 0 else 1
+                )
+                self._render_single_shape(temp_surf, shape, int(scale))
+                surf.blit(temp_surf, rect.topleft)
+                curr_x += dim + pad
+            except Exception:
+                pygame.draw.rect(surf, RED, rect, 1)
+                curr_x += dim + pad
 
     def _render_single_shape(self, surf: pygame.Surface, shape: Shape, cell_size: int):
+        """Renders a single shape scaled to fit."""
         if not shape or not shape.triangles or cell_size <= 0:
             return
         min_r, min_c, max_r, max_c = shape.bbox()
-        shape_h, shape_w_eff = max(1, max_r - min_r + 1), max(
+        sh_h, sh_w = max(1, max_r - min_r + 1), max(
             1, (max_c - min_c + 1) * 0.75 + 0.25
         )
-        if shape_w_eff <= 0 or shape_h <= 0:
+        if sh_w <= 0 or sh_h <= 0:
             return
-        total_w, total_h = shape_w_eff * cell_size, shape_h * cell_size
-        offset_x = (surf.get_width() - total_w) / 2 - min_c * (cell_size * 0.75)
-        offset_y = (surf.get_height() - total_h) / 2 - min_r * cell_size
+        total_w, total_h = sh_w * cell_size, sh_h * cell_size
+        ox = (surf.get_width() - total_w) / 2 - min_c * (cell_size * 0.75)
+        oy = (surf.get_height() - total_h) / 2 - min_r * cell_size
         for dr, dc, up in shape.triangles:
             tri = Triangle(row=dr, col=dc, is_up=up)
             try:
-                pts = tri.get_points(
-                    ox=offset_x, oy=offset_y, cw=cell_size, ch=cell_size
-                )
+                pts = tri.get_points(ox=ox, oy=oy, cw=cell_size, ch=cell_size)
                 pygame.draw.polygon(surf, shape.color, pts)
             except Exception:
                 pass
 
     def _render_too_small_message(self, ga_rect: pygame.Rect, cell_w: int, cell_h: int):
-        try:
-            err_surf = self.fonts["ui"].render(
-                f"Envs Too Small ({cell_w}x{cell_h})", True, VisConfig.GRAY
-            )
-            self.screen.blit(err_surf, err_surf.get_rect(center=ga_rect.center))
-        except Exception as e:
-            print(f"Error rendering 'too small' message: {e}")
+        """Renders a message if the env cells are too small."""
+        font = self.fonts.get("ui")
+        if font:
+            surf = font.render(f"Envs Too Small ({cell_w}x{cell_h})", True, GRAY)
+            self.screen.blit(surf, surf.get_rect(center=ga_rect.center))
 
     def _render_render_limit_text(
         self, ga_rect: pygame.Rect, num_rendered: int, num_total: int
     ):
-        try:
-            info_surf = self.fonts["ui"].render(
-                f"Rendering {num_rendered}/{num_total} Envs",
-                True,
-                VisConfig.YELLOW,
-                VisConfig.BLACK,
+        """Renders text indicating not all envs are shown."""
+        font = self.fonts.get("ui")
+        if font:
+            surf = font.render(
+                f"Rendering {num_rendered}/{num_total} Envs", True, YELLOW, BLACK
             )
             self.screen.blit(
-                info_surf,
-                info_surf.get_rect(bottomright=(ga_rect.right - 5, ga_rect.bottom - 5)),
+                surf, surf.get_rect(bottomright=(ga_rect.right - 5, ga_rect.bottom - 5))
             )
-        except Exception as e:
-            print(f"Error rendering limit text: {e}")
