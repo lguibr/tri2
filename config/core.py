@@ -42,8 +42,7 @@ class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
     PUCT_C: float = 1.5
-    # Reduced simulations temporarily for performance testing
-    NUM_SIMULATIONS: int = 50  # Reduced from 100
+    NUM_SIMULATIONS: int = 5000
     TEMPERATURE_INITIAL: float = 1.0
     TEMPERATURE_FINAL: float = 0.01
     TEMPERATURE_ANNEAL_STEPS: int = 30
@@ -53,7 +52,7 @@ class MCTSConfig:
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 16
+    NUM_ENVS_TO_RENDER = 4
     FPS = 0
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
@@ -143,12 +142,12 @@ class TrainConfig:
 
     CHECKPOINT_SAVE_FREQ = 1000
     LOAD_CHECKPOINT_PATH: Optional[str] = None
-    NUM_SELF_PLAY_WORKERS: int = 64
+    NUM_SELF_PLAY_WORKERS: int = 8
     BATCH_SIZE: int = 512
     LEARNING_RATE: float = 1e-4
     WEIGHT_DECAY: float = 1e-5
     NUM_TRAINING_STEPS_PER_ITER: int = 100
-    MIN_BUFFER_SIZE_TO_TRAIN: int = 20000
+    MIN_BUFFER_SIZE_TO_TRAIN: int = 2000
     BUFFER_CAPACITY: int = 200000
     POLICY_LOSS_WEIGHT: float = 1.0
     VALUE_LOSS_WEIGHT: float = 1.0
