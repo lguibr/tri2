@@ -61,7 +61,10 @@ class SelfPlayWorker(threading.Thread):
         # --- State for UI Rendering ---
         self._current_game_state_lock = threading.Lock()
         self._current_game_state: Optional[GameState] = None
-        self._last_mcts_stats: Dict[str, Any] = {}
+        self._last_stats: Dict[str, Any] = {
+            "status": "Initialized",
+            "game_steps": 0,
+        }  # Include game_steps
         # --- End State for UI Rendering ---
 
         logger.info(f"{self.log_prefix} Initialized.")
@@ -85,29 +88,22 @@ class SelfPlayWorker(threading.Thread):
         }
 
     # --- Methods for UI Rendering ---
-    def get_current_game_state_copy(self) -> Optional[GameState]:
-        """Returns a deep copy of the current game state for rendering (thread-safe)."""
+    def get_current_render_data(self) -> Dict[str, Any]:
+        """Returns a dictionary containing state copy and last stats (thread-safe)."""
         with self._current_game_state_lock:
+            state_copy = None
             if self._current_game_state:
                 try:
-                    # Deepcopy to avoid race conditions during rendering
-                    return copy.deepcopy(self._current_game_state)
+                    state_copy = copy.deepcopy(self._current_game_state)
                 except Exception as e:
                     logger.error(f"{self.log_prefix} Error deepcopying game state: {e}")
-                    return None
-            return None
+            return {"state": state_copy, "stats": self._last_stats.copy()}
 
-    def get_last_mcts_stats(self) -> Dict[str, Any]:
-        """Returns the stats from the last MCTS step (thread-safe)."""
-        with self._current_game_state_lock:
-            return self._last_mcts_stats.copy()
-
-    def _update_render_state(self, game_state: GameState, mcts_stats: Dict[str, Any]):
+    def _update_render_state(self, game_state: GameState, stats: Dict[str, Any]):
         """Updates the state exposed for rendering (thread-safe)."""
         with self._current_game_state_lock:
-            # Store the actual game state object, copy happens on retrieval
             self._current_game_state = game_state
-            self._last_mcts_stats = mcts_stats
+            self._last_stats = stats.copy()  # Store a copy of the stats dict
             # Update timers within the game state for visual effects
             if hasattr(game_state, "_update_timers"):
                 game_state._update_timers()
@@ -136,7 +132,7 @@ class SelfPlayWorker(threading.Thread):
         self.last_intermediate_stats_time = time.monotonic()
 
         # Initial state update for UI
-        self._update_render_state(game, {})
+        self._update_render_state(game, {"status": "Starting", "game_steps": 0})
 
         recording_step = {
             "current_self_play_game_number": current_game_num,
@@ -153,7 +149,9 @@ class SelfPlayWorker(threading.Thread):
                 logger.info(
                     f"{self.log_prefix} Stop event set during game {current_game_num}. Aborting."
                 )
-                self._update_render_state(game, {"status": "Stopped"})
+                self._update_render_state(
+                    game, {"status": "Stopped", "game_steps": game_steps}
+                )
                 return None
 
             current_time = time.monotonic()
@@ -172,12 +170,12 @@ class SelfPlayWorker(threading.Thread):
             mcts_start_time = time.monotonic()
             self.agent.eval()
             with torch.no_grad():
-                # Run simulations and get detailed stats
                 root_node, mcts_stats = self.mcts.run_simulations(
                     root_state=game, num_simulations=self.mcts_config.NUM_SIMULATIONS
                 )
             mcts_duration = time.monotonic() - mcts_start_time
             mcts_stats["mcts_total_duration"] = mcts_duration
+            mcts_stats["game_steps"] = game_steps  # Add game steps to stats dict
             logger.debug(
                 f"{self.log_prefix} Game {current_game_num} Step {game_steps}: MCTS took {mcts_duration:.4f}s"
             )
@@ -187,9 +185,7 @@ class SelfPlayWorker(threading.Thread):
 
             temperature = self._get_temperature(game_steps)
             policy_target = self.mcts.get_policy_target(root_node, temperature)
-            game_data.append(
-                (current_state_features, policy_target, 1)
-            )  # Player 1 perspective
+            game_data.append((current_state_features, policy_target, 1))
 
             action = self.mcts.choose_action(root_node, temperature)
             step_start_time = time.monotonic()
@@ -209,12 +205,13 @@ class SelfPlayWorker(threading.Thread):
                 "mcts_nodes_explored": mcts_stats.get("nodes_created", 0),
                 "mcts_avg_depth": mcts_stats.get("avg_leaf_depth", 0.0),
                 "buffer_size": self.experience_queue.qsize(),
-                # Add other relevant step data if needed
             }
             self.stats_aggregator.record_step(step_stats_for_aggregator)
 
         # Final state update for UI
-        self._update_render_state(game, {"status": "Finished"})
+        self._update_render_state(
+            game, {"status": "Finished", "game_steps": game_steps}
+        )
 
         if self.stop_event.is_set():
             logger.info(
@@ -277,14 +274,14 @@ class SelfPlayWorker(threading.Thread):
                 logger.critical(
                     f"{self.log_prefix} CRITICAL ERROR in run loop: {e}", exc_info=True
                 )
-                # Update render state to show error
                 error_state = GameState()
                 error_state.game_over = True
-                self._update_render_state(error_state, {"status": "Error"})
+                self._update_render_state(
+                    error_state, {"status": "Error", "game_steps": 0}
+                )
                 time.sleep(1.0)
 
         logger.info(f"{self.log_prefix} Run loop finished.")
-        # Clear render state on exit
         with self._current_game_state_lock:
             self._current_game_state = None
-            self._last_mcts_stats = {}
+            self._last_stats = {"status": "Stopped", "game_steps": 0}

@@ -45,7 +45,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         previous_best: float,
         step: int,
         is_loss: bool,
-        is_time: bool = False,  # Add flag for time metrics
+        is_time: bool = False,
     ):
         """Logs a new best value achieved."""
         if (
@@ -154,7 +154,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
                 self.aggregator.storage.best_mcts_sim_time,
                 self.aggregator.storage.previous_best_mcts_sim_time,
                 g_step,
-                is_loss=True,  # Lower is better
+                is_loss=True,
                 is_time=True,
             )
 
@@ -195,6 +195,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         buf_size = summary.get("buffer_size", 0)
         min_buf = self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
         phase = "Buffering" if buf_size < min_buf and global_step == 0 else "Training"
+        steps_sec = summary.get("steps_per_second_now", 0.0)  # Use instantaneous
 
         current_game = summary.get("current_self_play_game_number", 0)
         current_game_step = summary.get("current_self_play_game_steps", 0)
@@ -204,16 +205,9 @@ class SimpleStatsRecorder(StatsRecorderBase):
             else ""
         )
 
-        # MCTS Stats Formatting
-        mcts_sim_t = summary.get("avg_mcts_sim_time_window", 0.0) * 1000  # ms
-        mcts_nn_t = summary.get("avg_mcts_nn_time_window", 0.0) * 1000  # ms
-        mcts_nodes = summary.get("avg_mcts_nodes_explored_window", 0)
-        mcts_depth = summary.get("avg_mcts_avg_depth_window", 0.0)
-        mcts_str = f"MCTS(Avg{avg_win}): {mcts_sim_t:.0f}ms (NN:{mcts_nn_t:.0f}ms) | Nodes:{mcts_nodes:.0f} | Depth:{mcts_depth:.1f}"
-
         log_items = [
             f"[{runtime_hrs:.1f}h|{phase}]",
-            f"Step: {global_step/1e6:<6.2f}M",
+            f"Step: {global_step/1e6:<6.2f}M ({steps_sec:.1f}/s)",
             f"Ep: {summary['total_episodes']:<7,}".replace(",", "_"),
             f"Buf: {buf_size:,}/{min_buf:,}".replace(",", "_"),
             f"Score(Avg{avg_win}): {summary['avg_game_score_window']:<6.0f} (Best: {best_score})",
@@ -231,9 +225,6 @@ class SimpleStatsRecorder(StatsRecorderBase):
             )
         elif phase == "Buffering":
             log_items.append("Loss: N/A")
-
-        # Add MCTS stats string
-        log_items.append(mcts_str)
 
         logger.info(" | ".join(log_items))
         self.last_log_time = time.time()

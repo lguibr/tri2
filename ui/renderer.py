@@ -124,22 +124,18 @@ class UIRenderer:
             self.game_area.render(
                 panel_width=ga_width,
                 panel_x_offset=lp_width,
-                envs=kwargs.get("envs", []),  # Pass the list of GameState objects
+                # Pass worker_render_data which is List[Optional[Dict[str, Any]]]
+                worker_render_data=kwargs.get("worker_render_data", []),
                 num_envs=kwargs.get("num_envs", 0),  # Total number of workers
                 env_config=kwargs.get("env_config"),
-                # best_game_state_data is no longer primary focus here
-                # stats_summary might be useful for overlays later
             )
 
     def _calculate_panel_widths(self, current_width: int) -> Tuple[int, int]:
         """Calculates the widths for the left and game area panels."""
-        # Keep left panel ratio, adjust if needed
-        left_panel_ratio = max(
-            0.2, min(0.8, self.vis_config.LEFT_PANEL_RATIO)
-        )  # Ensure minimum width
+        left_panel_ratio = max(0.2, min(0.8, self.vis_config.LEFT_PANEL_RATIO))
         lp_width = int(current_width * left_panel_ratio)
         ga_width = current_width - lp_width
-        min_lp_width = 400  # Increased min width for more stats
+        min_lp_width = 400
         if lp_width < min_lp_width and current_width > min_lp_width:
             lp_width = min_lp_width
             ga_width = max(0, current_width - lp_width)

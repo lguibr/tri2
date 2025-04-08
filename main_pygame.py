@@ -7,7 +7,7 @@ import logging
 import argparse
 import os
 import traceback
-from typing import Optional, Dict, Any, List  # Added List
+from typing import Optional, Dict, Any, List
 import queue
 import numpy as np
 from collections import deque
@@ -59,8 +59,6 @@ try:
     from app_ui_utils import AppUIUtils
     from ui.input_handler import InputHandler
     from agent.alphazero_net import AlphaZeroNet
-
-    # Import ProcessedExperienceBatch type if needed elsewhere
     from workers.training_worker import ProcessedExperienceBatch
 except ImportError as e:
     print(f"Error importing app components: {e}\n{traceback.format_exc()}")
@@ -178,7 +176,7 @@ class MainApp:
             "best_game_state_data": None,
             "worker_counts": {},
             "is_process_running": False,
-            "envs": [],  # List to hold worker game states
+            "worker_render_data": [],  # List to hold worker state+stats dicts
         }
         if self.stats_aggregator:
             render_data["plot_data"] = self.stats_aggregator.get_plot_data()
@@ -196,14 +194,15 @@ class MainApp:
         render_data["worker_counts"] = self.worker_manager.get_active_worker_counts()
         render_data["is_process_running"] = self.worker_manager.is_any_worker_running()
 
-        # --- Fetch worker game states ---
+        # --- Fetch worker render data (state + stats) ---
         if render_data["is_process_running"]:
             num_to_render = self.vis_config.NUM_ENVS_TO_RENDER
             if num_to_render > 0:
-                render_data["envs"] = self.worker_manager.get_worker_game_states(
-                    num_to_render
+                # Call the CORRECT method name
+                render_data["worker_render_data"] = (
+                    self.worker_manager.get_worker_render_data(num_to_render)
                 )
-        # --- End fetch worker game states ---
+        # --- End fetch worker render data ---
 
         return render_data
 
@@ -215,8 +214,9 @@ class MainApp:
                 is_process_running=render_data["is_process_running"],
                 status=self.status,
                 stats_summary=render_data["stats_summary"],
-                envs=render_data["envs"],  # Pass the fetched worker states
-                num_envs=self.train_config_instance.NUM_SELF_PLAY_WORKERS,  # Total workers
+                # Pass worker_render_data (list of dicts)
+                worker_render_data=render_data["worker_render_data"],
+                num_envs=self.train_config_instance.NUM_SELF_PLAY_WORKERS,
                 env_config=self.env_config,
                 cleanup_confirmation_active=self.cleanup_confirmation_active,
                 cleanup_message=self.cleanup_message,
@@ -241,10 +241,6 @@ class MainApp:
         """Logs average loop time periodically."""
         self.loop_times.append(time.monotonic() - loop_start_time)
         self.frame_count += 1
-        # Optional: Log timing info less frequently if needed
-        # if self.frame_count % LOOP_TIMING_INTERVAL == 0:
-        #     avg_loop_time = sum(self.loop_times) / len(self.loop_times)
-        #     logger.debug(f"Avg loop time (last {len(self.loop_times)} frames): {avg_loop_time*1000:.2f} ms")
 
     def run_main_loop(self):
         """The main application loop."""
@@ -253,9 +249,7 @@ class MainApp:
             loop_start_time = time.monotonic()
             if not self.clock:
                 break
-            # Use clock.tick_busy_loop for potentially smoother timing if CPU allows
-            # dt = self.clock.tick_busy_loop(self.vis_config.FPS) / 1000.0
-            dt = self.clock.tick(self.vis_config.FPS) / 1000.0  # Keep original for now
+            dt = self.clock.tick(self.vis_config.FPS) / 1000.0
 
             self.running = self._handle_input()
             if not self.running:
@@ -310,8 +304,7 @@ def setup_logging_and_run_id(args: argparse.Namespace):
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
-        # Use run log dir for console output as well
-        log_file_dir = get_run_log_dir()  # Changed from get_console_log_dir()
+        log_file_dir = get_run_log_dir()
         os.makedirs(log_file_dir, exist_ok=True)
         log_file_path = os.path.join(log_file_dir, "console_output.log")
         tee_logger_instance = TeeLogger(log_file_path, sys.stdout)
@@ -322,7 +315,6 @@ def setup_logging_and_run_id(args: argparse.Namespace):
 
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
-    # Set higher level for noisy libraries if needed
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logger.info(f"Logging level set to: {args.log_level.upper()}")
     logger.info(f"Using Run ID: {get_run_id()}")
@@ -376,7 +368,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received. Shutting down.")
         if app:
-            app.logic.exit_app()  # Ensure workers are signalled to stop
+            app.logic.exit_app()
             app.shutdown()
         else:
             pygame.quit()
@@ -384,7 +376,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
         if app:
-            app.logic.exit_app()  # Ensure workers are signalled to stop
+            app.logic.exit_app()
             app.shutdown()
         else:
             pygame.quit()

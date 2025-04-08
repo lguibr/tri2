@@ -12,7 +12,7 @@ class AggregatorStorage:
     def __init__(self, plot_window: int):
         self.plot_window = plot_window
 
-        # --- Deques for Plotting (AlphaZero Relevant) ---
+        # --- Deques for Plotting ---
         self.policy_losses: Deque[float] = deque(maxlen=plot_window)
         self.value_losses: Deque[float] = deque(maxlen=plot_window)
         self.episode_outcomes: Deque[float] = deque(maxlen=plot_window)
@@ -22,12 +22,13 @@ class AggregatorStorage:
         self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
         self.best_game_score_history: Deque[int] = deque(maxlen=plot_window)
         self.lr_values: Deque[float] = deque(maxlen=plot_window)
-        # --- New MCTS Stats Deques ---
         self.mcts_simulation_times: Deque[float] = deque(maxlen=plot_window)
         self.mcts_nn_prediction_times: Deque[float] = deque(maxlen=plot_window)
         self.mcts_nodes_explored: Deque[int] = deque(maxlen=plot_window)
         self.mcts_avg_depths: Deque[float] = deque(maxlen=plot_window)
-        # --- End New MCTS Stats Deques ---
+        self.steps_per_second: Deque[float] = deque(
+            maxlen=plot_window
+        )  # Added steps/sec deque
 
         # --- Scalar State Variables ---
         self.total_episodes: int = 0
@@ -43,7 +44,7 @@ class AggregatorStorage:
         self.current_self_play_game_steps: int = 0
         self.training_steps_performed: int = 0
 
-        # --- Best Value Tracking (AlphaZero Relevant) ---
+        # --- Best Value Tracking ---
         self.best_outcome: float = -float("inf")
         self.previous_best_outcome: float = -float("inf")
         self.best_outcome_step: int = 0
@@ -56,11 +57,9 @@ class AggregatorStorage:
         self.best_policy_loss: float = float("inf")
         self.previous_best_policy_loss: float = float("inf")
         self.best_policy_loss_step: int = 0
-        # --- New MCTS Best Tracking ---
-        self.best_mcts_sim_time: float = float("inf")  # Lower is better
+        self.best_mcts_sim_time: float = float("inf")
         self.previous_best_mcts_sim_time: float = float("inf")
         self.best_mcts_sim_time_step: int = 0
-        # --- End New MCTS Best Tracking ---
 
         # --- Best Game State Data ---
         self.best_game_state_data: Optional[Dict[str, Any]] = None
@@ -81,11 +80,11 @@ class AggregatorStorage:
             "buffer_sizes",
             "best_game_score_history",
             "lr_values",
-            # MCTS Stats
             "mcts_simulation_times",
             "mcts_nn_prediction_times",
             "mcts_nodes_explored",
             "mcts_avg_depths",
+            "steps_per_second",  # Added steps/sec
         ]
         return {
             name: self.get_deque(name).copy()
@@ -106,11 +105,11 @@ class AggregatorStorage:
             "buffer_sizes",
             "best_game_score_history",
             "lr_values",
-            # MCTS Stats
             "mcts_simulation_times",
             "mcts_nn_prediction_times",
             "mcts_nodes_explored",
             "mcts_avg_depths",
+            "steps_per_second",  # Added steps/sec
         ]
         for name in deque_names:
             if hasattr(self, name):
@@ -146,7 +145,6 @@ class AggregatorStorage:
             "best_policy_loss",
             "previous_best_policy_loss",
             "best_policy_loss_step",
-            # MCTS Bests
             "best_mcts_sim_time",
             "previous_best_mcts_sim_time",
             "best_mcts_sim_time_step",
@@ -184,11 +182,11 @@ class AggregatorStorage:
             "buffer_sizes",
             "best_game_score_history",
             "lr_values",
-            # MCTS Stats
             "mcts_simulation_times",
             "mcts_nn_prediction_times",
             "mcts_nodes_explored",
             "mcts_avg_depths",
+            "steps_per_second",  # Added steps/sec
         ]
         for key in deque_names:
             data = state_dict.get(key)
@@ -237,7 +235,6 @@ class AggregatorStorage:
             "best_policy_loss",
             "previous_best_policy_loss",
             "best_policy_loss_step",
-            # MCTS Bests
             "best_mcts_sim_time",
             "previous_best_mcts_sim_time",
             "best_mcts_sim_time_step",
@@ -288,6 +285,7 @@ class AggregatorStorage:
             ("current_self_play_game_number", 0),
             ("current_self_play_game_steps", 0),
             ("best_mcts_sim_time", float("inf")),
+            ("steps_per_second", deque(maxlen=self.plot_window)),
         ]:
             if not hasattr(self, attr):
                 setattr(self, attr, default)

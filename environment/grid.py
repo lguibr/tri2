@@ -1,6 +1,6 @@
 # File: environment/grid.py
 import numpy as np
-from typing import List, Tuple, Set, Dict
+from typing import List, Tuple, Set, Dict, Optional
 
 from config import EnvConfig
 from .triangle import Triangle
@@ -19,7 +19,7 @@ class Grid:
 
     def _create(self, env_config: EnvConfig) -> List[List[Triangle]]:
         """Initializes the grid with playable and death cells."""
-        cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]  # Specific to 8 rows
+        cols_per_row = [9, 11, 13, 15, 15, 13, 11, 9]
         if len(cols_per_row) != self.rows:
             raise ValueError("cols_per_row length mismatch")
         if max(cols_per_row) > self.cols:
@@ -29,8 +29,8 @@ class Grid:
         for r in range(self.rows):
             row_tris: List[Triangle] = []
             playable = cols_per_row[r]
-            pad_l = (self.cols - playable) // 2 + 1  # Adjusted padding
-            pad_r = pad_l + playable - 2  # Adjusted padding
+            pad_l = (self.cols - playable) // 2 + 1
+            pad_r = pad_l + playable - 2
             for c in range(self.cols):
                 is_death = (
                     (c < pad_l) or (c >= pad_r and pad_r > pad_l) or (playable <= 2)
@@ -56,7 +56,7 @@ class Grid:
     def _identify_playable_lines(self) -> List[Set[Triangle]]:
         """Identifies all sets of playable triangles forming potential lines."""
         lines: List[Set[Triangle]] = []
-        # 1. Horizontal Lines (1-thick)
+        # 1. Horizontal Lines
         for r in range(self.rows):
             segment: List[Triangle] = []
             for c in range(self.cols):
@@ -70,7 +70,7 @@ class Grid:
             if segment:
                 lines.append(set(segment))
 
-        # 2. Diagonal Lines (2-thick combined from 1-thick)
+        # 2. Diagonal Lines
         diag_tlbr = self._get_single_diagonal_lines(
             lambda r, c: c - r, lambda k, r: k + r
         )
@@ -81,11 +81,11 @@ class Grid:
             k_values = sorted(diag_dict.keys())
             for i in range(len(k_values) - 1):
                 k1, k2 = k_values[i], k_values[i + 1]
-                if k2 == k1 + 1:  # Check adjacency
+                if k2 == k1 + 1:
                     combined = diag_dict[k1].union(diag_dict[k2])
                     if combined:
                         lines.append(combined)
-        return [line for line in lines if line]  # Filter empty sets
+        return [line for line in lines if line]
 
     def _get_single_diagonal_lines(self, k_func, c_func) -> Dict[int, Set[Triangle]]:
         """Helper to find single-thickness diagonal lines."""
@@ -95,8 +95,7 @@ class Grid:
             for c in range(self.cols):
                 if self.valid(r, c) and not self.triangles[r][c].is_death:
                     k = k_func(r, c)
-                    min_k = min(min_k, k)
-                    max_k = max(max_k, k)
+                    min_k, max_k = min(min_k, k), max(max_k, k)
         if min_k > max_k:
             return {}
 
@@ -214,3 +213,21 @@ class Grid:
                     grid_state[0, r, c] = 1.0 if tri.is_occupied else 0.0
                     grid_state[1, r, c] = 1.0 if tri.is_up else 0.0
         return grid_state
+
+    def get_color_data(self) -> List[List[Optional[Tuple[int, int, int]]]]:
+        """Returns a 2D list of colors for occupied cells."""
+        color_data = [[None for _ in range(self.cols)] for _ in range(self.rows)]
+        for r in range(self.rows):
+            for c in range(self.cols):
+                tri = self.triangles[r][c]
+                if tri.is_occupied and not tri.is_death:
+                    color_data[r][c] = tri.color
+        return color_data
+
+    def get_death_data(self) -> np.ndarray:
+        """Returns a boolean numpy array indicating death cells."""
+        death_data = np.zeros((self.rows, self.cols), dtype=bool)
+        for r in range(self.rows):
+            for c in range(self.cols):
+                death_data[r, c] = self.triangles[r][c].is_death
+        return death_data

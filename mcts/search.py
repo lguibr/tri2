@@ -59,7 +59,7 @@ class MCTS:
             start_pred_time = time.monotonic()
             policy_probs_dict, predicted_value = self.network_predictor(state_features)
             nn_prediction_time = time.monotonic() - start_pred_time
-            logger.debug(  # Changed to debug
+            logger.info(  # Changed to debug
                 f"{self.log_prefix} NN Prediction took {nn_prediction_time:.4f}s. Value: {predicted_value:.3f}"
             )
         except Exception as e:
@@ -98,7 +98,7 @@ class MCTS:
                 )
                 continue
         expand_duration = time.monotonic() - start_expand_time
-        logger.debug(  # Changed to debug
+        logger.info(  # Changed to debug
             f"{self.log_prefix} Node expansion ({children_created_count} children) took {expand_duration:.4f}s."
         )
 
@@ -151,7 +151,7 @@ class MCTS:
         avg_leaf_depth = (
             total_leaf_depth / simulations_run if simulations_run > 0 else 0
         )
-        logger.debug(  # Changed to debug
+        logger.info(  # Changed to debug
             f"{self.log_prefix} Finished {simulations_run} simulations in {sim_duration:.4f}s. "
             f"Root visits: {root_node.visit_count}, Nodes created: {nodes_created_this_run}, "
             f"Total NN time: {total_nn_prediction_time:.4f}s, Avg Depth: {avg_leaf_depth:.1f}"

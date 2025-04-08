@@ -9,6 +9,7 @@ from utils.helpers import format_eta
 
 if TYPE_CHECKING:
     from environment.game_state import GameState
+    from environment.grid import Grid
 
 
 class AggregatorLogic:
@@ -31,7 +32,6 @@ class AggregatorLogic:
         count = min(len(deque_instance), window)
         if count == 0:
             return 0.0
-        # Use slicing for efficiency
         last_n = list(deque_instance)[-count:]
         return sum(last_n) / count
 
@@ -49,7 +49,9 @@ class AggregatorLogic:
         update_info = {}
         self.storage.total_episodes += 1
         self._update_deque(self.storage.episode_outcomes, episode_outcome)
-        self._update_deque(self.storage.episode_lengths, episode_length)
+        self._update_deque(
+            self.storage.episode_lengths, episode_length
+        )  # Ensure length is updated
 
         if game_score is not None:
             self._update_deque(self.storage.game_scores, game_score)
@@ -61,24 +63,27 @@ class AggregatorLogic:
                 self._update_deque(
                     self.storage.best_game_score_history, self.storage.best_game_score
                 )
-                # Store best game state data
-                if game_state_for_best:
+                if game_state_for_best and hasattr(game_state_for_best, "grid"):
+                    grid_instance: "Grid" = game_state_for_best.grid
                     try:
                         state_dict = game_state_for_best.get_state()
+                        color_data = grid_instance.get_color_data()
+                        death_data = grid_instance.get_death_data()
+
                         self.storage.best_game_state_data = {
                             "score": game_score,
                             "step": current_step,
-                            "occupancy": state_dict["grid"][0],  # Occupancy channel
-                            "colors": game_state_for_best.grid.get_color_data(),
-                            "death": game_state_for_best.grid.get_death_data(),
-                            "is_up": state_dict["grid"][1],  # Orientation channel
+                            "occupancy": state_dict["grid"][0],
+                            "colors": color_data,
+                            "death": death_data,
+                            "is_up": state_dict["grid"][1],
                             "rows": game_state_for_best.env_config.ROWS,
                             "cols": game_state_for_best.env_config.COLS,
                         }
                     except Exception as e:
                         print(f"Error storing best game state data: {e}")
                         self.storage.best_game_state_data = None
-            elif not self.storage.best_game_score_history:  # Add initial best score
+            elif not self.storage.best_game_score_history:
                 self._update_deque(
                     self.storage.best_game_score_history, self.storage.best_game_score
                 )
@@ -89,7 +94,6 @@ class AggregatorLogic:
             )
             self.storage.total_triangles_cleared += triangles_cleared
 
-        # Update intermediate progress tracker
         self.storage.current_self_play_game_number = episode_num + 1
         self.storage.current_self_play_game_steps = 0
 
@@ -130,7 +134,7 @@ class AggregatorLogic:
         if training_steps is not None:
             self.storage.training_steps_performed = training_steps
 
-        # MCTS Stats (from SelfPlayWorker)
+        # MCTS Stats
         mcts_sim_time = step_data.get("mcts_sim_time")
         mcts_nn_time = step_data.get("mcts_nn_time")
         mcts_nodes = step_data.get("mcts_nodes_explored")
@@ -159,6 +163,9 @@ class AggregatorLogic:
             self._update_deque(self.storage.buffer_sizes, buffer_size)
             self.storage.current_buffer_size = buffer_size
 
+        # Steps per second (calculated in summary, but store instantaneous if needed)
+        # No need to update deque here, done in calculate_summary
+
         # Intermediate Progress
         game_num = step_data.get("current_self_play_game_number")
         game_step = step_data.get("current_self_play_game_steps")
@@ -176,7 +183,7 @@ class AggregatorLogic:
         summary = {}
         elapsed_time = time.time() - self.storage.start_time
 
-        # Calculate averages using the specified window
+        # Calculate averages
         summary["avg_game_score_window"] = self._calculate_average(
             self.storage.game_scores, avg_window
         )
@@ -192,7 +199,6 @@ class AggregatorLogic:
         summary["avg_value_loss_window"] = self._calculate_average(
             self.storage.value_losses, avg_window
         )
-        # MCTS Averages
         summary["avg_mcts_sim_time_window"] = self._calculate_average(
             self.storage.mcts_simulation_times, avg_window
         )
@@ -238,7 +244,7 @@ class AggregatorLogic:
         summary["best_mcts_sim_time"] = self.storage.best_mcts_sim_time
         summary["best_mcts_sim_time_step"] = self.storage.best_mcts_sim_time_step
 
-        # Add previous bests for comparison in logs
+        # Add previous bests
         summary["previous_best_outcome"] = self.storage.previous_best_outcome
         summary["previous_best_game_score"] = self.storage.previous_best_game_score
         summary["previous_best_value_loss"] = self.storage.previous_best_value_loss
@@ -247,26 +253,36 @@ class AggregatorLogic:
             self.storage.previous_best_mcts_sim_time
         )
 
-        # Calculate ETA if target step is set
+        # Calculate steps per second (more robustly)
+        steps_per_second = 0
+        # Use training_steps_performed for SPS calculation if available and > 0
+        steps_for_sps = (
+            self.storage.training_steps_performed
+            if self.storage.training_steps_performed > 0
+            else current_global_step
+        )
+        if elapsed_time > 1 and steps_for_sps > 0:
+            steps_per_second = steps_for_sps / elapsed_time
+        summary["steps_per_second"] = steps_per_second
+        # Update deque for plotting steps/sec
+        self._update_deque(self.storage.steps_per_second, steps_per_second)
+
+        # Calculate ETA
         eta_seconds = None
-        if self.storage.training_target_step > 0 and current_global_step > 0:
-            steps_remaining = self.storage.training_target_step - current_global_step
-            if (
-                steps_remaining > 0 and elapsed_time > 10
-            ):  # Avoid division by zero and early instability
-                steps_per_second = current_global_step / elapsed_time
-                if steps_per_second > 1e-3:
-                    eta_seconds = steps_remaining / steps_per_second
+        if self.storage.training_target_step > 0 and steps_per_second > 1e-3:
+            # Use training_steps_performed if available for ETA calculation
+            current_progress_step = (
+                self.storage.training_steps_performed
+                if self.storage.training_steps_performed > 0
+                else current_global_step
+            )
+            steps_remaining = self.storage.training_target_step - current_progress_step
+            if steps_remaining > 0:
+                eta_seconds = steps_remaining / steps_per_second
         summary["eta_seconds"] = eta_seconds
         summary["eta_formatted"] = format_eta(eta_seconds)
 
-        # Calculate steps per second
-        steps_per_second = 0
-        if elapsed_time > 1:
-            steps_per_second = current_global_step / elapsed_time
-        summary["steps_per_second"] = steps_per_second
-
-        # Use latest deque values for instantaneous metrics if available
+        # Use latest deque values for instantaneous metrics
         summary["policy_loss"] = (
             self.storage.policy_losses[-1] if self.storage.policy_losses else 0.0
         )
@@ -291,5 +307,11 @@ class AggregatorLogic:
         summary["mcts_avg_depth"] = (
             self.storage.mcts_avg_depths[-1] if self.storage.mcts_avg_depths else 0.0
         )
+        summary["buffer_size_now"] = (
+            self.storage.buffer_sizes[-1]
+            if self.storage.buffer_sizes
+            else self.storage.current_buffer_size
+        )
+        summary["steps_per_second_now"] = steps_per_second  # Use calculated value
 
         return summary

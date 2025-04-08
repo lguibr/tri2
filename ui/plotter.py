@@ -1,3 +1,4 @@
+# File: ui/plotter.py
 import pygame
 from typing import Dict, Optional, Deque, Tuple
 from collections import deque
@@ -22,13 +23,11 @@ class Plotter:
     def __init__(self):
         self.plot_surface_cache: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
-        # Significantly increase update interval to reduce overhead
-        self.plot_update_interval: float = 2.5  # Increased from 2.0
+        self.plot_update_interval: float = 2.5
         self.rolling_window_sizes = StatsConfig.STATS_AVG_WINDOW
         self.plot_data_window = StatsConfig.PLOT_DATA_WINDOW
         self.colors = self._init_colors()
 
-        # --- Matplotlib Caching ---
         self.fig: Optional[plt.Figure] = None
         self.axes: Optional[np.ndarray] = None
         self.last_target_size: Tuple[int, int] = (0, 0)
@@ -40,18 +39,27 @@ class Plotter:
 
     def _init_colors(self) -> Dict[str, Tuple[float, float, float]]:
         """Initializes plot colors."""
-        # Use distinct colors
         return {
-            "game_score": normalize_color_for_matplotlib(
-                VisConfig.GOOGLE_COLORS[0]
-            ),  # Green
-            "policy_loss": normalize_color_for_matplotlib(VisConfig.RED),
-            "value_loss": normalize_color_for_matplotlib(VisConfig.ORANGE),
+            "game_scores": normalize_color_for_matplotlib(VisConfig.GREEN),
+            "policy_losses": normalize_color_for_matplotlib(VisConfig.RED),
+            "value_losses": normalize_color_for_matplotlib(VisConfig.ORANGE),
             "episode_lengths": normalize_color_for_matplotlib(VisConfig.BLUE),
             "episode_outcomes": normalize_color_for_matplotlib(VisConfig.YELLOW),
-            "tris_cleared": normalize_color_for_matplotlib(VisConfig.CYAN),
-            "lr": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[2]),  # Blueish
-            "buffer": normalize_color_for_matplotlib(VisConfig.PURPLE),
+            "episode_triangles_cleared": normalize_color_for_matplotlib(VisConfig.CYAN),
+            "lr_values": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[2]),
+            "buffer_sizes": normalize_color_for_matplotlib(VisConfig.PURPLE),
+            "best_game_score_history": normalize_color_for_matplotlib(VisConfig.GREEN),
+            "mcts_simulation_times": normalize_color_for_matplotlib(
+                VisConfig.GOOGLE_COLORS[1]
+            ),
+            "mcts_nn_prediction_times": normalize_color_for_matplotlib(
+                VisConfig.GOOGLE_COLORS[3]
+            ),
+            "mcts_nodes_explored": normalize_color_for_matplotlib(VisConfig.LIGHTG),
+            "mcts_avg_depths": normalize_color_for_matplotlib(VisConfig.WHITE),
+            "steps_per_second": normalize_color_for_matplotlib(
+                VisConfig.GOOGLE_COLORS[0]
+            ),
             "placeholder": normalize_color_for_matplotlib(VisConfig.GRAY),
         }
 
@@ -61,27 +69,22 @@ class Plotter:
             f"[Plotter] Initializing Matplotlib figure for size {target_width}x{target_height}"
         )
         if self.fig:
-            plt.close(self.fig)  # Ensure old figure is closed
+            plt.close(self.fig)
 
-        dpi = 90  # Keep DPI reasonable
+        dpi = 90
         fig_width_in = max(1, target_width / dpi)
         fig_height_in = max(1, target_height / dpi)
 
         try:
+            # 5 rows, 3 columns grid
             self.fig, self.axes = plt.subplots(
-                4, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
+                5, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
             )
-            # Adjust subplot parameters for tighter layout
             self.fig.subplots_adjust(
-                hspace=0.25,  # Increased vertical space slightly
-                wspace=0.15,  # Increased horizontal space slightly
-                left=0.06,  # Reduced left margin
-                right=0.98,  # Kept right margin
-                bottom=0.06,  # Reduced bottom margin
-                top=0.96,  # Reduced top margin
+                hspace=0.3, wspace=0.2, left=0.07, right=0.97, bottom=0.05, top=0.97
             )
             self.last_target_size = (target_width, target_height)
-            logger.debug("[Plotter] Matplotlib figure initialized.")
+            logger.debug("[Plotter] Matplotlib figure initialized (5x3 grid).")
         except Exception as e:
             logger.error(f"Error creating Matplotlib figure: {e}", exc_info=True)
             self.fig = None
@@ -91,22 +94,38 @@ class Plotter:
     def _get_data_hash(self, plot_data: Dict[str, Deque]) -> int:
         """Generates a simple hash based on data lengths and last elements."""
         hash_val = 0
-        # Use sorted keys for consistent hash order
-        for key in sorted(plot_data.keys()):
-            dq = plot_data[key]
+        # Include all keys used in plot_defs
+        keys_to_hash = [
+            "game_scores",
+            "episode_outcomes",
+            "episode_lengths",
+            "policy_losses",
+            "value_losses",
+            "lr_values",
+            "episode_triangles_cleared",
+            "best_game_score_history",
+            "buffer_sizes",
+            "mcts_simulation_times",
+            "mcts_nn_prediction_times",
+            "steps_per_second",
+            "mcts_nodes_explored",
+            "mcts_avg_depths",
+        ]
+        for key in sorted(keys_to_hash):
+            dq = plot_data.get(key)  # Use .get() to handle missing keys gracefully
+            if dq is None:
+                continue  # Skip if key doesn't exist in plot_data
             hash_val ^= hash(key)
             hash_val ^= len(dq)
             if dq:
                 try:
-                    # Hash the last element for change detection
                     last_elem = dq[-1]
                     if isinstance(last_elem, (int, float)):
-                        # Use a stable representation for floats
                         hash_val ^= hash(f"{last_elem:.6f}")
                     else:
-                        hash_val ^= hash(str(last_elem))  # Fallback to string hash
+                        hash_val ^= hash(str(last_elem))
                 except IndexError:
-                    pass  # deque might be empty
+                    pass
         return hash_val
 
     def _update_plot_data(self, plot_data: Dict[str, Deque]):
@@ -118,53 +137,68 @@ class Plotter:
         plot_update_start = time.monotonic()
         try:
             axes_flat = self.axes.flatten()
-            # --- Define Plot Order ---
-            # Row 1: Core Performance
-            # Row 2: Losses
-            # Row 3: Game Details
-            # Row 4: System/Training Details
+            # --- Define Plot Order (5x3 Grid) ---
             plot_defs = [
-                # --- Row 1 ---
-                ("game_scores", "Game Score", self.colors["game_score"], False),
+                # Row 1
+                ("game_scores", "Game Score", self.colors["game_scores"], False),
                 (
                     "episode_outcomes",
-                    "Episode Outcome",
+                    "Ep Outcome",
                     self.colors["episode_outcomes"],
                     False,
                 ),
                 ("episode_lengths", "Ep Length", self.colors["episode_lengths"], False),
-                # --- Row 2 ---
-                (
-                    "policy_losses",
-                    "Policy Loss",
-                    self.colors["policy_loss"],
-                    True,
-                ),  # Log scale
-                (
-                    "value_losses",
-                    "Value Loss",
-                    self.colors["value_loss"],
-                    True,
-                ),  # Log scale
+                # Row 2
+                ("policy_losses", "Policy Loss", self.colors["policy_losses"], True),
+                ("value_losses", "Value Loss", self.colors["value_losses"], True),
+                ("lr_values", "Learning Rate", self.colors["lr_values"], True),
+                # Row 3
                 (
                     "episode_triangles_cleared",
-                    "Tris Cleared / Ep",
-                    self.colors["tris_cleared"],
+                    "Tris Cleared/Ep",
+                    self.colors["episode_triangles_cleared"],
                     False,
                 ),
-                # --- Row 3 ---
-                ("lr_values", "Learning Rate", self.colors["lr"], True),  # Log scale
-                ("buffer_sizes", "Buffer Size", self.colors["buffer"], False),
                 (
                     "best_game_score_history",
-                    "Best Score History",
-                    self.colors["game_score"],
+                    "Best Score Hist",
+                    self.colors["best_game_score_history"],
                     False,
-                ),  # Re-use color
-                # --- Row 4 (Placeholders) ---
-                ("placeholder1", "Future Plot 1", self.colors["placeholder"], False),
-                ("placeholder2", "Future Plot 2", self.colors["placeholder"], False),
-                ("placeholder3", "Future Plot 3", self.colors["placeholder"], False),
+                ),
+                ("buffer_sizes", "Buffer Size", self.colors["buffer_sizes"], False),
+                # Row 4 (MCTS Timings / System)
+                (
+                    "mcts_simulation_times",
+                    "MCTS Sim Time (s)",
+                    self.colors["mcts_simulation_times"],
+                    False,
+                ),
+                (
+                    "mcts_nn_prediction_times",
+                    "MCTS NN Time (s)",
+                    self.colors["mcts_nn_prediction_times"],
+                    False,
+                ),
+                (
+                    "steps_per_second",
+                    "Steps/Sec",
+                    self.colors["steps_per_second"],
+                    False,
+                ),
+                # Row 5 (MCTS Structure)
+                (
+                    "mcts_nodes_explored",
+                    "MCTS Nodes Explored",
+                    self.colors["mcts_nodes_explored"],
+                    False,
+                ),
+                (
+                    "mcts_avg_depths",
+                    "MCTS Avg Depth",
+                    self.colors["mcts_avg_depths"],
+                    False,
+                ),
+                ("placeholder3", "Future Plot", self.colors["placeholder"], False),
             ]
 
             data_lists = {
@@ -173,9 +207,9 @@ class Plotter:
 
             for i, (data_key, label, color, log_scale) in enumerate(plot_defs):
                 if i >= len(axes_flat):
-                    break  # Avoid index error if grid changes
+                    break
                 ax = axes_flat[i]
-                ax.clear()  # Clear previous plot elements efficiently
+                ax.clear()
                 render_single_plot(
                     ax,
                     data_lists[data_key],
@@ -185,11 +219,10 @@ class Plotter:
                     placeholder_text=label,
                     y_log_scale=log_scale,
                 )
-                # Configure axes appearance after plotting
-                if i < 9:  # Hide x-labels for top rows
+                if i < 12:  # Hide x-labels for top 4 rows
                     ax.set_xticklabels([])
                     ax.set_xlabel("")
-                ax.tick_params(axis="x", rotation=0)  # Ensure x-ticks aren't rotated
+                ax.tick_params(axis="x", rotation=0)
 
             plot_update_duration = time.monotonic() - plot_update_start
             logger.debug(f"[Plotter] Plot data updated in {plot_update_duration:.4f}s")
@@ -197,7 +230,6 @@ class Plotter:
 
         except Exception as e:
             logger.error(f"Error updating plot data: {e}", exc_info=True)
-            # Attempt to clear axes to prevent stale display on error
             try:
                 for ax in self.axes.flatten():
                     ax.clear()
@@ -215,10 +247,7 @@ class Plotter:
 
         render_start = time.monotonic()
         try:
-            # Draw the canvas without recalculating layout
             self.fig.canvas.draw()
-
-            # Render to buffer
             buf = BytesIO()
             self.fig.savefig(
                 buf,
@@ -227,24 +256,19 @@ class Plotter:
                 facecolor=plt.rcParams["figure.facecolor"],
             )
             buf.seek(0)
-            plot_img_surface = pygame.image.load(
-                buf, "png"
-            ).convert()  # Use convert for performance
+            plot_img_surface = pygame.image.load(buf, "png").convert()
             buf.close()
 
-            # Resize if necessary (only if target size differs from figure size)
-            # Note: Figure size might slightly differ due to DPI and subplot adjustments
             current_size = plot_img_surface.get_size()
             if current_size != (target_width, target_height):
-                # Use smoothscale for better quality if sizes differ significantly
                 scale_diff = abs(current_size[0] - target_width) + abs(
                     current_size[1] - target_height
                 )
-                if scale_diff > 10:  # Threshold to use smoothscale
+                if scale_diff > 10:
                     plot_img_surface = pygame.transform.smoothscale(
                         plot_img_surface, (target_width, target_height)
                     )
-                else:  # Use faster scale for minor adjustments
+                else:
                     plot_img_surface = pygame.transform.scale(
                         plot_img_surface, (target_width, target_height)
                     )
@@ -269,14 +293,12 @@ class Plotter:
         has_data = any(d for d in plot_data.values())
         target_size = (target_width, target_height)
 
-        # Conditions for full re-initialization
         needs_reinit = (
             self.fig is None
             or self.axes is None
             or self.last_target_size != target_size
         )
 
-        # Conditions for data update and re-render
         current_data_hash = self._get_data_hash(plot_data)
         data_changed = self.last_data_hash != current_data_hash
         time_elapsed = (
@@ -284,7 +306,6 @@ class Plotter:
         )
         needs_update = data_changed or time_elapsed
 
-        # Check if plotting is feasible
         can_create_plot = target_width > 50 and target_height > 50
 
         if not can_create_plot:
@@ -292,23 +313,22 @@ class Plotter:
                 logger.debug("[Plotter] Target size too small, clearing cache.")
                 self.plot_surface_cache = None
                 if self.fig:
-                    plt.close(self.fig)  # Close figure if clearing cache
+                    plt.close(self.fig)
                 self.fig, self.axes = None, None
                 self.last_target_size = (0, 0)
-            return None  # Cannot plot if area is too small
+            return None
 
         if not has_data:
             if self.plot_surface_cache is not None:
                 logger.debug("[Plotter] No data, clearing cache.")
                 self.plot_surface_cache = None
                 if self.fig:
-                    plt.close(self.fig)  # Close figure if clearing cache
+                    plt.close(self.fig)
                 self.fig, self.axes = None, None
                 self.last_target_size = (0, 0)
-            return None  # Cannot plot if no data
+            return None
 
-        # --- Logic ---
-        cache_status = "HIT"  # Assume cache hit initially
+        cache_status = "HIT"
         try:
             if needs_reinit:
                 cache_status = "MISS (Re-init)"
@@ -323,9 +343,9 @@ class Plotter:
                         )
                         self.last_plot_update_time = current_time
                         self.last_data_hash = current_data_hash
-                    else:  # Update failed after re-init
+                    else:
                         self.plot_surface_cache = None
-                else:  # Figure init failed
+                else:
                     self.plot_surface_cache = None
 
             elif needs_update:
@@ -339,15 +359,13 @@ class Plotter:
                     )
                     self.last_plot_update_time = current_time
                     self.last_data_hash = current_data_hash
-                else:  # Update failed, keep old cache but log error
+                else:
                     logger.warning(
                         "[Plotter] Plot data update failed, returning potentially stale cache."
                     )
                     cache_status = "ERROR (Update Failed)"
 
-            # Else: No need to update, return existing cache
             elif self.plot_surface_cache is None:
-                # Edge case: cache is None but shouldn't be (e.g., after error)
                 cache_status = "MISS (Cache None)"
                 logger.debug(f"[Plotter] {cache_status}, attempting re-render.")
                 if self._update_plot_data(plot_data):
@@ -357,16 +375,13 @@ class Plotter:
                     self.last_plot_update_time = current_time
                     self.last_data_hash = current_data_hash
 
-            # Log cache status only if it wasn't a hit
-            if cache_status != "HIT":
-                logger.info(f"[Plotter] Cache Status: {cache_status}")
 
         except Exception as e:
             logger.error(
                 f"[Plotter] Unexpected error in get_cached_or_updated_plot: {e}",
                 exc_info=True,
             )
-            self.plot_surface_cache = None  # Clear cache on major error
+            self.plot_surface_cache = None
             if self.fig:
                 plt.close(self.fig)
             self.fig, self.axes = None, None
@@ -375,7 +390,6 @@ class Plotter:
         return self.plot_surface_cache
 
     def __del__(self):
-        # Ensure Matplotlib figure is closed when Plotter is garbage collected
         if self.fig:
             try:
                 plt.close(self.fig)

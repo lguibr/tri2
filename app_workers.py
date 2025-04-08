@@ -2,11 +2,11 @@
 import threading
 import queue
 import time
-from typing import TYPE_CHECKING, Optional, List, Dict, Tuple
+from typing import TYPE_CHECKING, Optional, List, Dict, Tuple, Any
 
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
-from environment.game_state import GameState  # Import GameState
+from environment.game_state import GameState
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
@@ -17,7 +17,6 @@ class AppWorkerManager:
 
     def __init__(self, app: "MainApp"):
         self.app = app
-        # Keep references to the worker *instances* from AppInitializer
         self.self_play_worker_threads: List[SelfPlayWorker] = []
         self.training_worker_thread: Optional[TrainingWorker] = None
         print("[AppWorkerManager] Initialized.")
@@ -45,31 +44,41 @@ class AppWorkerManager:
         """Checks if any worker thread is active."""
         return self.is_self_play_running() or self.is_training_running()
 
-    def get_worker_game_states(self, max_envs: int) -> List[Optional[GameState]]:
-        """Retrieves copies of game states from active self-play workers."""
-        states: List[Optional[GameState]] = []
+    # Renamed method
+    def get_worker_render_data(self, max_envs: int) -> List[Optional[Dict[str, Any]]]:
+        """
+        Retrieves render data (state copy and stats) from active self-play workers.
+        Returns a list of dictionaries or None.
+        """
+        render_data_list: List[Optional[Dict[str, Any]]] = []
         count = 0
-        # Iterate through the worker instances stored in the initializer
-        # as self.self_play_worker_threads might be cleared during stop
         worker_instances = self.app.initializer.self_play_workers
         for worker in worker_instances:
             if count >= max_envs:
                 break
-            if worker and worker.is_alive():
-                state_copy = worker.get_current_game_state_copy()
-                states.append(state_copy)
+            if (
+                worker
+                and worker.is_alive()
+                and hasattr(worker, "get_current_render_data")
+            ):
+                try:
+                    data = worker.get_current_render_data()
+                    render_data_list.append(data)
+                except Exception as e:
+                    print(
+                        f"Error getting render data from worker {worker.worker_id}: {e}"
+                    )
+                    render_data_list.append(None)
                 count += 1
             else:
-                # Append None if worker is not alive or doesn't exist
-                states.append(None)
+                render_data_list.append(None)
                 count += 1
 
-        # Fill remaining slots with None if fewer workers than max_envs
         while count < max_envs:
-            states.append(None)
+            render_data_list.append(None)
             count += 1
 
-        return states
+        return render_data_list
 
     def start_all_workers(self):
         """Starts all initialized worker threads if they are not already running."""
@@ -104,7 +113,7 @@ class AppWorkerManager:
         print("[AppWorkerManager] Starting all worker threads...")
         self.app.stop_event.clear()
 
-        self.self_play_worker_threads = []  # Reset the list of active threads
+        self.self_play_worker_threads = []
         for i, worker_instance in enumerate(self.app.initializer.self_play_workers):
             if worker_instance:
                 if not worker_instance.is_alive():
@@ -159,16 +168,24 @@ class AppWorkerManager:
 
     def stop_all_workers(self, join_timeout: float = 5.0):
         """Signals ALL worker threads to stop and waits for them to join."""
-        if not self.is_any_worker_running():
-            print("[AppWorkerManager] No workers running to stop.")
-            return
+        if not self.is_any_worker_running() and not any(
+            w and not w.is_alive() for w in self.app.initializer.self_play_workers
+        ):
+            if (
+                not self.app.initializer.self_play_workers
+                and not self.app.initializer.training_worker
+            ):
+                print("[AppWorkerManager] No workers initialized to stop.")
+                return
+            elif not self.is_any_worker_running():
+                print("[AppWorkerManager] No workers currently running to stop.")
+                return
 
         print("[AppWorkerManager] Stopping ALL worker threads...")
         self.app.stop_event.set()
 
         threads_to_join: List[Tuple[str, threading.Thread]] = []
 
-        # Use the instances from the initializer list for joining
         for i, worker in enumerate(self.app.initializer.self_play_workers):
             if worker and worker.is_alive():
                 threads_to_join.append((f"SelfPlayWorker-{i}", worker))
@@ -182,20 +199,24 @@ class AppWorkerManager:
             )
 
         start_join_time = time.time()
-        for name, thread in threads_to_join:
-            remaining_timeout = max(0.1, join_timeout - (time.time() - start_join_time))
-            print(
-                f"[AppWorkerManager] Joining {name} (timeout: {remaining_timeout:.1f}s)..."
-            )
-            thread.join(timeout=remaining_timeout)
-            if thread.is_alive():
-                print(
-                    f"[AppWorkerManager] WARNING: {name} thread did not join cleanly."
+        if not threads_to_join:
+            print("[AppWorkerManager] No active threads found to join.")
+        else:
+            for name, thread in threads_to_join:
+                remaining_timeout = max(
+                    0.1, join_timeout - (time.time() - start_join_time)
                 )
-            else:
-                print(f"[AppWorkerManager] {name} joined.")
+                print(
+                    f"[AppWorkerManager] Joining {name} (timeout: {remaining_timeout:.1f}s)..."
+                )
+                thread.join(timeout=remaining_timeout)
+                if thread.is_alive():
+                    print(
+                        f"[AppWorkerManager] WARNING: {name} thread did not join cleanly."
+                    )
+                else:
+                    print(f"[AppWorkerManager] {name} joined.")
 
-        # Clear active thread references after joining
         self.self_play_worker_threads = []
         self.training_worker_thread = None
 
