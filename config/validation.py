@@ -1,3 +1,4 @@
+# File: config/validation.py
 from .core import (
     EnvConfig,
     RNNConfig,
@@ -22,6 +23,7 @@ def print_config_info_and_validate():
     transformer_config_instance = TransformerConfig()
     train_config_instance = TrainConfig()
     mcts_config_instance = MCTSConfig()
+    vis_config_instance = VisConfig()  # Get instance for NUM_ENVS_TO_RENDER
 
     run_id = get_run_id()
     run_log_dir = get_run_log_dir()
@@ -32,7 +34,6 @@ def print_config_info_and_validate():
     print(f"Log Directory: {run_log_dir}")
     print(f"Checkpoint Directory: {run_checkpoint_dir}")
     print(f"Device: {DEVICE}")
-    # Removed TensorBoard logging status print
 
     if train_config_instance.LOAD_CHECKPOINT_PATH:
         print(
@@ -71,13 +72,12 @@ def print_config_info_and_validate():
     )
 
     print(
-        f"MCTS: Sims={mcts_config_instance.NUM_SIMULATIONS}, "  # Updated Sims
+        f"MCTS: Sims={mcts_config_instance.NUM_SIMULATIONS}, "
         f"PUCT_C={mcts_config_instance.PUCT_C:.2f}, "
         f"Temp={mcts_config_instance.TEMPERATURE_INITIAL:.2f}->{mcts_config_instance.TEMPERATURE_FINAL:.2f}, "
         f"Dirichlet(α={mcts_config_instance.DIRICHLET_ALPHA:.2f}, ε={mcts_config_instance.DIRICHLET_EPSILON:.2f})"
     )
 
-    # Add LR Scheduler Info
     scheduler_info = "DISABLED"
     if train_config_instance.USE_LR_SCHEDULER:
         scheduler_info = f"{train_config_instance.SCHEDULER_TYPE} (T_max={train_config_instance.SCHEDULER_T_MAX:,}, eta_min={train_config_instance.SCHEDULER_ETA_MIN:.1e})"
@@ -90,15 +90,14 @@ def print_config_info_and_validate():
     )
     print(
         f"Workers: Self-Play={train_config_instance.NUM_SELF_PLAY_WORKERS}, Training=1"
-    )  # Updated Workers
+    )
     print(
         f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (updates/episodes)"
     )
 
-    render_info = "Best State (when running)"
-    if VisConfig.NUM_ENVS_TO_RENDER > 0:
-        render_info += f" / First {VisConfig.NUM_ENVS_TO_RENDER} Envs (when idle)"
-    else:
-        render_info += " / Placeholder (when idle)"
-    print(f"--- Rendering {render_info} in Game Area ---")  # Updated Render info
+    # Updated Rendering Info
+    render_info = (
+        f"Live Self-Play Workers (Max: {vis_config_instance.NUM_ENVS_TO_RENDER})"
+    )
+    print(f"--- Rendering {render_info} in Game Area ---")
     print("-" * 70)

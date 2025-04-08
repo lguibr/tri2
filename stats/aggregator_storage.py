@@ -1,3 +1,4 @@
+# File: stats/aggregator_storage.py
 from collections import deque
 from typing import Deque, Dict, Any, List, Optional
 import time
@@ -12,55 +13,37 @@ class AggregatorStorage:
         self.plot_window = plot_window
 
         # --- Deques for Plotting (AlphaZero Relevant) ---
-        # Stores recent values for plotting trends. Max length defined by plot_window.
         self.policy_losses: Deque[float] = deque(maxlen=plot_window)
         self.value_losses: Deque[float] = deque(maxlen=plot_window)
-        self.episode_outcomes: Deque[float] = deque(
-            maxlen=plot_window
-        )  # -1 (loss), 0 (draw), 1 (win)
-        self.episode_lengths: Deque[int] = deque(
-            maxlen=plot_window
-        )  # Steps per episode
-        self.game_scores: Deque[int] = deque(
-            maxlen=plot_window
-        )  # Raw game score per episode
+        self.episode_outcomes: Deque[float] = deque(maxlen=plot_window)
+        self.episode_lengths: Deque[int] = deque(maxlen=plot_window)
+        self.game_scores: Deque[int] = deque(maxlen=plot_window)
         self.episode_triangles_cleared: Deque[int] = deque(maxlen=plot_window)
-        self.buffer_sizes: Deque[int] = deque(
-            maxlen=plot_window
-        )  # Replay buffer size over time
-        self.best_game_score_history: Deque[int] = deque(
-            maxlen=plot_window
-        )  # Tracks the best score found so far
-        self.lr_values: Deque[float] = deque(
-            maxlen=plot_window
-        )  # Learning rate over time
+        self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
+        self.best_game_score_history: Deque[int] = deque(maxlen=plot_window)
+        self.lr_values: Deque[float] = deque(maxlen=plot_window)
+        # --- New MCTS Stats Deques ---
+        self.mcts_simulation_times: Deque[float] = deque(maxlen=plot_window)
+        self.mcts_nn_prediction_times: Deque[float] = deque(maxlen=plot_window)
+        self.mcts_nodes_explored: Deque[int] = deque(maxlen=plot_window)
+        self.mcts_avg_depths: Deque[float] = deque(maxlen=plot_window)
+        # --- End New MCTS Stats Deques ---
 
         # --- Scalar State Variables ---
-        # Tracks overall progress and current state.
-        self.total_episodes: int = 0  # Total completed episodes since start/load
-        self.total_triangles_cleared: int = 0  # Cumulative triangles cleared
-        self.current_buffer_size: int = 0  # Latest known buffer size
-        self.current_global_step: int = 0  # Tracks NN training steps primarily
-        self.current_lr: float = 0.0  # Current learning rate
-        self.start_time: float = time.time()  # Timestamp of aggregator creation/load
-        self.training_target_step: int = (
-            0  # Target training step for completion (if any)
-        )
+        self.total_episodes: int = 0
+        self.total_triangles_cleared: int = 0
+        self.current_buffer_size: int = 0
+        self.current_global_step: int = 0
+        self.current_lr: float = 0.0
+        self.start_time: float = time.time()
+        self.training_target_step: int = 0
 
         # --- Intermediate Progress Tracking ---
-        # Useful for detailed status updates during runs.
-        self.current_self_play_game_number: int = (
-            0  # Track which game is being played by workers
-        )
-        self.current_self_play_game_steps: int = (
-            0  # Steps within the current self-play game
-        )
-        self.training_steps_performed: int = (
-            0  # Total training steps executed by training worker
-        )
+        self.current_self_play_game_number: int = 0
+        self.current_self_play_game_steps: int = 0
+        self.training_steps_performed: int = 0
 
         # --- Best Value Tracking (AlphaZero Relevant) ---
-        # Stores the best values achieved and the step they occurred at.
         self.best_outcome: float = -float("inf")
         self.previous_best_outcome: float = -float("inf")
         self.best_outcome_step: int = 0
@@ -73,9 +56,13 @@ class AggregatorStorage:
         self.best_policy_loss: float = float("inf")
         self.previous_best_policy_loss: float = float("inf")
         self.best_policy_loss_step: int = 0
+        # --- New MCTS Best Tracking ---
+        self.best_mcts_sim_time: float = float("inf")  # Lower is better
+        self.previous_best_mcts_sim_time: float = float("inf")
+        self.best_mcts_sim_time_step: int = 0
+        # --- End New MCTS Best Tracking ---
 
         # --- Best Game State Data ---
-        # Stores data needed to visualize the best game state found.
         self.best_game_state_data: Optional[Dict[str, Any]] = None
 
     def get_deque(self, name: str) -> Deque:
@@ -94,6 +81,11 @@ class AggregatorStorage:
             "buffer_sizes",
             "best_game_score_history",
             "lr_values",
+            # MCTS Stats
+            "mcts_simulation_times",
+            "mcts_nn_prediction_times",
+            "mcts_nodes_explored",
+            "mcts_avg_depths",
         ]
         return {
             name: self.get_deque(name).copy()
@@ -114,6 +106,11 @@ class AggregatorStorage:
             "buffer_sizes",
             "best_game_score_history",
             "lr_values",
+            # MCTS Stats
+            "mcts_simulation_times",
+            "mcts_nn_prediction_times",
+            "mcts_nodes_explored",
+            "mcts_avg_depths",
         ]
         for name in deque_names:
             if hasattr(self, name):
@@ -149,12 +146,18 @@ class AggregatorStorage:
             "best_policy_loss",
             "previous_best_policy_loss",
             "best_policy_loss_step",
+            # MCTS Bests
+            "best_mcts_sim_time",
+            "previous_best_mcts_sim_time",
+            "best_mcts_sim_time_step",
         ]
         for key in best_value_keys:
             default = (
                 0
                 if "step" in key
-                else (float("inf") if "loss" in key else -float("inf"))
+                else (
+                    float("inf") if ("loss" in key or "time" in key) else -float("inf")
+                )
             )
             state[key] = getattr(self, key, default)
 
@@ -181,6 +184,11 @@ class AggregatorStorage:
             "buffer_sizes",
             "best_game_score_history",
             "lr_values",
+            # MCTS Stats
+            "mcts_simulation_times",
+            "mcts_nn_prediction_times",
+            "mcts_nodes_explored",
+            "mcts_avg_depths",
         ]
         for key in deque_names:
             data = state_dict.get(key)
@@ -229,6 +237,10 @@ class AggregatorStorage:
             "best_policy_loss",
             "previous_best_policy_loss",
             "best_policy_loss_step",
+            # MCTS Bests
+            "best_mcts_sim_time",
+            "previous_best_mcts_sim_time",
+            "best_mcts_sim_time_step",
         ]
         best_defaults = {
             "best_outcome": -float("inf"),
@@ -239,10 +251,13 @@ class AggregatorStorage:
             "previous_best_value_loss": float("inf"),
             "best_policy_loss": float("inf"),
             "previous_best_policy_loss": float("inf"),
+            "best_mcts_sim_time": float("inf"),
+            "previous_best_mcts_sim_time": float("inf"),
             "best_outcome_step": 0,
             "best_game_score_step": 0,
             "best_value_loss_step": 0,
             "best_policy_loss_step": 0,
+            "best_mcts_sim_time_step": 0,
         }
         for key in best_value_keys:
             setattr(self, key, state_dict.get(key, best_defaults.get(key)))
@@ -272,6 +287,7 @@ class AggregatorStorage:
             ("training_steps_performed", 0),
             ("current_self_play_game_number", 0),
             ("current_self_play_game_steps", 0),
+            ("best_mcts_sim_time", float("inf")),
         ]:
             if not hasattr(self, attr):
                 setattr(self, attr, default)

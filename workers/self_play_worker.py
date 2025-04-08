@@ -1,10 +1,13 @@
+# File: workers/self_play_worker.py
 import threading
 import time
 import queue
 import traceback
 import torch
+import copy
 from typing import TYPE_CHECKING, List, Tuple, Dict, Any, Optional
 import logging
+import numpy as np
 
 from environment.game_state import GameState, StateType
 from mcts import MCTS
@@ -24,8 +27,7 @@ logger = logging.getLogger(__name__)
 class SelfPlayWorker(threading.Thread):
     """Plays games using MCTS to generate training data."""
 
-    # Add a constant for how often to report intermediate progress
-    INTERMEDIATE_STATS_INTERVAL_SEC = 5.0  # Report every 5 seconds
+    INTERMEDIATE_STATS_INTERVAL_SEC = 5.0
 
     def __init__(
         self,
@@ -54,7 +56,14 @@ class SelfPlayWorker(threading.Thread):
         self.games_per_iteration = games_per_iteration
         self.max_game_steps = max_game_steps if max_game_steps else float("inf")
         self.log_prefix = f"[SelfPlayWorker-{self.worker_id}]"
-        self.last_intermediate_stats_time = 0.0  # Track time for intermediate stats
+        self.last_intermediate_stats_time = 0.0
+
+        # --- State for UI Rendering ---
+        self._current_game_state_lock = threading.Lock()
+        self._current_game_state: Optional[GameState] = None
+        self._last_mcts_stats: Dict[str, Any] = {}
+        # --- End State for UI Rendering ---
+
         logger.info(f"{self.log_prefix} Initialized.")
 
     def get_init_args(self) -> Dict[str, Any]:
@@ -75,6 +84,36 @@ class SelfPlayWorker(threading.Thread):
             ),
         }
 
+    # --- Methods for UI Rendering ---
+    def get_current_game_state_copy(self) -> Optional[GameState]:
+        """Returns a deep copy of the current game state for rendering (thread-safe)."""
+        with self._current_game_state_lock:
+            if self._current_game_state:
+                try:
+                    # Deepcopy to avoid race conditions during rendering
+                    return copy.deepcopy(self._current_game_state)
+                except Exception as e:
+                    logger.error(f"{self.log_prefix} Error deepcopying game state: {e}")
+                    return None
+            return None
+
+    def get_last_mcts_stats(self) -> Dict[str, Any]:
+        """Returns the stats from the last MCTS step (thread-safe)."""
+        with self._current_game_state_lock:
+            return self._last_mcts_stats.copy()
+
+    def _update_render_state(self, game_state: GameState, mcts_stats: Dict[str, Any]):
+        """Updates the state exposed for rendering (thread-safe)."""
+        with self._current_game_state_lock:
+            # Store the actual game state object, copy happens on retrieval
+            self._current_game_state = game_state
+            self._last_mcts_stats = mcts_stats
+            # Update timers within the game state for visual effects
+            if hasattr(game_state, "_update_timers"):
+                game_state._update_timers()
+
+    # --- End Methods for UI Rendering ---
+
     def _get_temperature(self, game_step: int) -> float:
         """Calculates the MCTS temperature based on the game step."""
         if game_step < self.mcts_config.TEMPERATURE_ANNEAL_STEPS:
@@ -87,8 +126,6 @@ class SelfPlayWorker(threading.Thread):
 
     def _play_one_game(self) -> Optional[ProcessedExperienceBatch]:
         """Plays a single game and returns the processed experience."""
-        # Get game number *before* incrementing total_episodes in aggregator
-        # Add 1 because total_episodes is 0-based count of *completed* games
         current_game_num = self.stats_aggregator.storage.total_episodes + 1
         logger.info(f"{self.log_prefix} Starting game {current_game_num}")
         start_time = time.monotonic()
@@ -96,18 +133,19 @@ class SelfPlayWorker(threading.Thread):
         game = GameState()
         current_state_features = game.reset()
         game_steps = 0
-        self.last_intermediate_stats_time = (
-            time.monotonic()
-        )  # Reset timer for this game
+        self.last_intermediate_stats_time = time.monotonic()
+
+        # Initial state update for UI
+        self._update_render_state(game, {})
+
         recording_step = {
             "current_self_play_game_number": current_game_num,
             "current_self_play_game_steps": 0,
-            "buffer_size": self.experience_queue.qsize(),  # Include buffer size
+            "buffer_size": self.experience_queue.qsize(),
         }
-        # Report starting the game immediately
         self.stats_aggregator.record_step(recording_step)
         logger.info(
-            f"{self.log_prefix} Game {current_game_num} started. Buffer size: {recording_step['buffer_size']} and recording_step {recording_step}."
+            f"{self.log_prefix} Game {current_game_num} started. Buffer size: {recording_step['buffer_size']}"
         )
 
         while not game.is_over() and game_steps < self.max_game_steps:
@@ -115,9 +153,9 @@ class SelfPlayWorker(threading.Thread):
                 logger.info(
                     f"{self.log_prefix} Stop event set during game {current_game_num}. Aborting."
                 )
-                return None  # Stop early
+                self._update_render_state(game, {"status": "Stopped"})
+                return None
 
-            # --- Report Intermediate Progress ---
             current_time = time.monotonic()
             if (
                 current_time - self.last_intermediate_stats_time
@@ -126,25 +164,26 @@ class SelfPlayWorker(threading.Thread):
                 recording_step = {
                     "current_self_play_game_number": current_game_num,
                     "current_self_play_game_steps": game_steps,
-                    "buffer_size": self.experience_queue.qsize(),  # Include buffer size
+                    "buffer_size": self.experience_queue.qsize(),
                 }
-                logger.info(
-                    f"{self.log_prefix} Game {current_game_num} started. Buffer size: {recording_step['buffer_size']} and recording_step {recording_step}."
-                )
                 self.stats_aggregator.record_step(recording_step)
                 self.last_intermediate_stats_time = current_time
-            # --- End Intermediate Progress ---
 
             mcts_start_time = time.monotonic()
-            self.agent.eval()  # Ensure agent is in eval mode
+            self.agent.eval()
             with torch.no_grad():
-                root_node = self.mcts.run_simulations(
+                # Run simulations and get detailed stats
+                root_node, mcts_stats = self.mcts.run_simulations(
                     root_state=game, num_simulations=self.mcts_config.NUM_SIMULATIONS
                 )
             mcts_duration = time.monotonic() - mcts_start_time
+            mcts_stats["mcts_total_duration"] = mcts_duration
             logger.debug(
                 f"{self.log_prefix} Game {current_game_num} Step {game_steps}: MCTS took {mcts_duration:.4f}s"
             )
+
+            # Update render state *before* choosing action/stepping
+            self._update_render_state(game, mcts_stats)
 
             temperature = self._get_temperature(game_steps)
             policy_target = self.mcts.get_policy_target(root_node, temperature)
@@ -162,6 +201,20 @@ class SelfPlayWorker(threading.Thread):
 
             current_state_features = game.get_state()
             game_steps += 1
+
+            # Record MCTS stats for this step
+            step_stats_for_aggregator = {
+                "mcts_sim_time": mcts_stats.get("mcts_total_duration", 0.0),
+                "mcts_nn_time": mcts_stats.get("total_nn_prediction_time", 0.0),
+                "mcts_nodes_explored": mcts_stats.get("nodes_created", 0),
+                "mcts_avg_depth": mcts_stats.get("avg_leaf_depth", 0.0),
+                "buffer_size": self.experience_queue.qsize(),
+                # Add other relevant step data if needed
+            }
+            self.stats_aggregator.record_step(step_stats_for_aggregator)
+
+        # Final state update for UI
+        self._update_render_state(game, {"status": "Finished"})
 
         if self.stop_event.is_set():
             logger.info(
@@ -182,12 +235,11 @@ class SelfPlayWorker(threading.Thread):
             f"Queueing {len(processed_data)} experiences."
         )
 
-        # Record episode stats *after* processing data
         current_global_step = self.stats_aggregator.storage.current_global_step
         self.stats_aggregator.record_episode(
             episode_outcome=final_outcome,
             episode_length=game_steps,
-            episode_num=current_game_num,  # Pass the game number used during play
+            episode_num=current_game_num,
             global_step=current_global_step,
             game_score=game.game_score,
             triangles_cleared=game.triangles_cleared_this_episode,
@@ -202,13 +254,10 @@ class SelfPlayWorker(threading.Thread):
             try:
                 processed_data = self._play_one_game()
                 if processed_data is None:
-                    # This happens if stop_event was set during the game
                     break
                 if processed_data:
                     try:
                         q_put_start = time.monotonic()
-                        # Use put_nowait or a short timeout to avoid blocking if queue is full
-                        # self.experience_queue.put(processed_data, timeout=1.0)
                         self.experience_queue.put_nowait(processed_data)
                         q_put_duration = time.monotonic() - q_put_start
                         logger.debug(
@@ -217,9 +266,8 @@ class SelfPlayWorker(threading.Thread):
                         )
                     except queue.Full:
                         logger.warning(
-                            f"{self.log_prefix} Experience queue full. Discarding game data. Consider increasing buffer or reducing self-play workers."
+                            f"{self.log_prefix} Experience queue full. Discarding game data."
                         )
-                        # Optional: Sleep briefly to avoid busy-waiting if queue stays full
                         time.sleep(0.1)
                     except Exception as q_err:
                         logger.error(
@@ -229,7 +277,14 @@ class SelfPlayWorker(threading.Thread):
                 logger.critical(
                     f"{self.log_prefix} CRITICAL ERROR in run loop: {e}", exc_info=True
                 )
-                # Optional: Add a small delay to prevent rapid error loops
+                # Update render state to show error
+                error_state = GameState()
+                error_state.game_over = True
+                self._update_render_state(error_state, {"status": "Error"})
                 time.sleep(1.0)
 
         logger.info(f"{self.log_prefix} Run loop finished.")
+        # Clear render state on exit
+        with self._current_game_state_lock:
+            self._current_game_state = None
+            self._last_mcts_stats = {}

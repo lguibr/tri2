@@ -1,9 +1,10 @@
+# File: stats/simple_stats_recorder.py
 import time
 from typing import Deque, Dict, Any, Optional, Union, List, TYPE_CHECKING
 import numpy as np
 import torch
 import threading
-import logging  # Import logging
+import logging
 
 from .stats_recorder import StatsRecorderBase
 from .aggregator import StatsAggregator
@@ -12,7 +13,7 @@ from config import StatsConfig, TrainConfig
 if TYPE_CHECKING:
     from environment.game_state import GameState
 
-logger = logging.getLogger(__name__)  # Use logger
+logger = logging.getLogger(__name__)
 
 
 class SimpleStatsRecorder(StatsRecorderBase):
@@ -33,7 +34,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.summary_avg_window = self.aggregator.summary_avg_window
         self.updates_since_last_log = 0
         self._lock = threading.Lock()
-        logger.info(  # Use logger
+        logger.info(
             f"[SimpleStatsRecorder] Initialized. Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} updates/episodes. Avg Window: {self.summary_avg_window}"
         )
 
@@ -44,6 +45,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
         previous_best: float,
         step: int,
         is_loss: bool,
+        is_time: bool = False,  # Add flag for time metrics
     ):
         """Logs a new best value achieved."""
         if (
@@ -52,16 +54,36 @@ class SimpleStatsRecorder(StatsRecorderBase):
             or (not is_loss and current_best == -float("inf"))
         ):
             return
-        prev_str = "N/A"
-        if np.isfinite(previous_best) and (
-            (is_loss and previous_best != float("inf"))
-            or (not is_loss and previous_best != -float("inf"))
-        ):
-            prev_str = f"{previous_best:.4f}" if is_loss else f"{previous_best:.0f}"
-        current_str = f"{current_best:.4f}" if is_loss else f"{current_best:.0f}"
+
+        if is_time:
+            format_str = "{:.3f}s"
+            prev_str = (
+                format_str.format(previous_best)
+                if np.isfinite(previous_best) and previous_best != float("inf")
+                else "N/A"
+            )
+            current_str = format_str.format(current_best)
+            prefix = "⏱️"
+        elif is_loss:
+            format_str = "{:.4f}"
+            prev_str = (
+                format_str.format(previous_best)
+                if np.isfinite(previous_best) and previous_best != float("inf")
+                else "N/A"
+            )
+            current_str = format_str.format(current_best)
+            prefix = "📉"
+        else:  # Score
+            format_str = "{:.0f}"
+            prev_str = (
+                format_str.format(previous_best)
+                if np.isfinite(previous_best) and previous_best != -float("inf")
+                else "N/A"
+            )
+            current_str = format_str.format(current_best)
+            prefix = "🎮"
+
         step_info = f"at Step ~{step/1e6:.1f}M" if step > 0 else "at Start"
-        prefix = "📉" if is_loss else "🎮"
-        # Use logger.info instead of print
         logger.info(
             f"--- {prefix} New Best {metric_name}: {current_str} {step_info} (Prev: {prev_str}) ---"
         )
@@ -100,9 +122,7 @@ class SimpleStatsRecorder(StatsRecorderBase):
                 current_step,
                 is_loss=False,
             )
-        # Note: Best outcome logging removed as it's less informative than score for this game
 
-        # Trigger summary check after recording an episode
         self._check_and_log_summary(current_step)
 
     def record_step(self, step_data: Dict[str, Any]):
@@ -128,8 +148,16 @@ class SimpleStatsRecorder(StatsRecorderBase):
                 g_step,
                 is_loss=True,
             )
+        if update_info.get("new_best_mcts_sim_time"):
+            self._log_new_best(
+                "MCTS Sim Time",
+                self.aggregator.storage.best_mcts_sim_time,
+                self.aggregator.storage.previous_best_mcts_sim_time,
+                g_step,
+                is_loss=True,  # Lower is better
+                is_time=True,
+            )
 
-        # Trigger summary check after *any* step record (training or intermediate)
         self._check_and_log_summary(g_step)
 
     def _check_and_log_summary(self, global_step: int):
@@ -163,22 +191,11 @@ class SimpleStatsRecorder(StatsRecorderBase):
             if summary["best_game_score"] > -float("inf")
             else "N/A"
         )
-        best_v = (
-            f"{summary['best_value_loss']:.4f}"
-            if summary["best_value_loss"] < float("inf")
-            else "N/A"
-        )
-        best_p = (
-            f"{summary['best_policy_loss']:.4f}"
-            if summary["best_policy_loss"] < float("inf")
-            else "N/A"
-        )
         avg_win = summary.get("summary_avg_window_size", "?")
         buf_size = summary.get("buffer_size", 0)
         min_buf = self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
         phase = "Buffering" if buf_size < min_buf and global_step == 0 else "Training"
 
-        # Include current game/step from self-play workers if available
         current_game = summary.get("current_self_play_game_number", 0)
         current_game_step = summary.get("current_self_play_game_steps", 0)
         game_prog_str = (
@@ -186,6 +203,13 @@ class SimpleStatsRecorder(StatsRecorderBase):
             if current_game > 0
             else ""
         )
+
+        # MCTS Stats Formatting
+        mcts_sim_t = summary.get("avg_mcts_sim_time_window", 0.0) * 1000  # ms
+        mcts_nn_t = summary.get("avg_mcts_nn_time_window", 0.0) * 1000  # ms
+        mcts_nodes = summary.get("avg_mcts_nodes_explored_window", 0)
+        mcts_depth = summary.get("avg_mcts_avg_depth_window", 0.0)
+        mcts_str = f"MCTS(Avg{avg_win}): {mcts_sim_t:.0f}ms (NN:{mcts_nn_t:.0f}ms) | Nodes:{mcts_nodes:.0f} | Depth:{mcts_depth:.1f}"
 
         log_items = [
             f"[{runtime_hrs:.1f}h|{phase}]",
@@ -195,20 +219,22 @@ class SimpleStatsRecorder(StatsRecorderBase):
             f"Score(Avg{avg_win}): {summary['avg_game_score_window']:<6.0f} (Best: {best_score})",
         ]
         if game_prog_str:
-            log_items.append(game_prog_str)  # Add game progress
+            log_items.append(game_prog_str)
 
-        if global_step > 0:  # Only show loss/LR if training has occurred
+        if global_step > 0:
             log_items.extend(
                 [
-                    f"V.Loss(Avg{avg_win}): {summary['value_loss']:.4f} (Best: {best_v})",
-                    f"P.Loss(Avg{avg_win}): {summary['policy_loss']:.4f} (Best: {best_p})",
+                    f"V.Loss(Avg{avg_win}): {summary['value_loss']:.4f}",
+                    f"P.Loss(Avg{avg_win}): {summary['policy_loss']:.4f}",
                     f"LR: {summary['current_lr']:.1e}",
                 ]
             )
-        elif phase == "Buffering":  # Show N/A during buffering
-            log_items.append("Loss: N/A (Buffering)")
+        elif phase == "Buffering":
+            log_items.append("Loss: N/A")
 
-        # Use logger.info instead of print
+        # Add MCTS stats string
+        log_items.append(mcts_str)
+
         logger.info(" | ".join(log_items))
         self.last_log_time = time.time()
 
@@ -235,5 +261,4 @@ class SimpleStatsRecorder(StatsRecorderBase):
         pass
 
     def close(self, is_cleanup: bool = False):
-        # Use logger.info
         logger.info(f"[SimpleStatsRecorder] Closed (is_cleanup={is_cleanup}).")

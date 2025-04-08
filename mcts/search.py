@@ -1,7 +1,8 @@
+# File: mcts/search.py
 import numpy as np
 import time
 import copy
-from typing import Dict, Optional, Tuple, Callable
+from typing import Dict, Optional, Tuple, Callable, Any
 import logging
 
 from environment.game_state import GameState
@@ -28,8 +29,8 @@ class MCTS:
         self.env_config = env_config if env_config else EnvConfig()
         self.log_prefix = "[MCTS]"
 
-    def _select_leaf(self, root_node: MCTSNode) -> MCTSNode:
-        """Traverses the tree using PUCT until a leaf node is reached."""
+    def _select_leaf(self, root_node: MCTSNode) -> Tuple[MCTSNode, int]:
+        """Traverses the tree using PUCT until a leaf node is reached. Returns node and depth."""
         node = root_node
         depth = 0
         while node.is_expanded and not node.is_terminal:
@@ -39,40 +40,45 @@ class MCTS:
                 break
             node = node.select_best_child()
             depth += 1
-        return node
+        return node, depth
 
-    def _expand_node(self, node: MCTSNode) -> Optional[float]:
-        """Expands a leaf node: gets NN predictions and creates children."""
+    def _expand_node(self, node: MCTSNode) -> Tuple[Optional[float], float, int]:
+        """
+        Expands a leaf node: gets NN predictions and creates children.
+        Returns (predicted_value, nn_prediction_time, children_created_count).
+        """
+        nn_prediction_time = 0.0
+        children_created_count = 0
+
         if node.is_expanded or node.is_terminal:
-            return node.mean_action_value if node.visit_count > 0 else 0.0
+            value = node.mean_action_value if node.visit_count > 0 else 0.0
+            return value, nn_prediction_time, children_created_count
 
         state_features = node.game_state.get_state()
         try:
             start_pred_time = time.monotonic()
             policy_probs_dict, predicted_value = self.network_predictor(state_features)
-            pred_duration = time.monotonic() - start_pred_time
-            logger.info(
-                f"{self.log_prefix} NN Prediction took {pred_duration:.4f}s. Value: {predicted_value:.3f}"
+            nn_prediction_time = time.monotonic() - start_pred_time
+            logger.debug(  # Changed to debug
+                f"{self.log_prefix} NN Prediction took {nn_prediction_time:.4f}s. Value: {predicted_value:.3f}"
             )
         except Exception as e:
             logger.error(
                 f"{self.log_prefix} Error during network prediction: {e}", exc_info=True
             )
             node.is_expanded = True
-            return 0.0
+            return 0.0, nn_prediction_time, children_created_count
 
         valid_actions = node.game_state.valid_actions()
         if not valid_actions:
             node.is_expanded = True
             node.is_terminal = True
-            return predicted_value
+            return predicted_value, nn_prediction_time, children_created_count
 
         parent_state = node.game_state
         start_expand_time = time.monotonic()
-        children_created = 0
         for action in valid_actions:
             try:
-                # --- Deepcopy moved INSIDE the loop ---
                 child_state = copy.deepcopy(parent_state)
                 _, done = child_state.step(action)
                 prior_prob = policy_probs_dict.get(action, 0.0)
@@ -84,7 +90,7 @@ class MCTS:
                     config=self.config,
                 )
                 node.children[action] = child_node
-                children_created += 1
+                children_created_count += 1
             except Exception as child_creation_err:
                 logger.error(
                     f"{self.log_prefix} Error creating child for action {action}: {child_creation_err}",
@@ -92,46 +98,74 @@ class MCTS:
                 )
                 continue
         expand_duration = time.monotonic() - start_expand_time
-        logger.info(
-            f"{self.log_prefix} Node expansion ({children_created} children) took {expand_duration:.4f}s."
+        logger.debug(  # Changed to debug
+            f"{self.log_prefix} Node expansion ({children_created_count} children) took {expand_duration:.4f}s."
         )
 
         node.is_expanded = True
-        return predicted_value
+        return predicted_value, nn_prediction_time, children_created_count
 
-    def run_simulations(self, root_state: GameState, num_simulations: int) -> MCTSNode:
-        """Runs the MCTS process for a given number of simulations."""
+    def run_simulations(
+        self, root_state: GameState, num_simulations: int
+    ) -> Tuple[MCTSNode, Dict[str, Any]]:
+        """
+        Runs the MCTS process for a given number of simulations.
+        Returns the root node and a dictionary of simulation statistics.
+        """
         root_node = MCTSNode(game_state=root_state, config=self.config)
         sim_start_time = time.monotonic()
+        total_nn_prediction_time = 0.0
+        nodes_created_this_run = 1  # Start with root node
+        total_leaf_depth = 0
+        simulations_run = 0
 
         if not root_node.is_terminal:
-            initial_value = self._expand_node(root_node)
+            initial_value, nn_time, children_count = self._expand_node(root_node)
+            total_nn_prediction_time += nn_time
+            nodes_created_this_run += children_count
             if initial_value is not None:
                 self._add_dirichlet_noise(root_node)
                 root_node.backpropagate(initial_value)
-            # else: logger.info(f"{self.log_prefix} Root expansion failed or node is terminal.")
-        # else: logger.info(f"{self.log_prefix} Root node is terminal. Skipping initial expansion.")
 
         for sim_num in range(num_simulations):
-            # logger.info(f"{self.log_prefix} --- Simulation {sim_num+1}/{num_simulations} ---")
-            leaf_node = self._select_leaf(root_node)
-            value = (
-                leaf_node.game_state.get_outcome()
-                if leaf_node.is_terminal
-                else self._expand_node(leaf_node)
-            )
-            if value is None:
-                logger.warning(
-                    f"{self.log_prefix} Expansion returned None for non-terminal node. Using 0."
-                )
-                value = 0.0
+            simulations_run += 1
+            leaf_node, depth = self._select_leaf(root_node)
+            total_leaf_depth += depth
+
+            if leaf_node.is_terminal:
+                value = leaf_node.game_state.get_outcome()
+                nn_time, children_count = 0.0, 0  # No expansion if terminal
+            else:
+                value, nn_time, children_count = self._expand_node(leaf_node)
+                if value is None:
+                    logger.warning(
+                        f"{self.log_prefix} Expansion returned None for non-terminal node. Using 0."
+                    )
+                    value = 0.0
+
+            total_nn_prediction_time += nn_time
+            nodes_created_this_run += children_count
             leaf_node.backpropagate(value)
 
         sim_duration = time.monotonic() - sim_start_time
-        logger.info(
-            f"{self.log_prefix} Finished {num_simulations} simulations in {sim_duration:.4f}s. Root visits: {root_node.visit_count}"
+        avg_leaf_depth = (
+            total_leaf_depth / simulations_run if simulations_run > 0 else 0
         )
-        return root_node
+        logger.debug(  # Changed to debug
+            f"{self.log_prefix} Finished {simulations_run} simulations in {sim_duration:.4f}s. "
+            f"Root visits: {root_node.visit_count}, Nodes created: {nodes_created_this_run}, "
+            f"Total NN time: {total_nn_prediction_time:.4f}s, Avg Depth: {avg_leaf_depth:.1f}"
+        )
+
+        mcts_stats = {
+            "simulations_run": simulations_run,
+            "mcts_total_duration": sim_duration,
+            "total_nn_prediction_time": total_nn_prediction_time,
+            "nodes_created": nodes_created_this_run,
+            "avg_leaf_depth": avg_leaf_depth,
+            "root_visits": root_node.visit_count,
+        }
+        return root_node, mcts_stats
 
     def _add_dirichlet_noise(self, node: MCTSNode):
         """Adds Dirichlet noise to the prior probabilities of the root node's children."""
@@ -171,7 +205,10 @@ class MCTS:
             for action, child in root_node.children.items():
                 visit_count = max(0, child.visit_count)
                 try:
-                    powered_count = float(visit_count) ** (1.0 / temperature)
+                    # Use float64 for intermediate power calculation to avoid overflow
+                    powered_count = np.power(
+                        np.float64(visit_count), 1.0 / temperature, dtype=np.float64
+                    )
                 except OverflowError:
                     powered_count = float("inf") if visit_count > 0 else 0.0
                 powered_counts[action] = powered_count
@@ -192,7 +229,9 @@ class MCTS:
                     policy_target[action] = prob if action in visited_children else 0.0
             else:
                 for action, powered_count in powered_counts.items():
-                    policy_target[action] = powered_count / total_power
+                    policy_target[action] = float(
+                        powered_count / total_power
+                    )  # Convert back to float
 
         full_policy = np.zeros(self.env_config.ACTION_DIM, dtype=np.float32)
         for action, prob in policy_target.items():
@@ -207,7 +246,7 @@ class MCTS:
         if policy_sum > 1e-6 and not np.isclose(policy_sum, 1.0):
             full_policy /= policy_sum
         elif policy_sum <= 1e-6 and self.env_config.ACTION_DIM > 0:
-            pass  # Keep zeros
+            pass
 
         return {i: float(prob) for i, prob in enumerate(full_policy)}
 
@@ -248,4 +287,9 @@ class MCTS:
             return np.random.choice(actions, p=probabilities)
         except ValueError as e:
             logger.error(f"{self.log_prefix} Error during np.random.choice: {e}")
-            return np.random.choice(actions)
+            # Fallback: choose uniformly among valid actions with non-zero probability
+            non_zero_prob_actions = [a for a, p in zip(actions, probabilities) if p > 0]
+            if non_zero_prob_actions:
+                return np.random.choice(non_zero_prob_actions)
+            else:  # If somehow all probabilities became zero after normalization
+                return np.random.choice(actions)

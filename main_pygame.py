@@ -1,3 +1,4 @@
+# File: main_pygame.py
 import pygame
 import sys
 import time
@@ -6,7 +7,7 @@ import logging
 import argparse
 import os
 import traceback
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List  # Added List
 import queue
 import numpy as np
 from collections import deque
@@ -58,6 +59,9 @@ try:
     from app_ui_utils import AppUIUtils
     from ui.input_handler import InputHandler
     from agent.alphazero_net import AlphaZeroNet
+
+    # Import ProcessedExperienceBatch type if needed elsewhere
+    from workers.training_worker import ProcessedExperienceBatch
 except ImportError as e:
     print(f"Error importing app components: {e}\n{traceback.format_exc()}")
     sys.exit(1)
@@ -68,14 +72,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
-LOOP_TIMING_INTERVAL = 60  # Log loop timing every N frames
+LOOP_TIMING_INTERVAL = 60
 
 
 class MainApp:
     """Main application class orchestrating Pygame UI and AlphaZero components."""
 
     def __init__(self, checkpoint_to_load: Optional[str] = None):
-        # Config Instances (Keep essential ones)
+        # Config Instances
         self.vis_config = VisConfig()
         self.env_config = EnvConfig()
         self.train_config_instance = TrainConfig()
@@ -132,9 +136,8 @@ class MainApp:
         run_pre_checks()
 
         self.app_state = AppState.INITIALIZING
-        self.initializer.initialize_all()  # Delegates complex init
+        self.initializer.initialize_all()
 
-        # Get references after initialization
         self.agent = self.initializer.agent
         self.stats_aggregator = self.initializer.stats_aggregator
         self.demo_env = self.initializer.demo_env
@@ -154,7 +157,6 @@ class MainApp:
                 self.app_state.value, self.cleanup_confirmation_active
             )
         else:
-            # Basic quit handling if input handler fails
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     self.stop_event.set()
@@ -164,7 +166,7 @@ class MainApp:
 
     def _update_state(self):
         """Updates application logic and status."""
-        self.update_progress_details = {}  # Reset progress details
+        self.update_progress_details = {}
         self.logic.update_status_and_check_completion()
 
     def _prepare_render_data(self) -> Dict[str, Any]:
@@ -176,6 +178,7 @@ class MainApp:
             "best_game_state_data": None,
             "worker_counts": {},
             "is_process_running": False,
+            "envs": [],  # List to hold worker game states
         }
         if self.stats_aggregator:
             render_data["plot_data"] = self.stats_aggregator.get_plot_data()
@@ -192,6 +195,16 @@ class MainApp:
 
         render_data["worker_counts"] = self.worker_manager.get_active_worker_counts()
         render_data["is_process_running"] = self.worker_manager.is_any_worker_running()
+
+        # --- Fetch worker game states ---
+        if render_data["is_process_running"]:
+            num_to_render = self.vis_config.NUM_ENVS_TO_RENDER
+            if num_to_render > 0:
+                render_data["envs"] = self.worker_manager.get_worker_game_states(
+                    num_to_render
+                )
+        # --- End fetch worker game states ---
+
         return render_data
 
     def _render_frame(self, render_data: Dict[str, Any]):
@@ -202,8 +215,8 @@ class MainApp:
                 is_process_running=render_data["is_process_running"],
                 status=self.status,
                 stats_summary=render_data["stats_summary"],
-                envs=[],  # envs list is not actively used for rendering AZ
-                num_envs=self.train_config_instance.NUM_SELF_PLAY_WORKERS,
+                envs=render_data["envs"],  # Pass the fetched worker states
+                num_envs=self.train_config_instance.NUM_SELF_PLAY_WORKERS,  # Total workers
                 env_config=self.env_config,
                 cleanup_confirmation_active=self.cleanup_confirmation_active,
                 cleanup_message=self.cleanup_message,
@@ -215,7 +228,7 @@ class MainApp:
                 worker_counts=render_data["worker_counts"],
                 best_game_state_data=render_data["best_game_state_data"],
             )
-        else:  # Fallback rendering
+        else:
             self.screen.fill((20, 0, 0))
             font = pygame.font.Font(None, 30)
             text_surf = font.render("Renderer Error", True, (255, 50, 50))
@@ -228,6 +241,10 @@ class MainApp:
         """Logs average loop time periodically."""
         self.loop_times.append(time.monotonic() - loop_start_time)
         self.frame_count += 1
+        # Optional: Log timing info less frequently if needed
+        # if self.frame_count % LOOP_TIMING_INTERVAL == 0:
+        #     avg_loop_time = sum(self.loop_times) / len(self.loop_times)
+        #     logger.debug(f"Avg loop time (last {len(self.loop_times)} frames): {avg_loop_time*1000:.2f} ms")
 
     def run_main_loop(self):
         """The main application loop."""
@@ -235,8 +252,10 @@ class MainApp:
         while self.running:
             loop_start_time = time.monotonic()
             if not self.clock:
-                break  # Exit if clock not initialized
-            dt = self.clock.tick(self.vis_config.FPS) / 1000.0
+                break
+            # Use clock.tick_busy_loop for potentially smoother timing if CPU allows
+            # dt = self.clock.tick_busy_loop(self.vis_config.FPS) / 1000.0
+            dt = self.clock.tick(self.vis_config.FPS) / 1000.0  # Keep original for now
 
             self.running = self._handle_input()
             if not self.running:
@@ -278,7 +297,7 @@ def setup_logging_and_run_id(args: argparse.Namespace):
                 set_run_id(run_id_from_path)
                 print(f"Using Run ID from checkpoint path: {get_run_id()}")
             else:
-                get_run_id()  # Generate new if path doesn't contain valid ID
+                get_run_id()
         except Exception:
             get_run_id()
     else:
@@ -287,11 +306,12 @@ def setup_logging_and_run_id(args: argparse.Namespace):
             set_run_id(latest_run_id)
             print(f"Resuming Run ID: {get_run_id()}")
         else:
-            get_run_id()  # Generate new if no runs found
+            get_run_id()
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
-        log_file_dir = get_console_log_dir()
+        # Use run log dir for console output as well
+        log_file_dir = get_run_log_dir()  # Changed from get_console_log_dir()
         os.makedirs(log_file_dir, exist_ok=True)
         log_file_path = os.path.join(log_file_dir, "console_output.log")
         tee_logger_instance = TeeLogger(log_file_path, sys.stdout)
@@ -302,6 +322,8 @@ def setup_logging_and_run_id(args: argparse.Namespace):
 
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
+    # Set higher level for noisy libraries if needed
+    logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logger.info(f"Logging level set to: {args.log_level.upper()}")
     logger.info(f"Using Run ID: {get_run_id()}")
     if args.load_checkpoint:
@@ -354,7 +376,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt received. Shutting down.")
         if app:
-            app.logic.exit_app()
+            app.logic.exit_app()  # Ensure workers are signalled to stop
             app.shutdown()
         else:
             pygame.quit()
@@ -362,7 +384,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
         if app:
-            app.logic.exit_app()
+            app.logic.exit_app()  # Ensure workers are signalled to stop
             app.shutdown()
         else:
             pygame.quit()

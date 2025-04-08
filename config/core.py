@@ -42,7 +42,7 @@ class MCTSConfig:
 
     PUCT_C: float = 1.5
     # --- Increase Simulations for Learning ---
-    NUM_SIMULATIONS: int = 200  # Increased from 15 (Adjust based on performance)
+    NUM_SIMULATIONS: int = 10  # Increased from 15 (Adjust based on performance)
     # --- Original Value: 100, Previous: 50, 30, 15 ---
     TEMPERATURE_INITIAL: float = 1.0
     TEMPERATURE_FINAL: float = 0.01
@@ -51,12 +51,12 @@ class MCTSConfig:
     )
     DIRICHLET_ALPHA: float = 0.3
     DIRICHLET_EPSILON: float = 0.25
-    MAX_SEARCH_DEPTH: int = 100
+    MAX_SEARCH_DEPTH: int = 20
 
 
 class VisConfig:
     # --- Render multiple envs again when idle ---
-    NUM_ENVS_TO_RENDER = 8  # Show first 8 envs when run is stopped
+    NUM_ENVS_TO_RENDER = 2  # Show first 8 envs when run is stopped
     # --- Original Value: 16, Changed to 0 previously ---
     FPS = 0  # Keep FPS high for responsiveness, plotting is throttled separately
     SCREEN_WIDTH = 1600
@@ -150,16 +150,16 @@ class TrainConfig:
 
     # --- Worker Configuration ---
     # --- Keep low for now, increase if GPU is underutilized ---
-    NUM_SELF_PLAY_WORKERS: int = 128
+    NUM_SELF_PLAY_WORKERS: int = 4
 
     # --- Training Loop Parameters (Adjusted for LEARNING) ---
-    BATCH_SIZE: int = 128  # Increased batch size
+    BATCH_SIZE: int = 32  # Increased batch size
     LEARNING_RATE: float = 1e-4  # Keep initial LR, may need tuning
     WEIGHT_DECAY: float = 1e-5
-    NUM_TRAINING_STEPS_PER_ITER: int = 100  # More training steps per iteration
+    NUM_TRAINING_STEPS_PER_ITER: int = 50  # More training steps per iteration
     # --- Increase Buffer Sizes Significantly ---
     MIN_BUFFER_SIZE_TO_TRAIN: int = (
-        5000  # Start training only after 5k experiences (Adjust as needed)
+        500  # Start training only after 5k experiences (Adjust as needed)
     )
     BUFFER_CAPACITY: int = 200_000  # Store up to 20k experiences (Adjust as needed)
     # --- Original Values: Min=1000, Cap=50000 ---

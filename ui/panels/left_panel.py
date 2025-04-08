@@ -1,5 +1,6 @@
+# File: ui/panels/left_panel.py
 import pygame
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 import logging
 
 from config import VisConfig
@@ -41,11 +42,13 @@ class LeftPanelRenderer:
             "ui": 24,
             "status": 28,
             "detail": 16,
-            "resource": 16,
+            "resource": 16,  # Kept for now, might remove later
             "notification_label": 16,
             "notification": 18,
             "plot_placeholder": 20,
             "plot_title_values": 8,
+            "mcts_stats_label": 18,  # New font for MCTS labels
+            "mcts_stats_value": 18,  # New font for MCTS values
         }
         for key, size in font_configs.items():
             try:
@@ -61,6 +64,10 @@ class LeftPanelRenderer:
             fonts["ui"] = pygame.font.Font(None, 24)
         if fonts.get("status") is None:
             fonts["status"] = pygame.font.Font(None, 28)
+        if fonts.get("mcts_stats_label") is None:
+            fonts["mcts_stats_label"] = pygame.font.Font(None, 18)
+        if fonts.get("mcts_stats_value") is None:
+            fonts["mcts_stats_value"] = pygame.font.Font(None, 18)
         return fonts
 
     def _get_background_color(self, status: str) -> Tuple[int, int, int]:
@@ -78,7 +85,7 @@ class LeftPanelRenderer:
         base_status = status.split(" (")[0] if "(" in status else status
         return status_color_map.get(base_status, (30, 30, 30))
 
-    def render(self, panel_width: int, **kwargs):  # Use kwargs
+    def render(self, panel_width: int, **kwargs):
         """Renders the entire left panel within the given width."""
         current_height = self.screen.get_height()
         lp_rect = pygame.Rect(0, 0, panel_width, current_height)
@@ -87,46 +94,57 @@ class LeftPanelRenderer:
         pygame.draw.rect(self.screen, bg_color, lp_rect)
 
         current_y = 10
-        render_order = [
-            (self.button_status_renderer.render, 60),
-            (self.info_text_renderer.render, 80),
-            (self.notification_renderer.render, 90),
+        # Define render order and estimated heights
+        # InfoTextRenderer now includes MCTS stats, might need more height
+        render_order: List[Tuple[callable, int, Dict[str, Any]]] = [
+            (
+                self.button_status_renderer.render,
+                60,
+                {
+                    "app_state": kwargs.get("app_state", ""),
+                    "is_process_running": kwargs.get("is_process_running", False),
+                    "status": status,
+                    "stats_summary": kwargs.get("stats_summary", {}),
+                    "update_progress_details": kwargs.get(
+                        "update_progress_details", {}
+                    ),
+                },
+            ),
+            (
+                self.info_text_renderer.render,
+                120,
+                {  # Increased height estimate
+                    "stats_summary": kwargs.get("stats_summary", {}),
+                    "agent_param_count": kwargs.get("agent_param_count", 0),
+                    "worker_counts": kwargs.get("worker_counts", {}),
+                },
+            ),
+            (
+                self.notification_renderer.render,
+                70,
+                {  # Reduced height estimate
+                    "stats_summary": kwargs.get("stats_summary", {}),
+                },
+            ),
         ]
 
-        # Render static components
-        for render_func, fallback_height in render_order:
+        # Render static components sequentially
+        for render_func, fallback_height, func_kwargs in render_order:
             try:
-                # --- Pass only the required arguments ---
-                if render_func == self.button_status_renderer.render:
-                    next_y = render_func(
-                        y_start=current_y,
-                        panel_width=panel_width,
-                        app_state=kwargs.get("app_state", ""),
-                        is_process_running=kwargs.get("is_process_running", False),
-                        status=status,
-                        stats_summary=kwargs.get("stats_summary", {}),
-                        update_progress_details=kwargs.get(
-                            "update_progress_details", {}
-                        ),
-                    )
-                elif render_func == self.info_text_renderer.render:
-                    next_y = render_func(
-                        y_start=current_y + 5,
-                        stats_summary=kwargs.get("stats_summary", {}),
-                        panel_width=panel_width,
-                        agent_param_count=kwargs.get("agent_param_count", 0),
-                        worker_counts=kwargs.get("worker_counts", {}),
-                    )
-                elif render_func == self.notification_renderer.render:
+                # Pass specific arguments required by each component
+                if render_func == self.notification_renderer.render:
+                    # Notification renderer takes rect directly
                     notification_rect = pygame.Rect(
                         10, current_y + 5, panel_width - 20, fallback_height
                     )
-                    render_func(notification_rect, kwargs.get("stats_summary", {}))
+                    render_func(notification_rect, func_kwargs.get("stats_summary", {}))
                     next_y = notification_rect.bottom
-                else:  # Default case if more components added (might need adjustment)
+                else:
                     next_y = render_func(
-                        y_start=current_y + 5, panel_width=panel_width, **kwargs
-                    )  # Keep kwargs for unknown future components
+                        y_start=current_y + 5,
+                        panel_width=panel_width,
+                        **func_kwargs,  # Pass the specific kwargs for this function
+                    )
 
                 current_y = (
                     next_y
@@ -138,28 +156,30 @@ class LeftPanelRenderer:
                     f"Error rendering component {render_func.__name__}: {e}",
                     exc_info=True,
                 )
+                # Draw error box for the failed component
+                error_rect = pygame.Rect(
+                    10, current_y + 5, panel_width - 20, fallback_height
+                )
+                pygame.draw.rect(self.screen, VisConfig.RED, error_rect, 1)
                 current_y += fallback_height + 5  # Fallback increment
 
         # --- Render Plots Area ---
-        # Determine if plots should be rendered based on app state
         app_state_str = kwargs.get("app_state", AppState.UNKNOWN.value)
         # Render plots only when in the main menu
         should_render_plots = app_state_str == AppState.MAIN_MENU.value
 
         plot_y_start = current_y + 5
         try:
-            # Pass the render_enabled flag directly
             self.plot_area_renderer.render(
                 y_start=plot_y_start,
                 panel_width=panel_width,
                 screen_height=current_height,
                 plot_data=kwargs.get("plot_data", {}),
                 status=status,
-                render_enabled=should_render_plots,  # Pass the calculated flag
+                render_enabled=should_render_plots,
             )
         except Exception as e:
             logger.error(f"Error in plot_area_renderer: {e}", exc_info=True)
-            # Optionally draw an error box in the plot area
             plot_area_height = current_height - plot_y_start - 10
             plot_area_width = panel_width - 20
             if plot_area_width > 10 and plot_area_height > 10:
@@ -167,26 +187,3 @@ class LeftPanelRenderer:
                     10, plot_y_start, plot_area_width, plot_area_height
                 )
                 pygame.draw.rect(self.screen, (80, 0, 0), plot_area_rect, 2)
-
-    def _render_plot_placeholder(
-        self,
-        y_start: int,
-        panel_width: int,
-        screen_height: int,
-        message: str = "Plots Disabled",
-    ):
-        """Renders a placeholder when plots are disabled."""
-        plot_area_height = screen_height - y_start - 10
-        plot_area_width = panel_width - 20
-        if plot_area_width > 10 and plot_area_height > 10:
-            plot_area_rect = pygame.Rect(10, y_start, plot_area_width, plot_area_height)
-            pygame.draw.rect(self.screen, (40, 40, 40), plot_area_rect, 1)
-            placeholder_font = self.fonts.get("plot_placeholder")
-            if placeholder_font:
-                placeholder_surf = placeholder_font.render(
-                    message, True, (100, 100, 100)
-                )
-                placeholder_rect = placeholder_surf.get_rect(
-                    center=plot_area_rect.center
-                )
-                self.screen.blit(placeholder_surf, placeholder_rect)

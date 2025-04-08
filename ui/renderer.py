@@ -37,19 +37,17 @@ class UIRenderer:
         self.left_panel.input_handler = input_handler
         if hasattr(self.left_panel, "button_status_renderer"):
             self.left_panel.button_status_renderer.input_handler_ref = input_handler
-            # Pass app reference if needed by button renderer
             if hasattr(self.left_panel.button_status_renderer, "app_ref"):
                 self.left_panel.button_status_renderer.app_ref = input_handler.app_ref
 
     def force_redraw(self):
         """Forces components like the plotter to redraw on the next frame."""
         self.plotter.last_plot_update_time = 0
-        # Also clear cached surfaces in game area
         self.game_area.best_state_surface_cache = None
         self.game_area.placeholder_surface_cache = None
         logger.info("[Renderer] Forced redraw triggered.")
 
-    def render_all(self, **kwargs):  # Use kwargs for flexibility
+    def render_all(self, **kwargs):
         """Renders UI based on the application state."""
         try:
             app_state_str = kwargs.get("app_state", AppState.UNKNOWN.value)
@@ -103,12 +101,12 @@ class UIRenderer:
                 pass
 
     def _render_main_menu(self, **kwargs):
-        """Renders the main dashboard view."""
+        """Renders the main dashboard view with live worker envs."""
         self.screen.fill(VisConfig.BLACK)
         current_width, current_height = self.screen.get_size()
         lp_width, ga_width = self._calculate_panel_widths(current_width)
 
-        # Render Left Panel
+        # Render Left Panel (Stats, Controls, Plots)
         self.left_panel.render(
             panel_width=lp_width,
             is_process_running=kwargs.get("is_process_running", False),
@@ -121,27 +119,27 @@ class UIRenderer:
             worker_counts=kwargs.get("worker_counts", {}),
         )
 
-        # Render Game Area Panel
+        # Render Game Area Panel (Live Worker Envs)
         if ga_width > 0:
             self.game_area.render(
                 panel_width=ga_width,
                 panel_x_offset=lp_width,
-                is_running=kwargs.get(
-                    "is_process_running", False
-                ),  # Pass running state
-                envs=kwargs.get("envs", []),
-                num_envs=kwargs.get("num_envs", 0),
+                envs=kwargs.get("envs", []),  # Pass the list of GameState objects
+                num_envs=kwargs.get("num_envs", 0),  # Total number of workers
                 env_config=kwargs.get("env_config"),
-                best_game_state_data=kwargs.get("best_game_state_data"),
-                stats_summary=kwargs.get("stats_summary", {}),
+                # best_game_state_data is no longer primary focus here
+                # stats_summary might be useful for overlays later
             )
 
     def _calculate_panel_widths(self, current_width: int) -> Tuple[int, int]:
         """Calculates the widths for the left and game area panels."""
-        left_panel_ratio = max(0.1, min(0.9, self.vis_config.LEFT_PANEL_RATIO))
+        # Keep left panel ratio, adjust if needed
+        left_panel_ratio = max(
+            0.2, min(0.8, self.vis_config.LEFT_PANEL_RATIO)
+        )  # Ensure minimum width
         lp_width = int(current_width * left_panel_ratio)
         ga_width = current_width - lp_width
-        min_lp_width = 300
+        min_lp_width = 400  # Increased min width for more stats
         if lp_width < min_lp_width and current_width > min_lp_width:
             lp_width = min_lp_width
             ga_width = max(0, current_width - lp_width)

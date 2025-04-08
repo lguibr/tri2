@@ -1,10 +1,12 @@
+# File: app_workers.py
 import threading
 import queue
 import time
-from typing import TYPE_CHECKING, Optional, List, Dict
+from typing import TYPE_CHECKING, Optional, List, Dict, Tuple
 
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
+from environment.game_state import GameState  # Import GameState
 
 if TYPE_CHECKING:
     from main_pygame import MainApp
@@ -16,7 +18,7 @@ class AppWorkerManager:
     def __init__(self, app: "MainApp"):
         self.app = app
         # Keep references to the worker *instances* from AppInitializer
-        self.self_play_worker_threads: List[SelfPlayWorker] = []  # Now a list
+        self.self_play_worker_threads: List[SelfPlayWorker] = []
         self.training_worker_thread: Optional[TrainingWorker] = None
         print("[AppWorkerManager] Initialized.")
 
@@ -43,13 +45,38 @@ class AppWorkerManager:
         """Checks if any worker thread is active."""
         return self.is_self_play_running() or self.is_training_running()
 
+    def get_worker_game_states(self, max_envs: int) -> List[Optional[GameState]]:
+        """Retrieves copies of game states from active self-play workers."""
+        states: List[Optional[GameState]] = []
+        count = 0
+        # Iterate through the worker instances stored in the initializer
+        # as self.self_play_worker_threads might be cleared during stop
+        worker_instances = self.app.initializer.self_play_workers
+        for worker in worker_instances:
+            if count >= max_envs:
+                break
+            if worker and worker.is_alive():
+                state_copy = worker.get_current_game_state_copy()
+                states.append(state_copy)
+                count += 1
+            else:
+                # Append None if worker is not alive or doesn't exist
+                states.append(None)
+                count += 1
+
+        # Fill remaining slots with None if fewer workers than max_envs
+        while count < max_envs:
+            states.append(None)
+            count += 1
+
+        return states
+
     def start_all_workers(self):
         """Starts all initialized worker threads if they are not already running."""
         if self.is_any_worker_running():
             print("[AppWorkerManager] Workers already running.")
             return
 
-        # Check required components
         if (
             not self.app.initializer.agent
             or not self.app.initializer.mcts
@@ -63,7 +90,6 @@ class AppWorkerManager:
             self.app.status = "Worker Init Failed"
             return
 
-        # Check worker instances from initializer
         if (
             not self.app.initializer.self_play_workers
             or not self.app.initializer.training_worker
@@ -76,33 +102,26 @@ class AppWorkerManager:
             return
 
         print("[AppWorkerManager] Starting all worker threads...")
-        self.app.stop_event.clear()  # Clear stop event before starting
+        self.app.stop_event.clear()
 
-        # --- Start Self-Play Workers ---
         self.self_play_worker_threads = []  # Reset the list of active threads
         for i, worker_instance in enumerate(self.app.initializer.self_play_workers):
             if worker_instance:
-                # Need to create a new thread instance if the old one was joined
                 if not worker_instance.is_alive():
                     try:
-                        # Recreate worker with original args
                         recreated_worker = SelfPlayWorker(
                             **worker_instance.get_init_args()
                         )
-                        self.app.initializer.self_play_workers[i] = (
-                            recreated_worker  # Update initializer ref
-                        )
+                        self.app.initializer.self_play_workers[i] = recreated_worker
                         worker_to_start = recreated_worker
                         print(f"  Recreated SelfPlayWorker-{i}.")
                     except Exception as e:
                         print(f"  ERROR recreating SelfPlayWorker-{i}: {e}")
-                        continue  # Skip starting this worker
+                        continue
                 else:
-                    worker_to_start = worker_instance  # Start existing instance
+                    worker_to_start = worker_instance
 
-                self.self_play_worker_threads.append(
-                    worker_to_start
-                )  # Add to active list
+                self.self_play_worker_threads.append(worker_to_start)
                 worker_to_start.start()
                 print(f"  SelfPlayWorker-{i} thread started.")
             else:
@@ -110,25 +129,21 @@ class AppWorkerManager:
                     f"[AppWorkerManager] ERROR: SelfPlayWorker instance {i} is None during start."
                 )
 
-        # --- Start Training Worker ---
         self.training_worker_thread = self.app.initializer.training_worker
         if self.training_worker_thread:
             if not self.training_worker_thread.is_alive():
                 try:
-                    # Recreate worker with original args
                     recreated_worker = TrainingWorker(
                         **self.training_worker_thread.get_init_args()
                     )
-                    self.app.initializer.training_worker = (
-                        recreated_worker  # Update initializer ref
-                    )
+                    self.app.initializer.training_worker = recreated_worker
                     self.training_worker_thread = recreated_worker
                     print("  Recreated TrainingWorker.")
                 except Exception as e:
                     print(f"  ERROR recreating TrainingWorker: {e}")
-                    self.training_worker_thread = None  # Failed to recreate
+                    self.training_worker_thread = None
 
-            if self.training_worker_thread:  # Check again if recreation was successful
+            if self.training_worker_thread:
                 self.training_worker_thread.start()
                 print("  TrainingWorker thread started.")
         else:
@@ -145,21 +160,26 @@ class AppWorkerManager:
     def stop_all_workers(self, join_timeout: float = 5.0):
         """Signals ALL worker threads to stop and waits for them to join."""
         if not self.is_any_worker_running():
+            print("[AppWorkerManager] No workers running to stop.")
             return
 
         print("[AppWorkerManager] Stopping ALL worker threads...")
-        self.app.stop_event.set()  # Signal stop
+        self.app.stop_event.set()
 
         threads_to_join: List[Tuple[str, threading.Thread]] = []
 
-        # Add active self-play workers
-        for i, worker in enumerate(self.self_play_worker_threads):
+        # Use the instances from the initializer list for joining
+        for i, worker in enumerate(self.app.initializer.self_play_workers):
             if worker and worker.is_alive():
                 threads_to_join.append((f"SelfPlayWorker-{i}", worker))
 
-        # Add active training worker
-        if self.training_worker_thread and self.training_worker_thread.is_alive():
-            threads_to_join.append(("TrainingWorker", self.training_worker_thread))
+        if (
+            self.app.initializer.training_worker
+            and self.app.initializer.training_worker.is_alive()
+        ):
+            threads_to_join.append(
+                ("TrainingWorker", self.app.initializer.training_worker)
+            )
 
         start_join_time = time.time()
         for name, thread in threads_to_join:
@@ -175,11 +195,10 @@ class AppWorkerManager:
             else:
                 print(f"[AppWorkerManager] {name} joined.")
 
-        # Clear references after joining
+        # Clear active thread references after joining
         self.self_play_worker_threads = []
         self.training_worker_thread = None
 
-        # Clear experience queue after stopping workers
         print("[AppWorkerManager] Clearing experience queue...")
         cleared_count = 0
         while not self.app.experience_queue.empty():

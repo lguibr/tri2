@@ -13,10 +13,11 @@ from config import (
     GREEN,
     DARK_GREEN,
     BLUE,
-)  # Added BLUE
+    GRAY,  # Added GRAY
+)
 from config.core import (
     TrainConfig,
-)  # Import TrainConfig to get MIN_BUFFER_SIZE_TO_TRAIN
+)
 from utils.helpers import format_eta
 from ui.input_handler import InputHandler
 
@@ -32,13 +33,11 @@ class ButtonStatusRenderer:
         self.fonts = fonts
         self.status_font = fonts.get("status", pygame.font.Font(None, 28))
         self.detail_font = fonts.get("detail", pygame.font.Font(None, 16))
-        self.progress_font = fonts.get(
-            "detail", pygame.font.Font(None, 14)
-        )  # Use detail font for progress text
+        self.progress_font = fonts.get("detail", pygame.font.Font(None, 14))
         self.ui_font = fonts.get("ui", pygame.font.Font(None, 24))
         self.input_handler_ref: Optional[InputHandler] = None
         self.app_ref: Optional["MainApp"] = None
-        self.train_config = TrainConfig()  # Store train config
+        self.train_config = TrainConfig()
 
     def _draw_button(
         self,
@@ -52,7 +51,10 @@ class ButtonStatusRenderer:
         """Helper to draw a single button."""
         final_color = base_color
         if not enabled:
-            final_color = tuple(max(30, c // 2) for c in base_color[:3])
+            final_color = tuple(
+                max(30, c // 2) for c in base_color[:3]
+            )  # Darken disabled
+            final_color = GRAY  # Use consistent gray for disabled
         elif is_active and active_color:
             final_color = active_color
 
@@ -61,7 +63,7 @@ class ButtonStatusRenderer:
         if self.ui_font:
             label_surface = self.ui_font.render(text, True, text_color)
             self.screen.blit(label_surface, label_surface.get_rect(center=rect.center))
-        else:  # Fallback if font fails
+        else:
             pygame.draw.line(self.screen, RED, rect.topleft, rect.bottomright, 2)
             pygame.draw.line(self.screen, RED, rect.topright, rect.bottomleft, 2)
 
@@ -78,24 +80,21 @@ class ButtonStatusRenderer:
             return y_pos
 
         bar_height = 18
-        bar_width = panel_width * 0.8  # Use 80% of panel width
+        bar_width = panel_width * 0.8
         bar_x = (panel_width - bar_width) / 2
         bar_rect = pygame.Rect(bar_x, y_pos, bar_width, bar_height)
 
-        # Calculate progress percentage
         progress = 0.0
         if target_value > 0:
             progress = min(1.0, max(0.0, current_value / target_value))
 
-        # Draw background and border
         bg_color = (50, 50, 50)
         border_color = LIGHTG
         pygame.draw.rect(self.screen, bg_color, bar_rect, border_radius=3)
 
-        # Draw fill
         fill_width = int(bar_width * progress)
         fill_rect = pygame.Rect(bar_x, y_pos, fill_width, bar_height)
-        fill_color = BLUE  # Use blue for buffering progress
+        fill_color = BLUE
         pygame.draw.rect(
             self.screen,
             fill_color,
@@ -106,16 +105,14 @@ class ButtonStatusRenderer:
             border_bottom_right_radius=3 if progress >= 1.0 else 0,
         )
 
-        # Draw border after fill
         pygame.draw.rect(self.screen, border_color, bar_rect, 1, border_radius=3)
 
-        # Draw text label (e.g., "Buffering: 500 / 1000")
         progress_text = f"{label}: {current_value:,}/{target_value:,}".replace(",", "_")
         text_surf = self.progress_font.render(progress_text, True, WHITE)
         text_rect = text_surf.get_rect(center=bar_rect.center)
         self.screen.blit(text_surf, text_rect)
 
-        return int(bar_rect.bottom)  # Return bottom y coordinate
+        return int(bar_rect.bottom)
 
     def _render_compact_status(
         self,
@@ -159,22 +156,17 @@ class ButtonStatusRenderer:
             print(f"Error rendering status text: {e}")
             current_y += 20
 
-        # 2. Render Global Step and Episodes
+        # 2. Render Global Step and Episodes OR Buffering Progress
         global_step = stats_summary.get("global_step", 0)
         total_episodes = stats_summary.get("total_episodes", 0)
         buffer_size = stats_summary.get("buffer_size", 0)
+        min_buffer = self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
 
-        global_step_str = f"{global_step:,}".replace(",", "_")
-        eps_str = f"{total_episodes:,}".replace(",", "_")
-
-        # Show only Step/Episodes if training has started, otherwise show buffer size
-        is_buffering = (
-            is_running
-            and global_step == 0
-            and buffer_size < self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
-        )
+        is_buffering = is_running and global_step == 0 and buffer_size < min_buffer
 
         if not is_buffering:
+            global_step_str = f"{global_step:,}".replace(",", "_")
+            eps_str = f"{total_episodes:,}".replace(",", "_")
             line2_text = f"Step: {global_step_str} | Episodes: {eps_str}"
             try:
                 line2_surface = self.detail_font.render(line2_text, True, LIGHTG)
@@ -191,16 +183,15 @@ class ButtonStatusRenderer:
                 print(f"Error rendering step/ep text: {e}")
                 current_y += 15
         else:
-            # 3. Render Buffering Progress Bar (only if buffering)
-            current_y += 2  # Add a small gap before the progress bar
+            current_y += 2
             next_y_after_bar = self._render_progress_bar(
                 current_y,
                 panel_width,
                 buffer_size,
-                self.train_config.MIN_BUFFER_SIZE_TO_TRAIN,
+                min_buffer,
                 "Buffering",
             )
-            current_y = next_y_after_bar + 5  # Add padding after the bar
+            current_y = next_y_after_bar + 5
 
         return int(current_y)
 
@@ -219,32 +210,34 @@ class ButtonStatusRenderer:
 
         next_y = y_start
 
-        # Get button rects from InputHandler
         run_stop_btn_rect = (
             self.input_handler_ref.run_stop_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(0, 0, 0, 0)
+            else pygame.Rect(10, y_start, 150, 40)  # Fallback rect
         )
         cleanup_btn_rect = (
             self.input_handler_ref.cleanup_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(0, 0, 0, 0)
+            else pygame.Rect(
+                run_stop_btn_rect.right + 10, y_start, 160, 40
+            )  # Fallback rect
         )
         demo_btn_rect = (
             self.input_handler_ref.demo_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(0, 0, 0, 0)
+            else pygame.Rect(
+                cleanup_btn_rect.right + 10, y_start, 120, 40
+            )  # Fallback rect
         )
         debug_btn_rect = (
             self.input_handler_ref.debug_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(0, 0, 0, 0)
+            else pygame.Rect(
+                demo_btn_rect.right + 10, y_start, 120, 40
+            )  # Fallback rect
         )
 
-        # Determine if workers are running
-        is_running = "Running AlphaZero" in status
-        if not is_running and self.app_ref:
-            is_running = self.app_ref.worker_manager.is_any_worker_running()
+        is_running = is_process_running  # Use the passed flag
 
         # Render Buttons
         run_stop_text = "Stop Run" if is_running else "Run AlphaZero"
@@ -283,7 +276,7 @@ class ButtonStatusRenderer:
         )
         next_y = int(button_bottom) + 10
 
-        # Render Status Block (which now includes buffering progress)
+        # Render Status Block
         status_block_y = next_y
         next_y = self._render_compact_status(
             status_block_y, panel_width, status, stats_summary, is_running
