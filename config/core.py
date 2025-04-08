@@ -1,3 +1,4 @@
+# File: config/core.py
 import torch
 from typing import List, Tuple, Optional
 
@@ -41,31 +42,28 @@ class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
     PUCT_C: float = 1.5
-    # --- Increase Simulations for Learning ---
-    NUM_SIMULATIONS: int = 10  # Increased from 15 (Adjust based on performance)
-    # --- Original Value: 100, Previous: 50, 30, 15 ---
+    # --- Toy Level Settings ---
+    NUM_SIMULATIONS: int = 6  # Drastically reduced for speed
+    # --- End Toy Level ---
     TEMPERATURE_INITIAL: float = 1.0
-    TEMPERATURE_FINAL: float = 0.01
-    TEMPERATURE_ANNEAL_STEPS: int = (
-        30  # Keep relatively low for faster convergence to greedy play
-    )
+    TEMPERATURE_FINAL: float = 0.1  # Slightly higher final temp for testing
+    TEMPERATURE_ANNEAL_STEPS: int = 10  # Faster annealing
     DIRICHLET_ALPHA: float = 0.3
     DIRICHLET_EPSILON: float = 0.25
-    MAX_SEARCH_DEPTH: int = 20
+    MAX_SEARCH_DEPTH: int = 6  # Reduced max depth
 
 
 class VisConfig:
-    # --- Render multiple envs again when idle ---
-    NUM_ENVS_TO_RENDER = 2  # Show first 8 envs when run is stopped
-    # --- Original Value: 16, Changed to 0 previously ---
-    FPS = 0  # Keep FPS high for responsiveness, plotting is throttled separately
-    SCREEN_WIDTH = 1600
-    SCREEN_HEIGHT = 900
+    NUM_ENVS_TO_RENDER = 64  # Render fewer envs if using fewer workers
+    FPS = 24  
+    SCREEN_WIDTH = 1280  # Smaller screen might be okay for toy test
+    SCREEN_HEIGHT = 720
     VISUAL_STEP_DELAY = 0.00
-    LEFT_PANEL_RATIO = 0.7
+    LEFT_PANEL_RATIO = 0.6
     ENV_SPACING = 2
-    ENV_GRID_PADDING = 2
+    ENV_GRID_PADDING = 1  # Smaller padding
 
+    # Colors remain the same
     WHITE = WHITE
     BLACK = BLACK
     LIGHTG = LIGHTG
@@ -101,6 +99,7 @@ class VisConfig:
 
 
 class EnvConfig:
+    # Keep environment dimensions standard unless specifically testing variations
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2
@@ -126,13 +125,13 @@ class EnvConfig:
         return self.NUM_SHAPE_SLOTS * (self.ROWS * self.COLS)
 
 
-class RNNConfig:
+class RNNConfig:  # Keep disabled
     USE_RNN = False
     LSTM_HIDDEN_SIZE = 256
     LSTM_NUM_LAYERS = 2
 
 
-class TransformerConfig:
+class TransformerConfig:  # Keep disabled
     USE_TRANSFORMER = False
     TRANSFORMER_D_MODEL = 256
     TRANSFORMER_NHEAD = 8
@@ -145,37 +144,23 @@ class TransformerConfig:
 class TrainConfig:
     """Configuration parameters for the Training Worker."""
 
-    CHECKPOINT_SAVE_FREQ = 50  
+    # --- Toy Level Settings ---
+    CHECKPOINT_SAVE_FREQ = 100  # Save less often during quick tests
     LOAD_CHECKPOINT_PATH: Optional[str] = None
-
-    # --- Worker Configuration ---
-    # --- Keep low for now, increase if GPU is underutilized ---
-    NUM_SELF_PLAY_WORKERS: int = 4
-
-    # --- Training Loop Parameters (Adjusted for LEARNING) ---
-    BATCH_SIZE: int = 32  # Increased batch size
-    LEARNING_RATE: float = 1e-4  # Keep initial LR, may need tuning
+    NUM_SELF_PLAY_WORKERS: int = 64  # Reduced workers
+    BATCH_SIZE: int = 16  # Smaller batch size
+    LEARNING_RATE: float = 1e-4  # Keep LR, might need adjustment later
     WEIGHT_DECAY: float = 1e-5
-    NUM_TRAINING_STEPS_PER_ITER: int = 50  # More training steps per iteration
-    # --- Increase Buffer Sizes Significantly ---
-    MIN_BUFFER_SIZE_TO_TRAIN: int = (
-        500  # Start training only after 5k experiences (Adjust as needed)
-    )
-    BUFFER_CAPACITY: int = 200_000  # Store up to 20k experiences (Adjust as needed)
-    # --- Original Values: Min=1000, Cap=50000 ---
+    NUM_TRAINING_STEPS_PER_ITER: int = 10  # Fewer training steps per buffer fill
+    MIN_BUFFER_SIZE_TO_TRAIN: int = 50  # Start training very quickly
+    BUFFER_CAPACITY: int = 500  # Smaller buffer
     POLICY_LOSS_WEIGHT: float = 1.0
     VALUE_LOSS_WEIGHT: float = 1.0
-
-    # --- Learning Rate Scheduler ---
     USE_LR_SCHEDULER: bool = True
-    # Cosine Annealing Scheduler Parameters
-    SCHEDULER_TYPE: str = (
-        "CosineAnnealingLR"  # Or "OneCycleLR", "ReduceLROnPlateau" etc.
-    )
-    SCHEDULER_T_MAX: int = (
-        1_000_000  # Steps for half a cycle (e.g., total expected steps / 2) - ADJUST THIS!
-    )
-    SCHEDULER_ETA_MIN: float = 1e-6  # Minimum learning rate
+    SCHEDULER_TYPE: str = "CosineAnnealingLR"
+    SCHEDULER_T_MAX: int = 10000  # Shorter cycle for testing
+    SCHEDULER_ETA_MIN: float = 1e-6
+    # --- End Toy Level ---
 
 
 class ModelConfig:
@@ -184,30 +169,32 @@ class ModelConfig:
         HEIGHT = _env_cfg_instance.ROWS
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
-        CONV_CHANNELS = [64, 128, 256]
+        # --- Toy Level Settings ---
+        CONV_CHANNELS = [16, 32]  # Fewer/smaller conv layers
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
-        USE_BATCHNORM_CONV = True
-        SHAPE_FEATURE_MLP_DIMS = [128, 128]
+        USE_BATCHNORM_CONV = True  # Keep BatchNorm for stability
+        SHAPE_FEATURE_MLP_DIMS = [32]  # Smaller shape MLP
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
-        COMBINED_FC_DIMS = [1024, 256]
+        COMBINED_FC_DIMS = [128, 64]  # Smaller fusion MLP
         COMBINED_ACTIVATION = torch.nn.ReLU
-        USE_BATCHNORM_FC = True
-        DROPOUT_FC = 0.0
+        USE_BATCHNORM_FC = True  # Keep BatchNorm
+        DROPOUT_FC = 0.0  # Disable dropout for simplicity in toy tests
+        # --- End Toy Level ---
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [25, 50, 100]  # Keep multiple windows for averaging
-    CONSOLE_LOG_FREQ = 1  # Log every update/episode completion
-    PLOT_DATA_WINDOW = 100_000  # Keep large plot window
+    STATS_AVG_WINDOW: List[int] = [10, 25]  # Shorter averaging windows
+    CONSOLE_LOG_FREQ = 1  # Log every update/episode
+    PLOT_DATA_WINDOW = 1000  # Keep fewer points for plotting
 
 
-class DemoConfig:
+class DemoConfig:  # No changes needed for toy training test
     BACKGROUND_COLOR = (10, 10, 20)
     SELECTED_SHAPE_HIGHLIGHT_COLOR = BLUE
     HUD_FONT_SIZE = 24
     HELP_FONT_SIZE = 18
-    HELP_TEXT = "[Arrows]=Move | [Q/E]=Cycle Shape | [Space]=Place | [ESC]=Exit"
+    HELP_TEXT = "[Click Preview]=Select/Deselect | [Click Grid]=Place | [ESC]=Exit"
     DEBUG_HELP_TEXT = "[Click]=Toggle Triangle | [R]=Reset Grid | [ESC]=Exit"
