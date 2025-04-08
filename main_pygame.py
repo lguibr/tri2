@@ -178,6 +178,13 @@ class MainApp:
         self.update_progress_details = {}
         self.logic.update_status_and_check_completion()
 
+        # Update demo env timers if in demo/debug mode
+        if self.app_state in [AppState.PLAYING, AppState.DEBUG] and self.demo_env:
+            try:
+                self.demo_env._update_timers()
+            except Exception as e:
+                logger.error(f"Error updating demo env timers: {e}")
+
     def _prepare_render_data(self) -> Dict[str, Any]:
         """Gathers all necessary data for rendering the current frame."""
         render_data = {
@@ -187,7 +194,7 @@ class MainApp:
             "cleanup_message": self.cleanup_message,
             "last_cleanup_message_time": self.last_cleanup_message_time,
             "update_progress_details": self.update_progress_details,
-            "demo_env": self.demo_env,
+            "demo_env": self.demo_env,  # Pass the demo env object itself
             "env_config": self.env_config,
             "num_envs": self.train_config_instance.NUM_SELF_PLAY_WORKERS,
             "plot_data": {},
@@ -253,10 +260,6 @@ class MainApp:
         """Logs average loop time periodically."""
         self.loop_times.append(time.monotonic() - loop_start_time)
         self.frame_count += 1
-        # if self.frame_count % LOOP_TIMING_INTERVAL == 0 and self.loop_times:
-        #     avg_loop_time = sum(self.loop_times) / len(self.loop_times)
-        #     avg_fps = 1.0 / avg_loop_time if avg_loop_time > 0 else float('inf')
-        #     logger.info(f"Avg Main Loop Time ({len(self.loop_times)} frames): {avg_loop_time*1000:.2f} ms ({avg_fps:.1f} FPS)")
 
     def run_main_loop(self):
         """The main application loop."""
@@ -274,7 +277,7 @@ class MainApp:
             if not self.running:
                 break
 
-            self._update_state()
+            self._update_state()  # Updates demo timers if needed
             render_data = self._prepare_render_data()
             self._render_frame(render_data)
 
@@ -360,9 +363,14 @@ def setup_logging_and_run_id(args: argparse.Namespace):
     logging.getLogger("PIL").setLevel(logging.WARNING)
     # Set default levels for our workers unless overridden by args.log_level
     if log_level <= logging.INFO:
-        logging.getLogger("mcts").setLevel(logging.WARNING)
+        logging.getLogger("mcts").setLevel(logging.WARNING)  # Keep MCTS quieter
         logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
         logging.getLogger("workers.training_worker").setLevel(logging.INFO)
+    # If DEBUG is requested, set workers/MCTS to DEBUG too
+    if log_level == logging.DEBUG:
+        logging.getLogger("mcts").setLevel(logging.DEBUG)
+        logging.getLogger("workers.self_play_worker").setLevel(logging.DEBUG)
+        logging.getLogger("workers.training_worker").setLevel(logging.DEBUG)
 
     logger.info(f"Logging level set to: {args.log_level.upper()}")
     logger.info(f"Using Run ID: {current_run_id}")

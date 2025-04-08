@@ -17,8 +17,8 @@ class GameState:
     """
     Represents the state of a single game instance.
     Delegates logic to helper classes: GameLogic, GameStateFeatures, GameDemoLogic.
-    Timer updates are now primarily handled within GameLogic.step().
-    Reward calculation is removed.
+    Visual effect timers are managed but DO NOT block core logic execution.
+    _update_timers() should only be called externally for UI/Demo rendering.
     """
 
     def __init__(self):
@@ -31,15 +31,21 @@ class GameState:
         self.triangles_cleared_this_episode: int = 0
         self.pieces_placed_this_episode: int = 0
 
-        # Timers
+        # Timers for VISUAL effects only
         self.blink_time: float = 0.0
-        self._last_timer_update_time: float = time.monotonic()
-        self.freeze_time: float = 0.0
-        self.line_clear_flash_time: float = 0.0
-        self.line_clear_highlight_time: float = 0.0
-        self.game_over_flash_time: float = 0.0
-        self.cleared_triangles_coords: List[Tuple[int, int]] = []
-        self.last_line_clear_info: Optional[Tuple[int, int, float]] = None
+        self._last_timer_update_time: float = (
+            time.monotonic()
+        )  # Tracks time for _update_timers
+        self.freeze_time: float = 0.0  # No longer used by core logic
+        self.line_clear_flash_time: float = 0.0  # Set by logic, checked by UI
+        self.line_clear_highlight_time: float = 0.0  # Set by logic, checked by UI
+        self.game_over_flash_time: float = 0.0  # Set by logic, checked by UI
+        self.cleared_triangles_coords: List[Tuple[int, int]] = (
+            []
+        )  # Set by logic, used by UI
+        self.last_line_clear_info: Optional[Tuple[int, int, float]] = (
+            None  # Set by logic, used by UI
+        )
 
         self.game_over: bool = False
         self._last_action_valid: bool = True
@@ -64,6 +70,7 @@ class GameState:
         self.triangles_cleared_this_episode = 0
         self.pieces_placed_this_episode = 0
 
+        # Reset visual timers
         self.blink_time = 0.0
         self.freeze_time = 0.0
         self.line_clear_flash_time = 0.0
@@ -84,9 +91,11 @@ class GameState:
 
     def step(self, action_index: int) -> Tuple[Optional[StateType], bool]:
         """
-        Performs one game step based on the action index.
+        Performs one game step based on the action index using GameLogic.
         Returns (None, is_game_over). State should be fetched via get_state().
+        This method NO LONGER involves visual timer delays.
         """
+        # _update_timers() is NOT called here
         _, done = self.logic.step(action_index)
         return None, done
 
@@ -105,23 +114,29 @@ class GameState:
     def is_over(self) -> bool:
         return self.game_over
 
+    # --- Visual State Check Methods (Used by UI/Demo) ---
     def is_frozen(self) -> bool:
-        is_currently_frozen = self.freeze_time > 0
-        return is_currently_frozen
+        # This check is now purely for visual state, core logic doesn't wait
+        return self.freeze_time > 0
 
     def is_line_clearing(self) -> bool:
+        # This check is now purely for visual state
         return self.line_clear_flash_time > 0
 
     def is_highlighting_cleared(self) -> bool:
+        # This check is now purely for visual state
         return self.line_clear_highlight_time > 0
 
     def is_game_over_flashing(self) -> bool:
+        # This check is now purely for visual state
         return self.game_over_flash_time > 0
 
     def is_blinking(self) -> bool:
+        # This check is now purely for visual state
         return self.blink_time > 0
 
     def get_cleared_triangle_coords(self) -> List[Tuple[int, int]]:
+        # Used by UI
         return self.cleared_triangles_coords
 
     def get_shapes(self) -> List[Optional[Shape]]:
@@ -129,24 +144,24 @@ class GameState:
 
     def get_outcome(self) -> float:
         """
-        Determines the outcome of the game from the perspective of the player.
-        Returns +1 for win, -1 for loss, 0 for draw/ongoing/undetermined.
-        Placeholder: Returns 0 for now, as win/loss condition isn't defined.
+        Determines the outcome of the game. Returns 0 for now.
         """
         if self.is_over():
-            # TODO: Implement actual win/loss condition based on game rules or score
-            # Example: return 1.0 if self.game_score > threshold else -1.0
-            return 0.0  # Placeholder: Game over but outcome is neutral
+            return 0.0
         else:
-            return 0.0  # Game is ongoing
+            return 0.0
 
     def _update_timers(self):
-        """Updates timers for visual effects based on elapsed time."""
+        """
+        Updates timers for visual effects based on elapsed time.
+        This should ONLY be called by the UI rendering logic for the demo env.
+        """
         now = time.monotonic()
         delta_time = now - self._last_timer_update_time
         self._last_timer_update_time = now
-        delta_time = max(0.0, delta_time)
+        delta_time = max(0.0, delta_time)  # Ensure non-negative delta
 
+        # Only decrement timers relevant to visuals
         self.freeze_time = max(0, self.freeze_time - delta_time)
         self.blink_time = max(0, self.blink_time - delta_time)
         self.line_clear_flash_time = max(0, self.line_clear_flash_time - delta_time)
@@ -155,10 +170,10 @@ class GameState:
         )
         self.game_over_flash_time = max(0, self.game_over_flash_time - delta_time)
 
+        # Clear visual state flags when timers expire
         if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
             self.cleared_triangles_coords = []
-        if self.line_clear_flash_time <= 0 and self.last_line_clear_info is not None:
-            self.last_line_clear_info = None
+        # last_line_clear_info is kept until the next clear for potential display
 
     # --- Demo Mode Methods (Delegated) ---
     def select_shape_for_drag(self, shape_index: int):
@@ -171,7 +186,7 @@ class GameState:
         self.demo_logic.update_snapped_position(grid_pos)
 
     def place_dragged_shape(self) -> bool:
-        self._update_timers()
+        # Demo placement still uses the core logic step, which no longer delays
         return self.demo_logic.place_dragged_shape()
 
     def get_dragged_shape_info(
@@ -180,5 +195,4 @@ class GameState:
         return self.demo_logic.get_dragged_shape_info()
 
     def toggle_triangle_debug(self, row: int, col: int):
-        self._update_timers()
         self.demo_logic.toggle_triangle_debug(row, col)

@@ -1,155 +1,141 @@
 # File: environment/game_logic.py
-import numpy as np
 import time
-import copy
-from typing import List, Tuple, Optional, Dict, TYPE_CHECKING
-from utils.types import ActionType, StateType
-
-from .grid import Grid
-from .shape import Shape
+import numpy as np
+from typing import TYPE_CHECKING, Tuple, List, Optional
 
 if TYPE_CHECKING:
     from .game_state import GameState
+    from .shape import Shape
 
-ActionType = int
+# Constants for scoring (can be moved to config)
+BASE_SCORE_PER_TRIANGLE = 0.01
+LINE_CLEAR_BONUS_PER_LINE = 0.1
+PERFECT_CLEAR_BONUS = 10.0
 
 
 class GameLogic:
-    """Handles core game logic like piece placement, line clearing, and game over checks."""
+    """Handles the core game mechanics like placing shapes, clearing lines, scoring."""
 
     def __init__(self, game_state: "GameState"):
         self.gs = game_state
         self.env_config = game_state.env_config
 
-    def _check_game_over(self) -> bool:
-        """Checks if any placement is possible for any available shape."""
-        if self.gs.game_over:  # Already over
-            return True
-        if not any(
-            s is not None for s in self.gs.shapes
-        ):  # No shapes left is not game over
-            return False
-        if not self.valid_actions():  # Check if any valid actions exist
+    def step(self, action_index: int) -> Tuple[Optional[float], bool]:
+        """
+        Performs one game step based on the action index.
+        Handles shape placement, line clearing, scoring, and game over checks.
+        Visual effect timers are SET here but DO NOT cause delays.
+        Returns (reward, is_game_over). Reward is currently always None.
+        """
+        # --- 1. Decode Action ---
+        shape_slot_index, target_row, target_col = self.decode_action(action_index)
+        shape_to_place = self.gs.shapes[shape_slot_index]
+
+        # --- 2. Validate Action ---
+        if shape_to_place is None or not self.gs.grid.can_place(
+            shape_to_place, target_row, target_col
+        ):
+            # Invalid move: Game Over
             self.gs.game_over = True
-            self.gs.game_over_flash_time = 1.0  # Trigger flash
-            return True
-        return False
+            self.gs._last_action_valid = False
+            # Set game over flash timer (for visuals only)
+            self.gs.game_over_flash_time = 0.5
+            return None, True  # No reward, game is over
 
-    def _check_and_handle_line_clears(self) -> Tuple[int, int, float]:
-        """Checks for and clears lines, applies score/effects. Returns lines, tris, score_delta."""
-        lines_cleared, tris_cleared, cleared_coords = self.gs.grid.clear_lines()
-        score_delta = 0.0
+        # --- 3. Place Shape ---
+        self.gs.grid.place(shape_to_place, target_row, target_col)
+        self.gs.shapes[shape_slot_index] = None  # Remove placed shape
+        self.gs.pieces_placed_this_episode += 1
+        self.gs._last_action_valid = True
 
+        # --- 4. Clear Lines & Score ---
+        lines_cleared, triangles_in_lines, cleared_coords = self.gs.grid.clear_lines()
+        score_increase = 0.0
         if lines_cleared > 0:
-            # --- Scoring ---
-            # Simple scoring: base points per triangle + bonus per line
-            base_score_per_tri = 0.1
-            bonus_per_line = 1.0
-            score_delta = (tris_cleared * base_score_per_tri) + (
-                lines_cleared * bonus_per_line
-            )
-            # Apply multiplier for multi-line clears
-            if lines_cleared > 1:
-                score_delta *= 1.5 ** (lines_cleared - 1)
+            score_increase += triangles_in_lines * BASE_SCORE_PER_TRIANGLE
+            score_increase += lines_cleared * LINE_CLEAR_BONUS_PER_LINE
+            # Check for perfect clear (optional bonus)
+            # if self._is_perfect_clear():
+            #     score_increase += PERFECT_CLEAR_BONUS
 
-            self.gs.game_score += int(score_delta * 10)  # Example: scale score
-            self.gs.triangles_cleared_this_episode += tris_cleared
-
-            # --- Visual Timers ---
-            self.gs.line_clear_flash_time = 0.4  # Duration of background flash
-            self.gs.line_clear_highlight_time = 0.6  # Duration of yellow highlight
-            # Only freeze if lines were cleared
-            self.gs.freeze_time = 0.1  # Short freeze after line clear
+            self.gs.game_score += score_increase
+            self.gs.triangles_cleared_this_episode += triangles_in_lines
+            # Set visual effect timers (these won't block execution)
+            self.gs.line_clear_flash_time = 0.3
+            self.gs.line_clear_highlight_time = 0.5
             self.gs.cleared_triangles_coords = cleared_coords
-            self.gs.last_line_clear_info = (lines_cleared, tris_cleared, score_delta)
+            self.gs.last_line_clear_info = (
+                lines_cleared,
+                triangles_in_lines,
+                score_increase,
+            )
 
-        return lines_cleared, tris_cleared, score_delta
+        # --- 5. Refill Shapes ---
+        self._refill_shapes()
 
-    def encode_action(self, shape_slot_index: int, row: int, col: int) -> ActionType:
-        """Encodes a placement action into a single integer index."""
-        shape_offset = shape_slot_index * (self.env_config.ROWS * self.env_config.COLS)
-        grid_offset = row * self.env_config.COLS + col
-        return shape_offset + grid_offset
+        # --- 6. Check Game Over ---
+        if self._check_game_over_condition():
+            self.gs.game_over = True
+            # Set game over flash timer (for visuals only)
+            self.gs.game_over_flash_time = 0.5
+            return None, True  # No reward, game is over
 
-    def decode_action(self, action_index: ActionType) -> Tuple[int, int, int]:
-        """Decodes an action index into (shape_slot_index, row, col)."""
-        grid_size = self.env_config.ROWS * self.env_config.COLS
-        shape_slot_index = action_index // grid_size
-        grid_offset = action_index % grid_size
-        row = grid_offset // self.env_config.COLS
-        col = grid_offset % self.env_config.COLS
-        return shape_slot_index, row, col
+        # --- 7. Return State ---
+        # Reward is None as it's handled by outcome in AlphaZero
+        return None, False  # No reward, game not over
 
-    def valid_actions(self) -> List[ActionType]:
+    def decode_action(self, action_index: int) -> Tuple[int, int, int]:
+        """Decodes an action index into (shape_slot, row, col)."""
+        actions_per_shape = self.env_config.ROWS * self.env_config.COLS
+        shape_slot_index = action_index // actions_per_shape
+        placement_index = action_index % actions_per_shape
+        target_row = placement_index // self.env_config.COLS
+        target_col = placement_index % self.env_config.COLS
+        return shape_slot_index, target_row, target_col
+
+    def valid_actions(self) -> List[int]:
         """Returns a list of valid action indices for the current state."""
         valid_action_indices = []
+        actions_per_shape = self.env_config.ROWS * self.env_config.COLS
         for shape_slot_index, shape in enumerate(self.gs.shapes):
             if shape is None:
                 continue  # Skip empty slots
             for r in range(self.env_config.ROWS):
                 for c in range(self.env_config.COLS):
                     if self.gs.grid.can_place(shape, r, c):
-                        action_index = self.encode_action(shape_slot_index, r, c)
+                        action_index = (
+                            shape_slot_index * actions_per_shape
+                            + r * self.env_config.COLS
+                            + c
+                        )
                         valid_action_indices.append(action_index)
         return valid_action_indices
 
-    def step(self, action_index: ActionType) -> Tuple[StateType, bool]:
-        """
-        Performs one game step based on the action index.
-        Returns (new_state, is_game_over).
-        """
-        if self.gs.is_frozen() or self.gs.is_over():
-            # If frozen or game over, no action is taken, return current state
-            # Update timers even if frozen to allow unfreezing
-            self.gs._update_timers()
-            return self.gs.get_state(), self.gs.is_over()
+    def _refill_shapes(self):
+        """Refills empty shape slots with new random shapes."""
+        from .shape import Shape  # Local import to avoid potential cycles
 
-        shape_slot_index, target_row, target_col = self.decode_action(action_index)
+        for i in range(len(self.gs.shapes)):
+            if self.gs.shapes[i] is None:
+                self.gs.shapes[i] = Shape()
 
-        # --- Validate Action ---
-        shape_to_place = (
-            self.gs.shapes[shape_slot_index]
-            if shape_slot_index < len(self.gs.shapes)
-            else None
-        )
-        can_place = shape_to_place is not None and self.gs.grid.can_place(
-            shape_to_place, target_row, target_col
-        )
+    def _check_game_over_condition(self) -> bool:
+        """Checks if the game is over (no valid moves for any available shape)."""
+        # Check if any shape can be placed anywhere
+        for shape_slot_index, shape in enumerate(self.gs.shapes):
+            if shape is None:
+                continue
+            for r in range(self.env_config.ROWS):
+                for c in range(self.env_config.COLS):
+                    if self.gs.grid.can_place(shape, r, c):
+                        return False  # Found a valid move
+        return True  # No valid moves found for any shape
 
-        self.gs._last_action_valid = can_place
-
-        if not can_place:
-            # Invalid action - perhaps apply penalty or just do nothing
-            # For AlphaZero, MCTS should only explore valid actions,
-            # but this handles unexpected calls.
-            self.gs.blink_time = 0.2  # Short blink for invalid move attempt
-            # Update timers and check for game over (in case this was the only possibility)
-            self.gs._update_timers()
-            self._check_game_over()
-            return self.gs.get_state(), self.gs.is_over()
-
-        # --- Execute Valid Action ---
-        # 1. Place the shape
-        self.gs.grid.place(shape_to_place, target_row, target_col)
-        self.gs.pieces_placed_this_episode += 1
-
-        # 2. Remove shape from available shapes and refill if necessary
-        self.gs.shapes[shape_slot_index] = None
-        if all(s is None for s in self.gs.shapes):
-            self.gs.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
-
-        # 3. Check for and handle line clears
-        self._check_and_handle_line_clears()
-
-        # 4. Check for game over condition
-        self._check_game_over()
-
-        # 5. Update timers (handles freeze, blink, flashes)
-        self.gs._update_timers()
-
-        # 6. Return new state and game over status
-        return self.gs.get_state(), self.gs.is_over()
-
-    def get_last_action_validity(self) -> bool:
-        """Returns whether the last attempted action was valid."""
-        return self.gs._last_action_valid
+    def _is_perfect_clear(self) -> bool:
+        """Checks if the grid is completely empty."""
+        for r in range(self.gs.grid.rows):
+            for c in range(self.gs.grid.cols):
+                tri = self.gs.grid.triangles[r][c]
+                if not tri.is_death and tri.is_occupied:
+                    return False
+        return True

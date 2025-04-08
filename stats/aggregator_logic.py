@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional, TYPE_CHECKING
 import numpy as np
 import logging
 import copy
+from utils.types import StateType, ActionType
 
 from .aggregator_storage import AggregatorStorage
 from utils.helpers import format_eta
@@ -12,7 +13,6 @@ if TYPE_CHECKING:
     from environment.game_state import GameState, StateType  # Added StateType
 
 logger = logging.getLogger(__name__)
-from utils.types import StateType, ActionType, AgentStateDict
 
 
 class AggregatorLogic:
@@ -30,7 +30,6 @@ class AggregatorLogic:
         if not items:
             return 0.0
         try:
-            # Filter out potential None or non-numeric values if necessary
             numeric_items = [
                 x for x in items if isinstance(x, (int, float)) and np.isfinite(x)
             ]
@@ -56,7 +55,7 @@ class AggregatorLogic:
 
         self.storage.episode_outcomes.append(episode_outcome)
         self.storage.episode_lengths.append(episode_length)
-        self.storage.total_episodes = episode_num  # Use the number passed from worker
+        self.storage.total_episodes = episode_num
 
         if game_score is not None:
             self.storage.game_scores.append(game_score)
@@ -65,20 +64,15 @@ class AggregatorLogic:
                 self.storage.best_game_score = float(game_score)
                 self.storage.best_game_score_step = global_step
                 update_info["new_best_game"] = True
-                # Store data needed for rendering the best game state
                 if game_state_for_best:
                     self.storage.best_game_state_data = {
                         "score": game_score,
                         "step": global_step,
-                        "game_state_dict": copy.deepcopy(
-                            game_state_for_best
-                        ),  # Store the dict
+                        "game_state_dict": copy.deepcopy(game_state_for_best),
                     }
                     logger.info(
                         f"Stored new best game state data (Score: {game_score})"
                     )
-
-            # Update history regardless of whether it's the absolute best
             self.storage.best_game_score_history.append(
                 int(self.storage.best_game_score)
             )
@@ -105,14 +99,20 @@ class AggregatorLogic:
             "new_best_mcts_sim_time": False,
         }
 
-        # Update global step if provided and greater
+        # Ensure global step only increases
         if global_step > self.storage.current_global_step:
             self.storage.current_global_step = global_step
+        elif global_step < self.storage.current_global_step:
+            # This might happen if stats from an older game arrive after training started
+            logger.warning(
+                f"Received step data with older global_step ({global_step}) than current ({self.storage.current_global_step}). Using current."
+            )
+            global_step = (
+                self.storage.current_global_step
+            )  # Use the current step for recording this data point
 
-        # Calculate and update steps per second
         self.storage.update_steps_per_second(global_step)
 
-        # Training Worker Stats
         policy_loss = step_data.get("policy_loss")
         value_loss = step_data.get("value_loss")
         lr = step_data.get("lr")
@@ -137,7 +137,6 @@ class AggregatorLogic:
             self.storage.lr_values.append(lr)
             self.storage.current_lr = lr
 
-        # Self-Play Worker Stats (MCTS)
         if mcts_sim_time is not None:
             self.storage.mcts_simulation_times.append(mcts_sim_time)
             if mcts_sim_time < self.storage.best_mcts_sim_time:
@@ -155,13 +154,11 @@ class AggregatorLogic:
         if mcts_avg_depth is not None:
             self.storage.mcts_avg_depths.append(mcts_avg_depth)
 
-        # System Stats
         buffer_size = step_data.get("buffer_size")
         if buffer_size is not None:
             self.storage.buffer_sizes.append(buffer_size)
             self.storage.current_buffer_size = buffer_size
 
-        # Intermediate Progress Stats
         current_game = step_data.get("current_self_play_game_number")
         current_game_step = step_data.get("current_self_play_game_steps")
         training_steps = step_data.get("training_steps_performed")
@@ -184,7 +181,6 @@ class AggregatorLogic:
         summary["total_episodes"] = self.storage.total_episodes
         summary["summary_avg_window_size"] = avg_window
 
-        # Calculate averages using the helper
         summary["avg_game_score_window"] = self._calculate_average(
             "game_scores", avg_window
         )
@@ -210,14 +206,12 @@ class AggregatorLogic:
         )
         summary["steps_per_second_avg"] = self._calculate_average(
             "steps_per_second", avg_window
-        )  # Average SPS
+        )
 
-        # Current values
         summary["buffer_size"] = self.storage.current_buffer_size
         summary["current_lr"] = self.storage.current_lr
         summary["start_time"] = self.storage.start_time
 
-        # Best values
         summary["best_game_score"] = self.storage.best_game_score
         summary["best_game_score_step"] = self.storage.best_game_score_step
         summary["best_value_loss"] = self.storage.best_value_loss
@@ -227,7 +221,6 @@ class AggregatorLogic:
         summary["best_mcts_sim_time"] = self.storage.best_mcts_sim_time
         summary["best_mcts_sim_time_step"] = self.storage.best_mcts_sim_time_step
 
-        # Intermediate progress
         summary["current_self_play_game_number"] = (
             self.storage.current_self_play_game_number
         )
@@ -236,14 +229,11 @@ class AggregatorLogic:
         )
         summary["training_steps_performed"] = self.storage.training_steps_performed
 
-        # ETA Calculation
         eta_seconds = None
         if self.storage.training_target_step > 0:
             steps_remaining = self.storage.training_target_step - current_global_step
             avg_sps = summary["steps_per_second_avg"]
-            if (
-                steps_remaining > 0 and avg_sps > 0.1
-            ):  # Only calculate if SPS is meaningful
+            if steps_remaining > 0 and avg_sps > 0.1:
                 eta_seconds = steps_remaining / avg_sps
         summary["eta_seconds"] = eta_seconds
         summary["eta_formatted"] = format_eta(eta_seconds)
