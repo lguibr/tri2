@@ -10,8 +10,9 @@ import logging
 import numpy as np
 
 from environment.game_state import GameState, StateType
+from environment.shape import Shape  # Import Shape
 from mcts import MCTS
-from config import EnvConfig, MCTSConfig, TrainConfig  # Added TrainConfig
+from config import EnvConfig, MCTSConfig, TrainConfig
 from utils.types import ActionType
 
 if TYPE_CHECKING:
@@ -28,14 +29,13 @@ class SelfPlayWorker(threading.Thread):
     """Plays games using MCTS to generate training data."""
 
     INTERMEDIATE_STATS_INTERVAL_SEC = 5.0
-    # Significantly reduced MCTS batch size for MPS performance
-    MCTS_NN_BATCH_SIZE = 8
+    MCTS_NN_BATCH_SIZE = 32
 
     def __init__(
         self,
         worker_id: int,
         agent: "AlphaZeroNet",
-        mcts: MCTS,  # Keep original MCTS instance for config access if needed
+        mcts: MCTS,
         experience_queue: queue.Queue,
         stats_aggregator: "StatsAggregator",
         stop_event: threading.Event,
@@ -47,13 +47,12 @@ class SelfPlayWorker(threading.Thread):
         super().__init__(daemon=True, name=f"SelfPlayWorker-{worker_id}")
         self.worker_id = worker_id
         self.agent = agent
-        # Create a worker-specific MCTS instance with batched predictor and stop event
         self.mcts = MCTS(
             network_predictor=self.agent.predict_batch,
             config=mcts_config,
             env_config=env_config,
-            batch_size=self.MCTS_NN_BATCH_SIZE,  # Use reduced batch size
-            stop_event=stop_event,  # Pass stop event
+            batch_size=self.MCTS_NN_BATCH_SIZE,
+            stop_event=stop_event,
         )
         self.experience_queue = experience_queue
         self.stats_aggregator = stats_aggregator
@@ -65,7 +64,6 @@ class SelfPlayWorker(threading.Thread):
         self.log_prefix = f"[SelfPlayWorker-{self.worker_id}]"
         self.last_intermediate_stats_time = 0.0
 
-        # --- State for UI Rendering ---
         self._current_game_state_lock = threading.Lock()
         self._current_render_state_dict: Optional[StateType] = None
         self._last_stats: Dict[str, Any] = {
@@ -76,20 +74,18 @@ class SelfPlayWorker(threading.Thread):
             "mcts_nn_time": 0.0,
             "mcts_nodes_explored": 0,
             "mcts_avg_depth": 0.0,
+            "available_shapes_data": [],  # Add field for shape render data
         }
-        # --- End State for UI Rendering ---
-
         logger.info(
             f"{self.log_prefix} Initialized with MCTS Batch Size: {self.MCTS_NN_BATCH_SIZE}"
         )
 
     def get_init_args(self) -> Dict[str, Any]:
         """Returns arguments needed to re-initialize the thread."""
-        # Note: MCTS is re-created in __init__ now
         return {
             "worker_id": self.worker_id,
             "agent": self.agent,
-            "mcts": self.mcts,  # Pass the original MCTS config/predictor source if needed
+            "mcts": self.mcts,
             "experience_queue": self.experience_queue,
             "stats_aggregator": self.stats_aggregator,
             "stop_event": self.stop_event,
@@ -101,26 +97,31 @@ class SelfPlayWorker(threading.Thread):
             ),
         }
 
-    # --- Methods for UI Rendering ---
     def get_current_render_data(self) -> Dict[str, Any]:
-        """Returns a dictionary containing state dict copy and last stats (thread-safe)."""
+        """Returns a dictionary containing state dict reference and last stats (thread-safe)."""
         with self._current_game_state_lock:
-            state_dict_copy = (
-                copy.deepcopy(self._current_render_state_dict)
-                if self._current_render_state_dict
-                else None
-            )
+            state_dict_ref = self._current_render_state_dict
             stats_copy = self._last_stats.copy()
-        return {"state_dict": state_dict_copy, "stats": stats_copy}
+        return {"state_dict": state_dict_ref, "stats": stats_copy}
 
     def _update_render_state(self, game_state: GameState, stats: Dict[str, Any]):
-        """Updates the state dictionary and stats exposed for rendering (thread-safe)."""
+        """Updates the state dictionary reference and stats exposed for rendering (thread-safe)."""
         with self._current_game_state_lock:
             try:
                 self._current_render_state_dict = game_state.get_state()
             except Exception as e:
                 logger.error(f"{self.log_prefix} Error getting game state dict: {e}")
                 self._current_render_state_dict = None
+
+            # Extract serializable shape data for rendering
+            available_shapes_data = []
+            for shape_obj in game_state.shapes:
+                if shape_obj:
+                    available_shapes_data.append(
+                        {"triangles": shape_obj.triangles, "color": shape_obj.color}
+                    )
+                else:
+                    available_shapes_data.append(None)
 
             ui_stats = {
                 "status": stats.get(
@@ -129,7 +130,7 @@ class SelfPlayWorker(threading.Thread):
                 "game_steps": stats.get(
                     "game_steps", self._last_stats.get("game_steps", 0)
                 ),
-                "game_score": game_state.game_score,
+                "game_score": game_state.game_score,  # Explicitly include current game score
                 "mcts_sim_time": stats.get(
                     "mcts_total_duration", self._last_stats.get("mcts_sim_time", 0.0)
                 ),
@@ -143,10 +144,9 @@ class SelfPlayWorker(threading.Thread):
                 "mcts_avg_depth": stats.get(
                     "avg_leaf_depth", self._last_stats.get("mcts_avg_depth", 0.0)
                 ),
+                "available_shapes_data": available_shapes_data,
             }
             self._last_stats.update(ui_stats)
-
-    # --- End Methods for UI Rendering ---
 
     def _get_temperature(self, game_step: int) -> float:
         """Calculates the MCTS temperature based on the game step."""
@@ -177,7 +177,7 @@ class SelfPlayWorker(threading.Thread):
             "buffer_size": self.experience_queue.qsize(),
         }
         self.stats_aggregator.record_step(recording_step)
-        logger.info(  # Changed to debug
+        logger.debug(
             f"{self.log_prefix} Game {current_game_num} started. Buffer size: {recording_step['buffer_size']}"
         )
 
@@ -215,7 +215,7 @@ class SelfPlayWorker(threading.Thread):
             mcts_duration = time.monotonic() - mcts_start_time
             mcts_stats["game_steps"] = game_steps
             mcts_stats["status"] = "Running (MCTS)"
-            logger.info(  # Changed to debug
+            logger.debug(
                 f"{self.log_prefix} Game {current_game_num} Step {game_steps}: MCTS took {mcts_duration:.4f}s"
             )
 
@@ -223,7 +223,7 @@ class SelfPlayWorker(threading.Thread):
 
             temperature = self._get_temperature(game_steps)
             policy_target = self.mcts.get_policy_target(root_node, temperature)
-            game_data.append((copy.deepcopy(current_state_features), policy_target, 1))
+            game_data.append((current_state_features, policy_target, 1))
 
             action = self.mcts.choose_action(root_node, temperature)
             if action == -1:
@@ -236,7 +236,7 @@ class SelfPlayWorker(threading.Thread):
             step_start_time = time.monotonic()
             _, done = game.step(action)
             step_duration = time.monotonic() - step_start_time
-            logger.info(  # Changed to debug
+            logger.debug(
                 f"{self.log_prefix} Game {current_game_num} Step {game_steps}: Game step took {step_duration:.4f}s"
             )
 
@@ -267,11 +267,7 @@ class SelfPlayWorker(threading.Thread):
 
         final_outcome = game.get_outcome()
         processed_data: ProcessedExperienceBatch = [
-            (
-                state,
-                policy,
-                final_outcome * player,
-            )
+            (state, policy, final_outcome * player)
             for state, policy, player in game_data
         ]
 
@@ -283,6 +279,7 @@ class SelfPlayWorker(threading.Thread):
         )
 
         current_global_step = self.stats_aggregator.storage.current_global_step
+        final_state_for_best = game.get_state()
         self.stats_aggregator.record_episode(
             episode_outcome=final_outcome,
             episode_length=game_steps,
@@ -290,7 +287,7 @@ class SelfPlayWorker(threading.Thread):
             global_step=current_global_step,
             game_score=game.game_score,
             triangles_cleared=game.triangles_cleared_this_episode,
-            game_state_for_best=game.get_state(),
+            game_state_for_best=final_state_for_best,
         )
         return processed_data
 
@@ -315,9 +312,8 @@ class SelfPlayWorker(threading.Thread):
                         q_put_start = time.monotonic()
                         self.experience_queue.put(processed_data, timeout=5.0)
                         q_put_duration = time.monotonic() - q_put_start
-                        logger.info(  # Changed to debug
-                            f"{self.log_prefix} Added game data to queue (qsize: {self.experience_queue.qsize()}) "
-                            f"in {q_put_duration:.4f}s."
+                        logger.debug(
+                            f"{self.log_prefix} Added game data to queue (qsize: {self.experience_queue.qsize()}) in {q_put_duration:.4f}s."
                         )
                     except queue.Full:
                         logger.warning(
@@ -338,10 +334,16 @@ class SelfPlayWorker(threading.Thread):
                         "status": "Error",
                         "game_steps": 0,
                         "game_score": 0,
+                        "available_shapes_data": [],
                     }
                 time.sleep(5.0)
 
         logger.info(f"{self.log_prefix} Run loop finished.")
         with self._current_game_state_lock:
             self._current_render_state_dict = None
-            self._last_stats = {"status": "Stopped", "game_steps": 0, "game_score": 0}
+            self._last_stats = {
+                "status": "Stopped",
+                "game_steps": 0,
+                "game_score": 0,
+                "available_shapes_data": [],
+            }

@@ -5,3 +5,4 @@ tensorboard
 cloudpickle
 matplotlib
 psutil
+numba>=0.55.0

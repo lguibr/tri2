@@ -41,9 +41,22 @@ class GameStateFeatures:
             if shape_to_place is None:
                 continue
 
-            temp_grid = copy.deepcopy(self.gs.grid)
-            temp_grid.place(shape_to_place, target_row, target_col)
-            _, triangles_cleared, _ = temp_grid.clear_lines()
+            # Use grid's deepcopy method for simulation
+            temp_grid = self.gs.grid.deepcopy_grid()
+            # Need to simulate placement and clearing on the copy
+            newly_occupied_sim = set()
+            for dr, dc, _ in shape_to_place.triangles:
+                nr, nc = target_row + dr, target_col + dc
+                if temp_grid.valid(nr, nc):
+                    tri = temp_grid.triangles[nr][nc]
+                    if not tri.is_death and not tri.is_occupied:
+                        tri.is_occupied = True
+                        temp_grid._occupied_np[nr, nc] = True  # Update numpy array too
+                        newly_occupied_sim.add(tri)
+
+            _, triangles_cleared, _ = temp_grid.clear_lines(
+                newly_occupied_triangles=newly_occupied_sim
+            )
             holes_after = temp_grid.count_holes()
             height_after = temp_grid.get_max_height()
             bumpiness_after = temp_grid.get_bumpiness()
@@ -53,6 +66,7 @@ class GameStateFeatures:
             min_new_holes = min(min_new_holes, new_holes_created)
             min_resulting_height = min(min_resulting_height, height_after)
             min_resulting_bumpiness = min(min_resulting_bumpiness, bumpiness_after)
+            del temp_grid  # Clean up copy
 
         if min_new_holes == float("inf"):
             min_new_holes = 0.0
@@ -71,6 +85,7 @@ class GameStateFeatures:
     def get_state(self) -> StateType:
         """Returns the current game state as a dictionary of numpy arrays."""
         grid_state = self.gs.grid.get_feature_matrix()
+        death_mask_state = self.gs.grid.get_death_data()  # Get death mask
 
         shape_features_per = self.gs.env_config.SHAPE_FEATURES_PER_SHAPE
         num_shapes_expected = self.gs.env_config.NUM_SHAPE_SLOTS
@@ -173,5 +188,6 @@ class GameStateFeatures:
             "shapes": shape_feature_matrix.reshape(-1).astype(np.float32),
             "shape_availability": shape_availability_vector.astype(np.float32),
             "explicit_features": explicit_features_vector.astype(np.float32),
+            "death_mask": death_mask_state.astype(np.bool_),  # Add death mask
         }
         return state_dict

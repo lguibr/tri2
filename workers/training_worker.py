@@ -200,9 +200,9 @@ class TrainingWorker(threading.Thread):
             )
             return None
         batch_states, batch_policy_targets, batch_value_targets = prepared_batch
-        logger.info(
+        logger.info(  # Changed to debug
             f"{self.log_prefix} Batch preparation took {prep_duration:.4f}s."
-        )  # Changed to debug
+        )
 
         try:
             step_start_time = time.monotonic()
@@ -228,13 +228,16 @@ class TrainingWorker(threading.Thread):
                 )
                 return None
 
+            # Policy Loss: Cross-entropy between predicted policy logits and MCTS policy target
             log_policy_preds = F.log_softmax(policy_logits, dim=1)
             policy_loss = -torch.sum(
                 batch_policy_targets * log_policy_preds, dim=1
             ).mean()
 
+            # Value Loss: Mean Squared Error between predicted value and game outcome
             value_loss = F.mse_loss(value_preds, batch_value_targets)
 
+            # Total Loss
             total_loss = (
                 self.train_config.POLICY_LOSS_WEIGHT * policy_loss
                 + self.train_config.VALUE_LOSS_WEIGHT * value_loss
@@ -243,13 +246,14 @@ class TrainingWorker(threading.Thread):
             total_loss.backward()
             self.optimizer.step()
 
+            # Step the scheduler if it exists
             if self.scheduler:
                 self.scheduler.step()
 
             step_duration = time.monotonic() - step_start_time
-            logger.info(
+            logger.info(  # Changed to debug
                 f"{self.log_prefix} Training step took {step_duration:.4f}s."
-            )  # Changed to debug
+            )
 
             current_lr = self.optimizer.param_groups[0]["lr"]
 
@@ -257,7 +261,7 @@ class TrainingWorker(threading.Thread):
                 "policy_loss": policy_loss.item(),
                 "value_loss": value_loss.item(),
                 "update_time": step_duration,
-                "lr": current_lr,
+                "lr": current_lr,  # Include learning rate
             }
         except Exception as e:
             logger.critical(
@@ -276,22 +280,25 @@ class TrainingWorker(threading.Thread):
         )
 
         last_buffer_update_time = 0
-        buffer_update_interval = 1.0
+        buffer_update_interval = 1.0  # Log buffer size roughly every second if waiting
 
         while not self.stop_event.is_set():
             buffer_size = self.experience_queue.qsize()
 
+            # Wait if buffer is not large enough
             if buffer_size < self.train_config.MIN_BUFFER_SIZE_TO_TRAIN:
                 if time.time() - last_buffer_update_time > buffer_update_interval:
+                    # Record buffer size periodically while waiting
                     self.stats_aggregator.record_step({"buffer_size": buffer_size})
                     last_buffer_update_time = time.time()
                     logger.info(
                         f"{self.log_prefix} Waiting for buffer... Size: {buffer_size}/{self.train_config.MIN_BUFFER_SIZE_TO_TRAIN}"
                     )
-                time.sleep(0.1)
+                time.sleep(0.1)  # Short sleep while waiting
                 continue
 
-            logger.info(
+            # Buffer is ready, start training iteration
+            logger.info(  # Changed to debug
                 f"{self.log_prefix} Starting training iteration. Buffer size: {buffer_size}"
             )
             steps_this_iter, iter_policy_loss, iter_value_loss = 0, 0.0, 0.0
@@ -299,11 +306,12 @@ class TrainingWorker(threading.Thread):
 
             for _ in range(self.train_config.NUM_TRAINING_STEPS_PER_ITER):
                 if self.stop_event.is_set():
-                    break
+                    break  # Exit inner loop if stop event is set
 
                 batch_data_list: Optional[ProcessedExperienceBatch] = None
                 try:
                     q_get_start = time.monotonic()
+                    # Get a batch of experience from the queue
                     batch_data_list = self.experience_queue.get(timeout=1.0)
                     q_get_duration = time.monotonic() - q_get_start
                     logger.info(  # Changed to debug
@@ -314,16 +322,16 @@ class TrainingWorker(threading.Thread):
                         f"{self.log_prefix} Queue empty during training iteration, waiting..."
                     )
                     time.sleep(0.1)
-                    break
+                    break  # Exit inner loop, will check buffer size again
                 except Exception as e:
                     logger.error(
                         f"{self.log_prefix} Error getting data from queue: {e}",
                         exc_info=True,
                     )
-                    break
+                    break  # Exit inner loop on error
 
                 if not batch_data_list:
-                    continue
+                    continue  # Skip if queue returned None or empty list
 
                 # Use the actual batch size received, up to the configured max
                 actual_batch_size = min(
@@ -332,28 +340,32 @@ class TrainingWorker(threading.Thread):
                 if actual_batch_size < 1:  # Should not happen if queue get succeeded
                     continue
 
+                # Perform one training step
                 step_result = self._perform_training_step(
-                    batch_data_list[:actual_batch_size]
+                    batch_data_list[:actual_batch_size]  # Slice to actual batch size
                 )
                 if step_result is None:
                     logger.warning(
                         f"{self.log_prefix} Training step failed, ending iteration early."
                     )
-                    break
+                    break  # Exit inner loop if step failed
 
+                # Update counters and aggregate losses
                 self.steps_done += 1
                 steps_this_iter += 1
                 iter_policy_loss += step_result["policy_loss"]
                 iter_value_loss += step_result["value_loss"]
 
+                # Record step statistics
                 step_stats = {
                     "global_step": self.steps_done,  # Pass the incremented step
-                    "buffer_size": self.experience_queue.qsize(),
-                    "training_steps_performed": self.steps_done,
-                    **step_result,
+                    "buffer_size": self.experience_queue.qsize(),  # Get current size
+                    "training_steps_performed": self.steps_done,  # Track total steps
+                    **step_result,  # Include losses, time, lr from step result
                 }
                 self.stats_aggregator.record_step(step_stats)
 
+            # Log iteration summary
             iter_duration = time.monotonic() - iter_start_time
             if steps_this_iter > 0:
                 avg_p = iter_policy_loss / steps_this_iter
@@ -367,6 +379,7 @@ class TrainingWorker(threading.Thread):
                     f"{self.log_prefix} Iteration finished with 0 steps performed (Duration: {iter_duration:.2f}s)."
                 )
 
+            # Small sleep to yield control if needed
             time.sleep(0.01)
 
         logger.info(f"{self.log_prefix} Run loop finished.")

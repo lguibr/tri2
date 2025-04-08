@@ -7,153 +7,114 @@ if TYPE_CHECKING:
 
 
 class GameDemoLogic:
-    """Handles logic specific to the interactive demo and debug modes."""
+    """Handles logic specific to the interactive Demo/Debug mode."""
 
     def __init__(self, game_state: "GameState"):
         self.gs = game_state
 
-    def update_demo_selection_after_placement(self, placed_slot_index: int):
-        """Selects the next available shape slot after placement in demo mode."""
-        num_slots = self.gs.env_config.NUM_SHAPE_SLOTS
-        if num_slots <= 0:
-            return
-        available_indices = [i for i, s in enumerate(self.gs.shapes) if s is not None]
-        if not available_indices:
-            self.gs.demo_selected_shape_idx = 0
-        else:
-            self.gs.demo_selected_shape_idx = available_indices[0]
-
     def select_shape_for_drag(self, shape_index: int):
-        """Selects a shape to be dragged by the mouse."""
-        if self.gs.game_over or self.gs.freeze_time > 0:
-            return
+        """Selects a shape for dragging if available."""
         if (
             0 <= shape_index < len(self.gs.shapes)
             and self.gs.shapes[shape_index] is not None
         ):
-            self.gs.demo_dragged_shape_idx = shape_index
-            self.gs.demo_selected_shape_idx = shape_index
-            self.gs.demo_snapped_position = None
-            print(f"[Demo] Dragging shape index: {shape_index}")
-        else:
-            self.gs.demo_dragged_shape_idx = None
-            print(f"[Demo] Invalid shape index {shape_index} or shape is None.")
+            # If clicking the already selected shape, deselect it
+            if self.gs.demo_selected_shape_idx == shape_index:
+                self.gs.demo_selected_shape_idx = -1  # Indicate no selection
+                self.gs.demo_dragged_shape_idx = None
+                self.gs.demo_snapped_position = None
+            else:
+                self.gs.demo_selected_shape_idx = shape_index
+                self.gs.demo_dragged_shape_idx = shape_index
+                self.gs.demo_snapped_position = None  # Reset snap on new selection
 
     def deselect_dragged_shape(self):
-        """Deselects the currently dragged shape."""
-        if self.gs.demo_dragged_shape_idx is not None:
-            print(f"[Demo] Deselected shape index: {self.gs.demo_dragged_shape_idx}")
-            self.gs.demo_dragged_shape_idx = None
-            self.gs.demo_snapped_position = None
+        """Deselects any currently dragged shape."""
+        self.gs.demo_dragged_shape_idx = None
+        self.gs.demo_snapped_position = None
+        # Keep demo_selected_shape_idx as is, maybe user wants to re-drag later
 
     def update_snapped_position(self, grid_pos: Optional[Tuple[int, int]]):
-        """Updates the snapped position if the dragged shape can be placed there."""
+        """Updates the snapped position based on grid hover."""
         if self.gs.demo_dragged_shape_idx is None:
             self.gs.demo_snapped_position = None
             return
 
-        shape_to_check = self.gs.shapes[self.gs.demo_dragged_shape_idx]
-        if shape_to_check is None:
+        shape_to_drag = self.gs.shapes[self.gs.demo_dragged_shape_idx]
+        if shape_to_drag is None:
             self.gs.demo_snapped_position = None
             return
 
-        if grid_pos is not None:
-            target_row, target_col = grid_pos
-            if self.gs.grid.can_place(shape_to_check, target_row, target_col):
-                if self.gs.demo_snapped_position != grid_pos:
-                    self.gs.demo_snapped_position = grid_pos
-            else:
-                self.gs.demo_snapped_position = None
+        if grid_pos is not None and self.gs.grid.can_place(
+            shape_to_drag, grid_pos[0], grid_pos[1]
+        ):
+            self.gs.demo_snapped_position = grid_pos
         else:
             self.gs.demo_snapped_position = None
 
     def place_dragged_shape(self) -> bool:
-        """Attempts to place the currently dragged and snapped shape."""
-        if self.gs.game_over or self.gs.freeze_time > 0:
-            return False
+        """Attempts to place the currently dragged shape at the snapped position."""
         if (
-            self.gs.demo_dragged_shape_idx is None
-            or self.gs.demo_snapped_position is None
+            self.gs.demo_dragged_shape_idx is not None
+            and self.gs.demo_snapped_position is not None
         ):
-            print("[Demo] Cannot place: No shape dragged or not snapped.")
-            return False
+            shape_idx = self.gs.demo_dragged_shape_idx
+            r, c = self.gs.demo_snapped_position
 
-        shape_slot_index = self.gs.demo_dragged_shape_idx
-        target_row, target_col = self.gs.demo_snapped_position
-        shape_to_place = self.gs.shapes[shape_slot_index]
+            # Encode the action based on the demo state
+            action_index = self.gs.logic.encode_action(shape_idx, r, c)
 
-        if shape_to_place is not None and self.gs.grid.can_place(
-            shape_to_place, target_row, target_col
-        ):
-            print(
-                f"[Demo] Placing shape {shape_slot_index} at {target_row},{target_col}"
-            )
-            locations_per_shape = self.gs.grid.rows * self.gs.grid.cols
-            action_index = shape_slot_index * locations_per_shape + (
-                target_row * self.gs.grid.cols + target_col
-            )
-            # Call the refactored step method (which now returns state, done)
-            _, _ = self.gs.step(action_index)
+            # Use the core game logic step function
+            _, done = self.gs.logic.step(action_index)
 
+            # Reset demo drag state after placement attempt
             self.gs.demo_dragged_shape_idx = None
             self.gs.demo_snapped_position = None
-            return True
-        else:
-            print(f"[Demo] Invalid placement attempt at {target_row},{target_col}")
-            return False
+            self.gs.demo_selected_shape_idx = -1  # Deselect after placement
+
+            return not done  # Return True if placement was successful (game not over)
+        return False
 
     def get_dragged_shape_info(
         self,
     ) -> Tuple[Optional["Shape"], Optional[Tuple[int, int]]]:
-        """Returns the currently dragged shape object and its snapped position."""
+        """Returns the currently dragged shape and its snapped position."""
         if self.gs.demo_dragged_shape_idx is None:
             return None, None
         shape = self.gs.shapes[self.gs.demo_dragged_shape_idx]
         return shape, self.gs.demo_snapped_position
 
     def toggle_triangle_debug(self, row: int, col: int):
-        """Toggles the state of a triangle for debugging and checks for lines."""
+        """Toggles the occupied state of a triangle in debug mode and checks for line clears."""
         if not self.gs.grid.valid(row, col):
-            print(f"[Debug] Invalid coords: ({row}, {col})")
             return
 
-        triangle = self.gs.grid.triangles[row][col]
-        if triangle.is_death:
-            print(f"[Debug] Cannot toggle death cell: ({row}, {col})")
-            return
+        tri = self.gs.grid.triangles[row][col]
+        if tri.is_death:
+            return  # Cannot toggle death cells
 
-        triangle.is_occupied = not triangle.is_occupied
-        if triangle.is_occupied:
-            triangle.color = self.gs.vis_config.YELLOW
-        else:
-            triangle.color = None
-        print(
-            f"[Debug] Toggled ({row}, {col}) to {'Occupied' if triangle.is_occupied else 'Empty'}"
+        # Toggle state
+        tri.is_occupied = not tri.is_occupied
+        self.gs.grid._occupied_np[row, col] = tri.is_occupied  # Update numpy array
+        tri.color = self.gs.vis_config.WHITE if tri.is_occupied else None
+
+        # Manually trigger line clear check for the toggled triangle
+        toggled_triangle_set = {tri}
+        lines_cleared, tris_cleared, cleared_coords = self.gs.grid.clear_lines(
+            newly_occupied_triangles=toggled_triangle_set  # Pass the toggled tri
         )
 
-        lines_cleared, triangles_cleared, cleared_coords = self.gs.grid.clear_lines()
-        # Removed reward calculation
-
-        if triangles_cleared > 0:
-            print(
-                f"[Debug] Cleared {triangles_cleared} triangles in {lines_cleared} lines."
-            )
-            self.gs.game_score += triangles_cleared * 2
-            self.gs.triangles_cleared_this_episode += triangles_cleared
-            self.gs.blink_time = 0.5
-            self.gs.freeze_time = 0.5
+        if lines_cleared > 0:
+            # Update score and visual timers if lines were cleared
+            self.gs.triangles_cleared_this_episode += tris_cleared
+            score_increase = (lines_cleared**2) * 10 + tris_cleared
+            self.gs.game_score += score_increase
             self.gs.line_clear_flash_time = 0.3
-            self.gs.line_clear_highlight_time = 0.5
+            self.gs.line_clear_highlight_time = 0.6
             self.gs.cleared_triangles_coords = cleared_coords
             self.gs.last_line_clear_info = (
                 lines_cleared,
-                triangles_cleared,
-                0.0,
-            )  # Reward is now 0
-        else:
-            if self.gs.line_clear_highlight_time <= 0:
-                self.gs.cleared_triangles_coords = []
-            self.gs.last_line_clear_info = None
-
-        self.gs.game_over = False
-        self.gs.game_over_flash_time = 0.0
+                tris_cleared,
+                score_increase,
+            )
+            print(f"[Debug] Cleared {lines_cleared} lines ({tris_cleared} tris).")

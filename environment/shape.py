@@ -58,3 +58,14 @@ class Shape:
         rows = [t[0] for t in self.triangles]
         cols = [t[1] for t in self.triangles]
         return (min(rows), min(cols), max(rows), max(cols))
+
+    def copy(self) -> "Shape":
+        """Creates a shallow copy of the Shape object."""
+        new_shape = Shape.__new__(
+            Shape
+        )  # Create a new instance without calling __init__
+        new_shape.triangles = list(
+            self.triangles
+        )  # Copy the list (tuples inside are immutable)
+        new_shape.color = self.color  # Copy the color tuple reference
+        return new_shape
