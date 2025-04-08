@@ -1,15 +1,18 @@
 # File: stats/aggregator_logic.py
 import time
-from typing import Deque, Dict, Any, Optional, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, TYPE_CHECKING
 import numpy as np
+import logging
 import copy
 
 from .aggregator_storage import AggregatorStorage
 from utils.helpers import format_eta
 
 if TYPE_CHECKING:
-    from environment.game_state import GameState
-    from environment.grid import Grid
+    from environment.game_state import GameState, StateType  # Added StateType
+
+logger = logging.getLogger(__name__)
+from utils.types import StateType, ActionType, AgentStateDict
 
 
 class AggregatorLogic:
@@ -18,223 +21,203 @@ class AggregatorLogic:
     def __init__(self, storage: AggregatorStorage):
         self.storage = storage
 
-    def _update_deque(self, deque_instance: Deque, value: Any):
-        """Appends a value to a deque if it's finite."""
-        if isinstance(value, (int, float)) and np.isfinite(value):
-            deque_instance.append(value)
-        elif isinstance(value, np.number) and np.isfinite(value):
-            deque_instance.append(float(value))
-
-    def _calculate_average(self, deque_instance: Deque, window: int) -> float:
-        """Calculates the average of the last 'window' elements in a deque."""
-        if not deque_instance:
+    def _calculate_average(self, deque_name: str, window: int) -> float:
+        """Calculates the average of the last 'window' items in a deque."""
+        dq = self.storage.get_deque(deque_name)
+        if not dq:
             return 0.0
-        count = min(len(deque_instance), window)
-        if count == 0:
+        items = list(dq)[-window:]
+        if not items:
             return 0.0
-        last_n = list(deque_instance)[-count:]
-        return sum(last_n) / count
+        try:
+            # Filter out potential None or non-numeric values if necessary
+            numeric_items = [
+                x for x in items if isinstance(x, (int, float)) and np.isfinite(x)
+            ]
+            if not numeric_items:
+                return 0.0
+            return float(np.mean(numeric_items))
+        except (TypeError, ValueError) as e:
+            logger.warning(f"Error calculating average for {deque_name}: {e}")
+            return 0.0
 
     def update_episode_stats(
         self,
         episode_outcome: float,
         episode_length: int,
         episode_num: int,
-        current_step: int,
+        global_step: int,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,
+        game_state_for_best: Optional[StateType] = None,  # Accept StateType dict
     ) -> Dict[str, Any]:
-        """Updates stats related to a completed episode."""
-        update_info = {}
-        self.storage.total_episodes += 1
-        self._update_deque(self.storage.episode_outcomes, episode_outcome)
-        self._update_deque(
-            self.storage.episode_lengths, episode_length
-        )  # Ensure length is updated
+        """Updates episode-related deques and best values."""
+        update_info = {"new_best_game": False}
+
+        self.storage.episode_outcomes.append(episode_outcome)
+        self.storage.episode_lengths.append(episode_length)
+        self.storage.total_episodes = episode_num  # Use the number passed from worker
 
         if game_score is not None:
-            self._update_deque(self.storage.game_scores, game_score)
+            self.storage.game_scores.append(game_score)
             if game_score > self.storage.best_game_score:
                 self.storage.previous_best_game_score = self.storage.best_game_score
-                self.storage.best_game_score = game_score
-                self.storage.best_game_score_step = current_step
+                self.storage.best_game_score = float(game_score)
+                self.storage.best_game_score_step = global_step
                 update_info["new_best_game"] = True
-                self._update_deque(
-                    self.storage.best_game_score_history, self.storage.best_game_score
-                )
-                if game_state_for_best and hasattr(game_state_for_best, "grid"):
-                    grid_instance: "Grid" = game_state_for_best.grid
-                    try:
-                        state_dict = game_state_for_best.get_state()
-                        color_data = grid_instance.get_color_data()
-                        death_data = grid_instance.get_death_data()
+                # Store data needed for rendering the best game state
+                if game_state_for_best:
+                    self.storage.best_game_state_data = {
+                        "score": game_score,
+                        "step": global_step,
+                        "game_state_dict": copy.deepcopy(
+                            game_state_for_best
+                        ),  # Store the dict
+                    }
+                    logger.info(
+                        f"Stored new best game state data (Score: {game_score})"
+                    )
 
-                        self.storage.best_game_state_data = {
-                            "score": game_score,
-                            "step": current_step,
-                            "occupancy": state_dict["grid"][0],
-                            "colors": color_data,
-                            "death": death_data,
-                            "is_up": state_dict["grid"][1],
-                            "rows": game_state_for_best.env_config.ROWS,
-                            "cols": game_state_for_best.env_config.COLS,
-                        }
-                    except Exception as e:
-                        print(f"Error storing best game state data: {e}")
-                        self.storage.best_game_state_data = None
-            elif not self.storage.best_game_score_history:
-                self._update_deque(
-                    self.storage.best_game_score_history, self.storage.best_game_score
-                )
+            # Update history regardless of whether it's the absolute best
+            self.storage.best_game_score_history.append(
+                int(self.storage.best_game_score)
+            )
 
         if triangles_cleared is not None:
-            self._update_deque(
-                self.storage.episode_triangles_cleared, triangles_cleared
-            )
+            self.storage.episode_triangles_cleared.append(triangles_cleared)
             self.storage.total_triangles_cleared += triangles_cleared
-
-        self.storage.current_self_play_game_number = episode_num + 1
-        self.storage.current_self_play_game_steps = 0
 
         return update_info
 
     def update_step_stats(
-        self, step_data: Dict[str, Any], current_step: int
+        self,
+        step_data: Dict[str, Any],
+        global_step: int,
+        mcts_sim_time: Optional[float] = None,
+        mcts_nn_time: Optional[float] = None,
+        mcts_nodes_explored: Optional[int] = None,
+        mcts_avg_depth: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Updates stats related to a training or environment step."""
-        update_info = {}
+        """Updates step-related deques and best values."""
+        update_info = {
+            "new_best_value_loss": False,
+            "new_best_policy_loss": False,
+            "new_best_mcts_sim_time": False,
+        }
 
-        # Training Stats
+        # Update global step if provided and greater
+        if global_step > self.storage.current_global_step:
+            self.storage.current_global_step = global_step
+
+        # Calculate and update steps per second
+        self.storage.update_steps_per_second(global_step)
+
+        # Training Worker Stats
         policy_loss = step_data.get("policy_loss")
         value_loss = step_data.get("value_loss")
         lr = step_data.get("lr")
-        training_steps = step_data.get("training_steps_performed")
 
         if policy_loss is not None:
-            self._update_deque(self.storage.policy_losses, policy_loss)
+            self.storage.policy_losses.append(policy_loss)
             if policy_loss < self.storage.best_policy_loss:
                 self.storage.previous_best_policy_loss = self.storage.best_policy_loss
                 self.storage.best_policy_loss = policy_loss
-                self.storage.best_policy_loss_step = current_step
+                self.storage.best_policy_loss_step = global_step
                 update_info["new_best_policy_loss"] = True
 
         if value_loss is not None:
-            self._update_deque(self.storage.value_losses, value_loss)
+            self.storage.value_losses.append(value_loss)
             if value_loss < self.storage.best_value_loss:
                 self.storage.previous_best_value_loss = self.storage.best_value_loss
                 self.storage.best_value_loss = value_loss
-                self.storage.best_value_loss_step = current_step
+                self.storage.best_value_loss_step = global_step
                 update_info["new_best_value_loss"] = True
 
         if lr is not None:
-            self._update_deque(self.storage.lr_values, lr)
+            self.storage.lr_values.append(lr)
             self.storage.current_lr = lr
 
-        if training_steps is not None:
-            self.storage.training_steps_performed = training_steps
-
-        # MCTS Stats
-        mcts_sim_time = step_data.get("mcts_sim_time")
-        mcts_nn_time = step_data.get("mcts_nn_time")
-        mcts_nodes = step_data.get("mcts_nodes_explored")
-        mcts_depth = step_data.get("mcts_avg_depth")
-
+        # Self-Play Worker Stats (MCTS)
         if mcts_sim_time is not None:
-            self._update_deque(self.storage.mcts_simulation_times, mcts_sim_time)
+            self.storage.mcts_simulation_times.append(mcts_sim_time)
             if mcts_sim_time < self.storage.best_mcts_sim_time:
                 self.storage.previous_best_mcts_sim_time = (
                     self.storage.best_mcts_sim_time
                 )
                 self.storage.best_mcts_sim_time = mcts_sim_time
-                self.storage.best_mcts_sim_time_step = current_step
+                self.storage.best_mcts_sim_time_step = global_step
                 update_info["new_best_mcts_sim_time"] = True
 
         if mcts_nn_time is not None:
-            self._update_deque(self.storage.mcts_nn_prediction_times, mcts_nn_time)
-        if mcts_nodes is not None:
-            self._update_deque(self.storage.mcts_nodes_explored, mcts_nodes)
-        if mcts_depth is not None:
-            self._update_deque(self.storage.mcts_avg_depths, mcts_depth)
+            self.storage.mcts_nn_prediction_times.append(mcts_nn_time)
+        if mcts_nodes_explored is not None:
+            self.storage.mcts_nodes_explored.append(mcts_nodes_explored)
+        if mcts_avg_depth is not None:
+            self.storage.mcts_avg_depths.append(mcts_avg_depth)
 
-        # General Stats
+        # System Stats
         buffer_size = step_data.get("buffer_size")
         if buffer_size is not None:
-            self._update_deque(self.storage.buffer_sizes, buffer_size)
+            self.storage.buffer_sizes.append(buffer_size)
             self.storage.current_buffer_size = buffer_size
 
-        # Steps per second (calculated in summary, but store instantaneous if needed)
-        # No need to update deque here, done in calculate_summary
+        # Intermediate Progress Stats
+        current_game = step_data.get("current_self_play_game_number")
+        current_game_step = step_data.get("current_self_play_game_steps")
+        training_steps = step_data.get("training_steps_performed")
 
-        # Intermediate Progress
-        game_num = step_data.get("current_self_play_game_number")
-        game_step = step_data.get("current_self_play_game_steps")
-        if game_num is not None:
-            self.storage.current_self_play_game_number = game_num
-        if game_step is not None:
-            self.storage.current_self_play_game_steps = game_step
+        if current_game is not None:
+            self.storage.current_self_play_game_number = current_game
+        if current_game_step is not None:
+            self.storage.current_self_play_game_steps = current_game_step
+        if training_steps is not None:
+            self.storage.training_steps_performed = training_steps
 
         return update_info
 
     def calculate_summary(
         self, current_global_step: int, avg_window: int
     ) -> Dict[str, Any]:
-        """Calculates and returns the summary dictionary."""
+        """Calculates the summary dictionary."""
         summary = {}
-        elapsed_time = time.time() - self.storage.start_time
+        summary["global_step"] = current_global_step
+        summary["total_episodes"] = self.storage.total_episodes
+        summary["summary_avg_window_size"] = avg_window
 
-        # Calculate averages
+        # Calculate averages using the helper
         summary["avg_game_score_window"] = self._calculate_average(
-            self.storage.game_scores, avg_window
+            "game_scores", avg_window
         )
         summary["avg_episode_length_window"] = self._calculate_average(
-            self.storage.episode_lengths, avg_window
+            "episode_lengths", avg_window
         )
         summary["avg_triangles_cleared_window"] = self._calculate_average(
-            self.storage.episode_triangles_cleared, avg_window
+            "episode_triangles_cleared", avg_window
         )
-        summary["avg_policy_loss_window"] = self._calculate_average(
-            self.storage.policy_losses, avg_window
+        summary["policy_loss"] = self._calculate_average("policy_losses", avg_window)
+        summary["value_loss"] = self._calculate_average("value_losses", avg_window)
+        summary["mcts_simulation_time_avg"] = self._calculate_average(
+            "mcts_simulation_times", avg_window
         )
-        summary["avg_value_loss_window"] = self._calculate_average(
-            self.storage.value_losses, avg_window
+        summary["mcts_nn_prediction_time_avg"] = self._calculate_average(
+            "mcts_nn_prediction_times", avg_window
         )
-        summary["avg_mcts_sim_time_window"] = self._calculate_average(
-            self.storage.mcts_simulation_times, avg_window
+        summary["mcts_nodes_explored_avg"] = self._calculate_average(
+            "mcts_nodes_explored", avg_window
         )
-        summary["avg_mcts_nn_time_window"] = self._calculate_average(
-            self.storage.mcts_nn_prediction_times, avg_window
+        summary["mcts_avg_depth_avg"] = self._calculate_average(
+            "mcts_avg_depths", avg_window
         )
-        summary["avg_mcts_nodes_explored_window"] = self._calculate_average(
-            self.storage.mcts_nodes_explored, avg_window
-        )
-        summary["avg_mcts_avg_depth_window"] = self._calculate_average(
-            self.storage.mcts_avg_depths, avg_window
-        )
+        summary["steps_per_second_avg"] = self._calculate_average(
+            "steps_per_second", avg_window
+        )  # Average SPS
 
-        # Add scalar values
-        summary["total_episodes"] = self.storage.total_episodes
-        summary["total_triangles_cleared"] = self.storage.total_triangles_cleared
+        # Current values
         summary["buffer_size"] = self.storage.current_buffer_size
-        summary["global_step"] = current_global_step
         summary["current_lr"] = self.storage.current_lr
-        summary["elapsed_time_seconds"] = elapsed_time
         summary["start_time"] = self.storage.start_time
-        summary["summary_avg_window_size"] = avg_window
-        summary["training_target_step"] = self.storage.training_target_step
 
-        # Add intermediate progress
-        summary["current_self_play_game_number"] = (
-            self.storage.current_self_play_game_number
-        )
-        summary["current_self_play_game_steps"] = (
-            self.storage.current_self_play_game_steps
-        )
-        summary["training_steps_performed"] = self.storage.training_steps_performed
-
-        # Add best values
-        summary["best_outcome"] = self.storage.best_outcome
-        summary["best_outcome_step"] = self.storage.best_outcome_step
+        # Best values
         summary["best_game_score"] = self.storage.best_game_score
         summary["best_game_score_step"] = self.storage.best_game_score_step
         summary["best_value_loss"] = self.storage.best_value_loss
@@ -244,74 +227,25 @@ class AggregatorLogic:
         summary["best_mcts_sim_time"] = self.storage.best_mcts_sim_time
         summary["best_mcts_sim_time_step"] = self.storage.best_mcts_sim_time_step
 
-        # Add previous bests
-        summary["previous_best_outcome"] = self.storage.previous_best_outcome
-        summary["previous_best_game_score"] = self.storage.previous_best_game_score
-        summary["previous_best_value_loss"] = self.storage.previous_best_value_loss
-        summary["previous_best_policy_loss"] = self.storage.previous_best_policy_loss
-        summary["previous_best_mcts_sim_time"] = (
-            self.storage.previous_best_mcts_sim_time
+        # Intermediate progress
+        summary["current_self_play_game_number"] = (
+            self.storage.current_self_play_game_number
         )
-
-        # Calculate steps per second (more robustly)
-        steps_per_second = 0
-        # Use training_steps_performed for SPS calculation if available and > 0
-        steps_for_sps = (
-            self.storage.training_steps_performed
-            if self.storage.training_steps_performed > 0
-            else current_global_step
+        summary["current_self_play_game_steps"] = (
+            self.storage.current_self_play_game_steps
         )
-        if elapsed_time > 1 and steps_for_sps > 0:
-            steps_per_second = steps_for_sps / elapsed_time
-        summary["steps_per_second"] = steps_per_second
-        # Update deque for plotting steps/sec
-        self._update_deque(self.storage.steps_per_second, steps_per_second)
+        summary["training_steps_performed"] = self.storage.training_steps_performed
 
-        # Calculate ETA
+        # ETA Calculation
         eta_seconds = None
-        if self.storage.training_target_step > 0 and steps_per_second > 1e-3:
-            # Use training_steps_performed if available for ETA calculation
-            current_progress_step = (
-                self.storage.training_steps_performed
-                if self.storage.training_steps_performed > 0
-                else current_global_step
-            )
-            steps_remaining = self.storage.training_target_step - current_progress_step
-            if steps_remaining > 0:
-                eta_seconds = steps_remaining / steps_per_second
+        if self.storage.training_target_step > 0:
+            steps_remaining = self.storage.training_target_step - current_global_step
+            avg_sps = summary["steps_per_second_avg"]
+            if (
+                steps_remaining > 0 and avg_sps > 0.1
+            ):  # Only calculate if SPS is meaningful
+                eta_seconds = steps_remaining / avg_sps
         summary["eta_seconds"] = eta_seconds
         summary["eta_formatted"] = format_eta(eta_seconds)
-
-        # Use latest deque values for instantaneous metrics
-        summary["policy_loss"] = (
-            self.storage.policy_losses[-1] if self.storage.policy_losses else 0.0
-        )
-        summary["value_loss"] = (
-            self.storage.value_losses[-1] if self.storage.value_losses else 0.0
-        )
-        summary["mcts_sim_time"] = (
-            self.storage.mcts_simulation_times[-1]
-            if self.storage.mcts_simulation_times
-            else 0.0
-        )
-        summary["mcts_nn_time"] = (
-            self.storage.mcts_nn_prediction_times[-1]
-            if self.storage.mcts_nn_prediction_times
-            else 0.0
-        )
-        summary["mcts_nodes_explored"] = (
-            self.storage.mcts_nodes_explored[-1]
-            if self.storage.mcts_nodes_explored
-            else 0
-        )
-        summary["mcts_avg_depth"] = (
-            self.storage.mcts_avg_depths[-1] if self.storage.mcts_avg_depths else 0.0
-        )
-        summary["buffer_size_now"] = (
-            self.storage.buffer_sizes[-1]
-            if self.storage.buffer_sizes
-            else self.storage.current_buffer_size
-        )
-        summary["steps_per_second_now"] = steps_per_second  # Use calculated value
 
         return summary

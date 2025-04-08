@@ -24,6 +24,7 @@ def print_config_info_and_validate():
     train_config_instance = TrainConfig()
     mcts_config_instance = MCTSConfig()
     vis_config_instance = VisConfig()  # Get instance for NUM_ENVS_TO_RENDER
+    stats_config_instance = StatsConfig()  # Get instance for logging frequency
 
     run_id = get_run_id()
     run_log_dir = get_run_log_dir()
@@ -67,14 +68,15 @@ def print_config_info_and_validate():
     cnn_str = str(ModelConfig.Network.CONV_CHANNELS).replace(" ", "")
     mlp_str = str(ModelConfig.Network.COMBINED_FC_DIMS).replace(" ", "")
     shape_mlp_cfg_str = str(ModelConfig.Network.SHAPE_FEATURE_MLP_DIMS).replace(" ", "")
+    dropout = ModelConfig.Network.DROPOUT_FC
     print(
-        f"Network Base: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}"
+        f"Network Base: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}, Dropout={dropout}"
     )
 
     print(
         f"MCTS: Sims={mcts_config_instance.NUM_SIMULATIONS}, "
         f"PUCT_C={mcts_config_instance.PUCT_C:.2f}, "
-        f"Temp={mcts_config_instance.TEMPERATURE_INITIAL:.2f}->{mcts_config_instance.TEMPERATURE_FINAL:.2f}, "
+        f"Temp={mcts_config_instance.TEMPERATURE_INITIAL:.2f}->{mcts_config_instance.TEMPERATURE_FINAL:.2f} (Steps: {mcts_config_instance.TEMPERATURE_ANNEAL_STEPS}), "
         f"Dirichlet(α={mcts_config_instance.DIRICHLET_ALPHA:.2f}, ε={mcts_config_instance.DIRICHLET_EPSILON:.2f})"
     )
 
@@ -92,10 +94,9 @@ def print_config_info_and_validate():
         f"Workers: Self-Play={train_config_instance.NUM_SELF_PLAY_WORKERS}, Training=1"
     )
     print(
-        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (updates/episodes)"
+        f"Stats: AVG_WINDOWS={stats_config_instance.STATS_AVG_WINDOW}, Console Log Freq={stats_config_instance.CONSOLE_LOG_FREQ} (updates/episodes)"
     )
 
-    # Updated Rendering Info
     render_info = (
         f"Live Self-Play Workers (Max: {vis_config_instance.NUM_ENVS_TO_RENDER})"
     )

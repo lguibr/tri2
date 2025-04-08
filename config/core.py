@@ -42,26 +42,24 @@ class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
     PUCT_C: float = 1.5
-    # --- Toy Level Settings ---
-    NUM_SIMULATIONS: int = 6  # Drastically reduced for speed
-    # --- End Toy Level ---
+    NUM_SIMULATIONS: int = 100  # Increased from toy value
     TEMPERATURE_INITIAL: float = 1.0
-    TEMPERATURE_FINAL: float = 0.1  # Slightly higher final temp for testing
-    TEMPERATURE_ANNEAL_STEPS: int = 10  # Faster annealing
+    TEMPERATURE_FINAL: float = 0.01  # Colder final temperature for exploitation
+    TEMPERATURE_ANNEAL_STEPS: int = 30  # Reasonable annealing steps
     DIRICHLET_ALPHA: float = 0.3
     DIRICHLET_EPSILON: float = 0.25
-    MAX_SEARCH_DEPTH: int = 6  # Reduced max depth
+    MAX_SEARCH_DEPTH: int = 100  # Restore reasonable max depth
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 64  # Render fewer envs if using fewer workers
-    FPS = 24  
-    SCREEN_WIDTH = 1280  # Smaller screen might be okay for toy test
-    SCREEN_HEIGHT = 720
+    NUM_ENVS_TO_RENDER = 16  # Render a reasonable subset
+    FPS = 30  # Standard FPS
+    SCREEN_WIDTH = 1600  # Larger screen for more info
+    SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00
-    LEFT_PANEL_RATIO = 0.6
+    LEFT_PANEL_RATIO = 0.5  # Balance panels
     ENV_SPACING = 2
-    ENV_GRID_PADDING = 1  # Smaller padding
+    ENV_GRID_PADDING = 1
 
     # Colors remain the same
     WHITE = WHITE
@@ -144,23 +142,21 @@ class TransformerConfig:  # Keep disabled
 class TrainConfig:
     """Configuration parameters for the Training Worker."""
 
-    # --- Toy Level Settings ---
-    CHECKPOINT_SAVE_FREQ = 100  # Save less often during quick tests
+    CHECKPOINT_SAVE_FREQ = 1000  # Save periodically
     LOAD_CHECKPOINT_PATH: Optional[str] = None
-    NUM_SELF_PLAY_WORKERS: int = 64  # Reduced workers
-    BATCH_SIZE: int = 16  # Smaller batch size
-    LEARNING_RATE: float = 1e-4  # Keep LR, might need adjustment later
-    WEIGHT_DECAY: float = 1e-5
-    NUM_TRAINING_STEPS_PER_ITER: int = 10  # Fewer training steps per buffer fill
-    MIN_BUFFER_SIZE_TO_TRAIN: int = 50  # Start training very quickly
-    BUFFER_CAPACITY: int = 500  # Smaller buffer
+    NUM_SELF_PLAY_WORKERS: int = 64  # Number of parallel game simulations
+    BATCH_SIZE: int = 512  # Batch size for NN training
+    LEARNING_RATE: float = 1e-4  # Learning rate
+    WEIGHT_DECAY: float = 1e-5  # Weight decay for regularization
+    NUM_TRAINING_STEPS_PER_ITER: int = 100  # Steps per buffer sampling cycle
+    MIN_BUFFER_SIZE_TO_TRAIN: int = 20000  # Min experiences before training starts
+    BUFFER_CAPACITY: int = 200000  # Max experiences in buffer
     POLICY_LOSS_WEIGHT: float = 1.0
     VALUE_LOSS_WEIGHT: float = 1.0
     USE_LR_SCHEDULER: bool = True
     SCHEDULER_TYPE: str = "CosineAnnealingLR"
-    SCHEDULER_T_MAX: int = 10000  # Shorter cycle for testing
+    SCHEDULER_T_MAX: int = 100000  # Adjust T_max based on expected total steps
     SCHEDULER_ETA_MIN: float = 1e-6
-    # --- End Toy Level ---
 
 
 class ModelConfig:
@@ -169,29 +165,29 @@ class ModelConfig:
         HEIGHT = _env_cfg_instance.ROWS
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
-        # --- Toy Level Settings ---
-        CONV_CHANNELS = [16, 32]  # Fewer/smaller conv layers
+
+        # --- Increased Network Complexity ---
+        CONV_CHANNELS = [32, 64, 128]  # More/larger conv layers
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
-        USE_BATCHNORM_CONV = True  # Keep BatchNorm for stability
-        SHAPE_FEATURE_MLP_DIMS = [32]  # Smaller shape MLP
+        USE_BATCHNORM_CONV = True
+        SHAPE_FEATURE_MLP_DIMS = [64]  # Larger shape MLP
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
-        COMBINED_FC_DIMS = [128, 64]  # Smaller fusion MLP
+        COMBINED_FC_DIMS = [256, 128]  # Larger fusion MLP
         COMBINED_ACTIVATION = torch.nn.ReLU
-        USE_BATCHNORM_FC = True  # Keep BatchNorm
-        DROPOUT_FC = 0.0  # Disable dropout for simplicity in toy tests
-        # --- End Toy Level ---
+        USE_BATCHNORM_FC = True
+        DROPOUT_FC = 0.1  # Enable dropout for regularization
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [10, 25]  # Shorter averaging windows
-    CONSOLE_LOG_FREQ = 1  # Log every update/episode
-    PLOT_DATA_WINDOW = 1000  # Keep fewer points for plotting
+    STATS_AVG_WINDOW: List[int] = [100, 500]  # Standard averaging windows
+    CONSOLE_LOG_FREQ = 100  # Log less frequently to avoid spam
+    PLOT_DATA_WINDOW = 10000  # Keep more points for plotting
 
 
-class DemoConfig:  # No changes needed for toy training test
+class DemoConfig:  # No changes needed for non-toy training
     BACKGROUND_COLOR = (10, 10, 20)
     SELECTED_SHAPE_HIGHLIGHT_COLOR = BLUE
     HUD_FONT_SIZE = 24

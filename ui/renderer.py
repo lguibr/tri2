@@ -37,6 +37,7 @@ class UIRenderer:
         self.left_panel.input_handler = input_handler
         if hasattr(self.left_panel, "button_status_renderer"):
             self.left_panel.button_status_renderer.input_handler_ref = input_handler
+            # Pass the app reference if the button renderer needs it
             if hasattr(self.left_panel.button_status_renderer, "app_ref"):
                 self.left_panel.button_status_renderer.app_ref = input_handler.app_ref
 
@@ -57,6 +58,7 @@ class UIRenderer:
                 else AppState.UNKNOWN
             )
 
+            # --- Main Rendering Logic ---
             if current_app_state == AppState.MAIN_MENU:
                 self._render_main_menu(**kwargs)
             elif current_app_state == AppState.PLAYING:
@@ -73,23 +75,32 @@ class UIRenderer:
                 )
             elif current_app_state == AppState.ERROR:
                 self._render_error_screen(kwargs.get("status", "Unknown Error"))
+            else:  # Handle other potential states or default view
+                self._render_simple_message(f"State: {app_state_str}", VisConfig.WHITE)
 
-            # Render overlays on top
+            # Render overlays on top (e.g., cleanup confirmation)
             if (
                 kwargs.get("cleanup_confirmation_active")
                 and current_app_state != AppState.ERROR
             ):
                 self.overlays.render_cleanup_confirmation()
             elif not kwargs.get("cleanup_confirmation_active"):
+                # Render temporary status messages (like 'Cleanup complete')
                 self.overlays.render_status_message(
                     kwargs.get("cleanup_message", ""),
                     kwargs.get("last_cleanup_message_time", 0.0),
                 )
 
-            pygame.display.flip()
+            pygame.display.flip()  # Flip the display once after all rendering
 
         except pygame.error as e:
             logger.error(f"Pygame rendering error in render_all: {e}")
+            # Attempt to render a minimal error message directly
+            try:
+                self._render_simple_message("Pygame Render Error!", VisConfig.RED)
+                pygame.display.flip()
+            except Exception:
+                pass
         except Exception as e:
             logger.critical(
                 f"Unexpected critical rendering error in render_all: {e}", exc_info=True
@@ -106,7 +117,7 @@ class UIRenderer:
         current_width, current_height = self.screen.get_size()
         lp_width, ga_width = self._calculate_panel_widths(current_width)
 
-        # Render Left Panel (Stats, Controls, Plots)
+        # --- Render Left Panel (Stats, Controls, Plots) ---
         self.left_panel.render(
             panel_width=lp_width,
             is_process_running=kwargs.get("is_process_running", False),
@@ -119,29 +130,40 @@ class UIRenderer:
             worker_counts=kwargs.get("worker_counts", {}),
         )
 
-        # Render Game Area Panel (Live Worker Envs)
+        # --- Render Game Area Panel (Live Worker Envs) ---
         if ga_width > 0:
+            # Pass the worker_render_data list directly
             self.game_area.render(
                 panel_width=ga_width,
                 panel_x_offset=lp_width,
-                # Pass worker_render_data which is List[Optional[Dict[str, Any]]]
-                worker_render_data=kwargs.get("worker_render_data", []),
-                num_envs=kwargs.get("num_envs", 0),  # Total number of workers
+                worker_render_data=kwargs.get(
+                    "worker_render_data", []
+                ),  # List[Optional[Dict]]
+                num_envs=kwargs.get("num_envs", 0),  # Total number of SP workers
                 env_config=kwargs.get("env_config"),
+                best_game_state_data=kwargs.get(
+                    "best_game_state_data"
+                ),  # Pass best game state data
             )
 
     def _calculate_panel_widths(self, current_width: int) -> Tuple[int, int]:
         """Calculates the widths for the left and game area panels."""
+        # Ensure ratio is within reasonable bounds
         left_panel_ratio = max(0.2, min(0.8, self.vis_config.LEFT_PANEL_RATIO))
         lp_width = int(current_width * left_panel_ratio)
         ga_width = current_width - lp_width
-        min_lp_width = 400
+
+        # Ensure left panel has a minimum width for readability, unless screen is tiny
+        min_lp_width = 400  # Minimum width for left panel elements
         if lp_width < min_lp_width and current_width > min_lp_width:
             lp_width = min_lp_width
-            ga_width = max(0, current_width - lp_width)
-        elif current_width <= min_lp_width:
+            ga_width = max(0, current_width - lp_width)  # Adjust game area width
+        elif (
+            current_width <= min_lp_width
+        ):  # If screen too small, give all to left panel
             lp_width = current_width
             ga_width = 0
+
         return lp_width, ga_width
 
     def _render_demo_mode(
@@ -150,22 +172,26 @@ class UIRenderer:
         env_config: Optional[EnvConfig],
         is_debug: bool,
     ):
-        """Renders the demo or debug mode."""
-        if demo_env and env_config:
+        """Renders the demo or debug mode using the DemoRenderer."""
+        if demo_env and env_config and self.demo_renderer:
             self.demo_renderer.render(demo_env, env_config, is_debug=is_debug)
         else:
             mode = "Debug" if is_debug else "Demo"
-            self._render_simple_message(f"{mode} Env Error!", VisConfig.RED)
+            self._render_simple_message(
+                f"{mode} Env Error or Renderer Missing!", VisConfig.RED
+            )
 
     def _render_initializing_screen(self, status_message: str = "Initializing..."):
+        """Renders a simple initializing message."""
         self._render_simple_message(status_message, VisConfig.WHITE)
 
     def _render_error_screen(self, status_message: str):
-        """Renders the error screen."""
+        """Renders the error screen with more detail."""
         try:
-            self.screen.fill((40, 0, 0))
+            self.screen.fill((40, 0, 0))  # Dark red background
             font_title = pygame.font.SysFont(None, 70)
             font_msg = pygame.font.SysFont(None, 30)
+
             title_surf = font_title.render("APPLICATION ERROR", True, VisConfig.RED)
             msg_surf = font_msg.render(
                 f"Status: {status_message}", True, VisConfig.YELLOW
@@ -174,6 +200,7 @@ class UIRenderer:
                 "Press ESC or close window to exit.", True, VisConfig.WHITE
             )
 
+            # Position elements
             title_rect = title_surf.get_rect(
                 center=(self.screen.get_width() // 2, self.screen.get_height() // 3)
             )
@@ -187,15 +214,20 @@ class UIRenderer:
             self.screen.blit(title_surf, title_rect)
             self.screen.blit(msg_surf, msg_rect)
             self.screen.blit(exit_surf, exit_rect)
+
         except Exception as e:
-            logger.error(f"Error rendering error screen: {e}")
+            logger.error(f"Error rendering error screen itself: {e}")
+            # Fallback to simple message if error screen fails
             self._render_simple_message(f"Error State: {status_message}", VisConfig.RED)
 
     def _render_simple_message(self, message: str, color: Tuple[int, int, int]):
         """Renders a simple centered message."""
         try:
             self.screen.fill(VisConfig.BLACK)
-            font = pygame.font.SysFont(None, 50)
+            font = pygame.font.SysFont(None, 50)  # Use a default system font
+            if not font:  # Fallback if SysFont fails
+                font = pygame.font.Font(None, 50)
+
             text_surf = font.render(message, True, color)
             text_rect = text_surf.get_rect(center=self.screen.get_rect().center)
             self.screen.blit(text_surf, text_rect)

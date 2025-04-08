@@ -22,6 +22,7 @@ class InfoTextRenderer:
 
     def _get_network_description(self) -> str:
         """Builds a description string based on network components."""
+        # Potentially add more detail here later if needed based on ModelConfig
         return "AlphaZero Neural Network"
 
     def _render_key_value_line(
@@ -30,8 +31,8 @@ class InfoTextRenderer:
         panel_width: int,
         key: str,
         value: str,
-        key_font,
-        value_font,
+        key_font: pygame.font.Font,
+        value_font: pygame.font.Font,
         key_color=LIGHTG,
         value_color=WHITE,
     ) -> int:
@@ -48,6 +49,7 @@ class InfoTextRenderer:
                 topleft=(key_rect.right + x_pos_val_offset, y_pos)
             )
 
+            # Clip value text if it exceeds panel width
             clip_width = max(0, panel_width - value_rect.left - 10)
             blit_area = (
                 pygame.Rect(0, 0, clip_width, value_rect.height)
@@ -56,9 +58,11 @@ class InfoTextRenderer:
             )
             self.screen.blit(value_surf, value_rect, area=blit_area)
 
+            # Return the bottom-most y position of the rendered elements
             return max(key_rect.bottom, value_rect.bottom)
         except Exception as e:
             logger.error(f"Error rendering info line '{key}': {e}")
+            # Fallback: increment y by line height if rendering fails
             return y_pos + key_font.get_linesize()
 
     def render(
@@ -96,7 +100,9 @@ class InfoTextRenderer:
         tr_workers = worker_counts.get("Training", 0)
         worker_str = f"SP: {sp_workers}, TR: {tr_workers}"
         # Use the instantaneous steps/sec calculated in summary
-        steps_sec = stats_summary.get("steps_per_second_now", 0.0)
+        steps_sec = stats_summary.get(
+            "steps_per_second_avg", 0.0
+        )  # Use average for display
         steps_sec_str = f"{steps_sec:.1f}"
 
         general_info_lines = [
@@ -105,15 +111,18 @@ class InfoTextRenderer:
             ("Params", param_str),
             ("Workers", worker_str),
             ("Run Started", start_time_str),
-            ("Steps/Sec", steps_sec_str),  # Display current steps/sec
+            ("Steps/Sec (Avg)", steps_sec_str),  # Display current steps/sec
         ]
 
+        # Render lines using the helper function
+        line_spacing = 2  # Pixels between lines
         for key, value_str in general_info_lines:
             current_y = (
                 self._render_key_value_line(
                     current_y, panel_width, key, value_str, self.ui_font, self.ui_font
                 )
-                + 2
+                + line_spacing
             )
 
+        # Add a small buffer at the end before the next component
         return int(current_y) + 5

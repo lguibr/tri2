@@ -67,7 +67,14 @@ except ImportError as e:
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
-logger = logging.getLogger(__name__)
+# Reduce default logging noise
+logging.getLogger("mcts").setLevel(logging.WARNING)
+logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
+logging.getLogger("workers.training_worker").setLevel(logging.INFO)
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
+logging.getLogger("PIL").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)  # Main app logger
 
 # --- Constants ---
 LOOP_TIMING_INTERVAL = 60
@@ -99,6 +106,9 @@ class MainApp:
         self.stop_event = threading.Event()
         self.experience_queue: queue.Queue[ProcessedExperienceBatch] = queue.Queue(
             maxsize=self.train_config_instance.BUFFER_CAPACITY
+        )
+        logger.info(
+            f"Experience Queue Size: {self.train_config_instance.BUFFER_CAPACITY}"
         )
 
         # RL Components (Managed by Initializer)
@@ -142,6 +152,8 @@ class MainApp:
 
         if self.renderer and self.input_handler:
             self.renderer.set_input_handler(self.input_handler)
+            if hasattr(self.input_handler, "app_ref"):
+                self.input_handler.app_ref = self
 
         self.logic.check_initial_completion_status()
         self.status = "Ready"
@@ -149,7 +161,7 @@ class MainApp:
         logger.info("--- Initialization Complete ---")
 
     def _handle_input(self) -> bool:
-        """Handles user input."""
+        """Handles user input using the InputHandler."""
         if self.input_handler:
             return self.input_handler.handle_input(
                 self.app_state.value, self.cleanup_confirmation_active
@@ -157,8 +169,7 @@ class MainApp:
         else:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
-                    self.stop_event.set()
-                    self.worker_manager.stop_all_workers()
+                    self.logic.exit_app()
                     return False
             return True
 
@@ -168,16 +179,26 @@ class MainApp:
         self.logic.update_status_and_check_completion()
 
     def _prepare_render_data(self) -> Dict[str, Any]:
-        """Gathers data needed for rendering."""
+        """Gathers all necessary data for rendering the current frame."""
         render_data = {
+            "app_state": self.app_state.value,
+            "status": self.status,
+            "cleanup_confirmation_active": self.cleanup_confirmation_active,
+            "cleanup_message": self.cleanup_message,
+            "last_cleanup_message_time": self.last_cleanup_message_time,
+            "update_progress_details": self.update_progress_details,
+            "demo_env": self.demo_env,
+            "env_config": self.env_config,
+            "num_envs": self.train_config_instance.NUM_SELF_PLAY_WORKERS,
             "plot_data": {},
             "stats_summary": {},
-            "agent_params": 0,
             "best_game_state_data": None,
+            "agent_param_count": 0,
             "worker_counts": {},
             "is_process_running": False,
-            "worker_render_data": [],  # List to hold worker state+stats dicts
+            "worker_render_data": [],
         }
+
         if self.stats_aggregator:
             render_data["plot_data"] = self.stats_aggregator.get_plot_data()
             current_step = self.stats_aggregator.storage.current_global_step
@@ -188,67 +209,65 @@ class MainApp:
                 self.stats_aggregator.get_best_game_state_data()
             )
 
-        if self.agent:
-            render_data["agent_params"] = self.initializer.agent_param_count
+        if self.initializer:
+            render_data["agent_param_count"] = self.initializer.agent_param_count
 
-        render_data["worker_counts"] = self.worker_manager.get_active_worker_counts()
-        render_data["is_process_running"] = self.worker_manager.is_any_worker_running()
-
-        # --- Fetch worker render data (state + stats) ---
-        if render_data["is_process_running"]:
-            num_to_render = self.vis_config.NUM_ENVS_TO_RENDER
-            if num_to_render > 0:
-                # Call the CORRECT method name
-                render_data["worker_render_data"] = (
-                    self.worker_manager.get_worker_render_data(num_to_render)
-                )
-        # --- End fetch worker render data ---
+        if self.worker_manager:
+            render_data["worker_counts"] = (
+                self.worker_manager.get_active_worker_counts()
+            )
+            render_data["is_process_running"] = (
+                self.worker_manager.is_any_worker_running()
+            )
+            if (
+                render_data["is_process_running"]
+                and self.app_state == AppState.MAIN_MENU
+            ):
+                num_to_render = self.vis_config.NUM_ENVS_TO_RENDER
+                if num_to_render > 0:
+                    render_data["worker_render_data"] = (
+                        self.worker_manager.get_worker_render_data(num_to_render)
+                    )
 
         return render_data
 
     def _render_frame(self, render_data: Dict[str, Any]):
-        """Renders the UI frame."""
+        """Renders the UI frame using the collected data."""
         if self.renderer:
-            self.renderer.render_all(
-                app_state=self.app_state.value,
-                is_process_running=render_data["is_process_running"],
-                status=self.status,
-                stats_summary=render_data["stats_summary"],
-                # Pass worker_render_data (list of dicts)
-                worker_render_data=render_data["worker_render_data"],
-                num_envs=self.train_config_instance.NUM_SELF_PLAY_WORKERS,
-                env_config=self.env_config,
-                cleanup_confirmation_active=self.cleanup_confirmation_active,
-                cleanup_message=self.cleanup_message,
-                last_cleanup_message_time=self.last_cleanup_message_time,
-                plot_data=render_data["plot_data"],
-                demo_env=self.demo_env,
-                update_progress_details=self.update_progress_details,
-                agent_param_count=render_data["agent_params"],
-                worker_counts=render_data["worker_counts"],
-                best_game_state_data=render_data["best_game_state_data"],
-            )
+            self.renderer.render_all(**render_data)
         else:
-            self.screen.fill((20, 0, 0))
-            font = pygame.font.Font(None, 30)
-            text_surf = font.render("Renderer Error", True, (255, 50, 50))
-            self.screen.blit(
-                text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
-            )
-            pygame.display.flip()
+            try:
+                self.screen.fill((20, 0, 0))
+                font = pygame.font.Font(None, 30)
+                text_surf = font.render(
+                    "Renderer Initialization Failed!", True, (255, 50, 50)
+                )
+                self.screen.blit(
+                    text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
+                )
+                pygame.display.flip()
+            except Exception:
+                pass
 
     def _log_loop_timing(self, loop_start_time: float):
         """Logs average loop time periodically."""
         self.loop_times.append(time.monotonic() - loop_start_time)
         self.frame_count += 1
+        # if self.frame_count % LOOP_TIMING_INTERVAL == 0 and self.loop_times:
+        #     avg_loop_time = sum(self.loop_times) / len(self.loop_times)
+        #     avg_fps = 1.0 / avg_loop_time if avg_loop_time > 0 else float('inf')
+        #     logger.info(f"Avg Main Loop Time ({len(self.loop_times)} frames): {avg_loop_time*1000:.2f} ms ({avg_fps:.1f} FPS)")
 
     def run_main_loop(self):
         """The main application loop."""
         logger.info("Starting main application loop...")
         while self.running:
             loop_start_time = time.monotonic()
-            if not self.clock:
+
+            if not self.clock or not self.screen:
+                logger.error("Pygame clock or screen not initialized. Exiting.")
                 break
+
             dt = self.clock.tick(self.vis_config.FPS) / 1000.0
 
             self.running = self._handle_input()
@@ -258,6 +277,7 @@ class MainApp:
             self._update_state()
             render_data = self._prepare_render_data()
             self._render_frame(render_data)
+
             self._log_loop_timing(loop_start_time)
 
         logger.info("Main application loop exited.")
@@ -265,6 +285,9 @@ class MainApp:
     def shutdown(self):
         """Cleans up resources and exits."""
         logger.info("Initiating shutdown sequence...")
+        logger.info("Stopping worker threads...")
+        self.worker_manager.stop_all_workers()
+        logger.info("Worker threads stopped.")
         logger.info("Attempting final checkpoint save...")
         self.logic.save_final_checkpoint()
         logger.info("Final checkpoint save attempt finished.")
@@ -282,25 +305,38 @@ tee_logger_instance: Optional[TeeLogger] = None
 
 
 def setup_logging_and_run_id(args: argparse.Namespace):
-    """Sets up logging and determines the run ID."""
+    """Sets up logging (including TeeLogger) and determines the run ID."""
     global tee_logger_instance
+    run_id_source = "New"
+
     if args.load_checkpoint:
         try:
             run_id_from_path = os.path.basename(os.path.dirname(args.load_checkpoint))
             if run_id_from_path.startswith("run_"):
                 set_run_id(run_id_from_path)
-                print(f"Using Run ID from checkpoint path: {get_run_id()}")
+                run_id_source = f"Explicit Checkpoint ({get_run_id()})"
             else:
                 get_run_id()
-        except Exception:
+                run_id_source = (
+                    f"New (Explicit Ckpt Path Invalid: {args.load_checkpoint})"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Could not determine run_id from checkpoint path '{args.load_checkpoint}': {e}. Generating new."
+            )
             get_run_id()
+            run_id_source = f"New (Error parsing ckpt path)"
     else:
         latest_run_id, _ = find_latest_run_and_checkpoint(BASE_CHECKPOINT_DIR)
         if latest_run_id:
             set_run_id(latest_run_id)
-            print(f"Resuming Run ID: {get_run_id()}")
+            run_id_source = f"Resumed Latest ({get_run_id()})"
         else:
             get_run_id()
+            run_id_source = f"New (No previous runs found)"
+
+    current_run_id = get_run_id()
+    print(f"Run ID: {current_run_id} (Source: {run_id_source})")
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
@@ -310,22 +346,37 @@ def setup_logging_and_run_id(args: argparse.Namespace):
         tee_logger_instance = TeeLogger(log_file_path, sys.stdout)
         sys.stdout = tee_logger_instance
         sys.stderr = tee_logger_instance
+        print(f"Console output will be mirrored to: {log_file_path}")
     except Exception as e:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
         logger.error(f"Error setting up TeeLogger: {e}", exc_info=True)
 
+    # Configure Python's logging system
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
+    # Set default levels for noisy libraries
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
+    logging.getLogger("PIL").setLevel(logging.WARNING)
+    # Set default levels for our workers unless overridden by args.log_level
+    if log_level <= logging.INFO:
+        logging.getLogger("mcts").setLevel(logging.WARNING)
+        logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
+        logging.getLogger("workers.training_worker").setLevel(logging.INFO)
+
     logger.info(f"Logging level set to: {args.log_level.upper()}")
-    logger.info(f"Using Run ID: {get_run_id()}")
+    logger.info(f"Using Run ID: {current_run_id}")
     if args.load_checkpoint:
         logger.info(f"Attempting to load checkpoint: {args.load_checkpoint}")
+
     return original_stdout, original_stderr
 
 
 def cleanup_logging(original_stdout, original_stderr, exit_code):
     """Restores standard output/error and closes logger."""
     print("[Main Finally] Restoring stdout/stderr and closing logger...")
+    logger = logging.getLogger(__name__)
+
     if tee_logger_instance:
         try:
             if isinstance(sys.stdout, TeeLogger):
@@ -339,21 +390,25 @@ def cleanup_logging(original_stdout, original_stderr, exit_code):
         except Exception as log_close_err:
             original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
             traceback.print_exc(file=original_stderr)
+
     print(f"[Main Finally] Exiting with code {exit_code}.")
     sys.exit(exit_code)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AlphaTri Trainer")
+    parser = argparse.ArgumentParser(description="AlphaZero Trainer")
     parser.add_argument(
-        "--load-checkpoint", type=str, default=None, help="Path to checkpoint."
+        "--load-checkpoint",
+        type=str,
+        default=None,
+        help="Path to a specific checkpoint file (.pth) to load.",
     )
     parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging level.",
+        help="Set the logging level.",
     )
     args = parser.parse_args()
 
@@ -365,21 +420,24 @@ if __name__ == "__main__":
         app = MainApp(checkpoint_to_load=args.load_checkpoint)
         app.initialize()
         app.run_main_loop()
+
     except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt received. Shutting down.")
+        logger.warning("KeyboardInterrupt received. Shutting down gracefully...")
         if app:
             app.logic.exit_app()
-            app.shutdown()
         else:
             pygame.quit()
         exit_code = 130
+
     except Exception as e:
-        logger.critical(f"Unhandled exception in main: {e}", exc_info=True)
+        logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
         if app:
             app.logic.exit_app()
-            app.shutdown()
         else:
             pygame.quit()
         exit_code = 1
+
     finally:
+        if app:
+            app.shutdown()
         cleanup_logging(original_stdout, original_stderr, exit_code)

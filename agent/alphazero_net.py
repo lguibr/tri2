@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional, Any
+from typing import Dict, Tuple, Optional, Any, List  # Added List
+import numpy as np  # Added numpy
 
 from config import ModelConfig, EnvConfig
 from utils.types import StateType, ActionType
@@ -33,6 +34,7 @@ class AlphaZeroNet(nn.Module):
     """
     Neural Network for AlphaZero.
     Takes game state features and outputs policy logits and a value estimate.
+    Includes methods for single and batched predictions.
     """
 
     def __init__(
@@ -63,6 +65,7 @@ class AlphaZeroNet(nn.Module):
             if self.model_cfg.USE_BATCHNORM_CONV:
                 conv_layers.append(nn.BatchNorm2d(out_channels))
             conv_layers.append(self.model_cfg.CONV_ACTIVATION())
+            # Add ResidualBlock *after* activation
             conv_layers.append(ResidualBlock(out_channels))
             current_channels = out_channels
         self.conv_backbone = nn.Sequential(*conv_layers)
@@ -147,40 +150,69 @@ class AlphaZeroNet(nn.Module):
 
         return policy_logits, value
 
+    def _prepare_state_batch(self, state_numpy_list: List[StateType]) -> StateType:
+        """Converts a list of numpy state dicts to a batched tensor state dict."""
+        device = next(self.parameters()).device
+        # Initialize structure to hold batched data for each state component
+        batched_tensors = {key: [] for key in state_numpy_list[0].keys()}
+
+        for state_numpy in state_numpy_list:
+            for key, value in state_numpy.items():
+                if key in batched_tensors:
+                    batched_tensors[key].append(value)
+                else:
+                    # This shouldn't happen if all state dicts have the same keys
+                    print(
+                        f"Warning: Key {key} not found in initial state dict during batching."
+                    )
+
+        # Convert lists of numpy arrays to batched tensors
+        final_batched_states = {
+            k: torch.from_numpy(np.stack(v)).to(device)
+            for k, v in batched_tensors.items()
+        }
+        return final_batched_states
+
+    def predict_batch(
+        self,
+        state_numpy_list: List[
+            StateType
+        ],  # Expects list of numpy arrays from GameState
+    ) -> Tuple[List[Dict[ActionType, float]], List[float]]:
+        """
+        Performs batched prediction for MCTS.
+        Takes a list of state dictionaries (numpy arrays), converts to a batch tensor,
+        runs inference, applies softmax, and returns lists of policy dicts and scalar values.
+        """
+        if not state_numpy_list:
+            return [], []
+
+        # Prepare the batch of states
+        batched_state_tensors = self._prepare_state_batch(state_numpy_list)
+
+        self.eval()
+        with torch.no_grad():
+            policy_logits_batch, value_batch = self.forward(batched_state_tensors)
+
+        # Process results back into lists
+        policy_probs_batch = F.softmax(policy_logits_batch, dim=-1).cpu().numpy()
+        values = value_batch.squeeze(-1).cpu().numpy().tolist()  # Squeeze value output
+
+        policy_dicts = []
+        for policy_probs in policy_probs_batch:
+            policy_dicts.append({i: float(prob) for i, prob in enumerate(policy_probs)})
+
+        return policy_dicts, values
+
     def predict(
         self, state_numpy: StateType  # Expects numpy arrays from GameState
     ) -> Tuple[Dict[ActionType, float], float]:
         """
-        Convenience method for MCTS integration.
-        Takes a single state dictionary (numpy arrays), converts to tensors,
-        adds batch dim, runs inference, removes batch dim, applies softmax,
-        and returns policy probabilities dict and scalar value.
+        Convenience method for single prediction (e.g., initial root prediction).
+        Uses predict_batch internally.
         """
-        device = next(self.parameters()).device
-
-        # Convert numpy arrays to tensors and move to the correct device
-        state_tensors = {
-            key: torch.from_numpy(value).to(device)
-            for key, value in state_numpy.items()
-        }
-
-        # Add batch dimension
-        batched_state = {
-            key: torch.unsqueeze(value, 0) for key, value in state_tensors.items()
-        }
-
-        self.eval()
-        with torch.no_grad():
-            policy_logits, value_tensor = self.forward(batched_state)
-
-        policy_probs_tensor = F.softmax(policy_logits.squeeze(0), dim=-1)
-        value = value_tensor.squeeze(0).item()
-
-        policy_probs_dict = {
-            i: prob.item() for i, prob in enumerate(policy_probs_tensor)
-        }
-
-        return policy_probs_dict, value
+        policy_list, value_list = self.predict_batch([state_numpy])
+        return policy_list[0], value_list[0]
 
     def get_state_dict(self) -> Dict[str, Any]:
         """Returns the model's state dictionary."""
