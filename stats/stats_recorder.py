@@ -1,12 +1,22 @@
 # File: stats/stats_recorder.py
+# File: stats/stats_recorder.py
 import time
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Deque, List, Dict, Any, Optional, Union
+from typing import (
+    Deque,
+    List,
+    Dict,
+    Any,
+    Optional,
+    Union,
+    TYPE_CHECKING,
+)  # Added TYPE_CHECKING
 import numpy as np
 import torch
 
-# Removed: from .stats_recorder import StatsRecorderBase
+if TYPE_CHECKING:
+    from environment.game_state import GameState  # Import for type hinting
 
 
 class StatsRecorderBase(ABC):
@@ -21,6 +31,7 @@ class StatsRecorderBase(ABC):
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
+        game_state_for_best: Optional["GameState"] = None,  # Added optional GameState
     ):
         """Record stats for a completed episode."""
         pass

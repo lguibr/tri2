@@ -1,10 +1,18 @@
 # File: stats/aggregator_logic.py
+# File: stats/aggregator_logic.py
 from collections import deque
 from typing import Deque, Dict, Any, Optional, List
 import numpy as np
 import time
+import copy  # Import copy for deepcopy
 
 from .aggregator_storage import AggregatorStorage
+
+# Import GameState only for type hinting if needed, avoid direct dependency
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from environment.game_state import GameState
 
 
 class AggregatorLogic:
@@ -15,12 +23,15 @@ class AggregatorLogic:
 
     def update_episode_stats(
         self,
-        episode_score: float,  # RL Score (may be removed later)
+        episode_score: float,  # Game outcome (-1, 0, 1)
         episode_length: int,
         episode_num: int,
         current_step: int,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
+        game_state_for_best: Optional[
+            "GameState"
+        ] = None,  # Pass the actual GameState object
     ) -> Dict[str, Any]:
         """Updates storage with episode data and checks for bests."""
         update_info = {"new_best_rl": False, "new_best_game": False}
@@ -34,19 +45,57 @@ class AggregatorLogic:
             self.storage.total_triangles_cleared += triangles_cleared
         self.storage.total_episodes = episode_num
 
+        # Track best game outcome (closer to 1 is better)
         if episode_score > self.storage.best_score:
             self.storage.previous_best_score = self.storage.best_score
             self.storage.best_score = episode_score
             self.storage.best_score_step = current_step
-            update_info["new_best_rl"] = True
+            update_info["new_best_rl"] = True  # Keep flag name for consistency
 
+        # Track best game score and store corresponding state data
         if game_score is not None and game_score > self.storage.best_game_score:
             self.storage.previous_best_game_score = self.storage.best_game_score
             self.storage.best_game_score = float(game_score)
             self.storage.best_game_score_step = current_step
             update_info["new_best_game"] = True
+            # Store data needed to render the best state
+            if game_state_for_best and hasattr(game_state_for_best, "grid"):
+                try:
+                    grid = game_state_for_best.grid
+                    occupancy = np.array(
+                        [[t.is_occupied for t in row] for row in grid.triangles],
+                        dtype=bool,
+                    )
+                    colors = np.array(
+                        [[t.color for t in row] for row in grid.triangles], dtype=object
+                    )
+                    death_cells = np.array(
+                        [[t.is_death for t in row] for row in grid.triangles],
+                        dtype=bool,
+                    )
+                    is_up = np.array(
+                        [[t.is_up for t in row] for row in grid.triangles], dtype=bool
+                    )
 
-        self.storage.best_rl_score_history.append(self.storage.best_score)
+                    self.storage.best_game_state_data = {
+                        "score": game_score,
+                        "occupancy": copy.deepcopy(occupancy),
+                        "colors": copy.deepcopy(colors),
+                        "death": copy.deepcopy(death_cells),
+                        "is_up": copy.deepcopy(is_up),
+                        "rows": grid.rows,
+                        "cols": grid.cols,
+                        "step": current_step,
+                    }
+                    print(
+                        f"[Aggregator] New best game state saved (Score: {game_score} at Step {current_step})"
+                    )
+                except Exception as e:
+                    print(f"[Aggregator] Error saving best game state data: {e}")
+                    self.storage.best_game_state_data = None  # Clear on error
+
+        # RL score history removed
+        # self.storage.best_rl_score_history.append(self.storage.best_score)
         current_best_game = (
             int(self.storage.best_game_score)
             if self.storage.best_game_score > -float("inf")
@@ -105,16 +154,13 @@ class AggregatorLogic:
                 )
         # --- End NN Value Loss ---
 
-        # Removed Entropy
-
         # Append other optional metrics
         optional_metrics = [
-            # Removed grad_norm, update_steps_per_second, minibatch_update_sps
-            ("avg_max_q", "avg_max_qs"),  # Keep if Q-values estimated
-            ("beta", "beta_values"),  # Keep if PER used
-            ("buffer_size", "buffer_sizes"),  # Keep for replay/MCTS buffer
-            ("lr", "lr_values"),  # Keep for NN LR
-            ("epsilon", "epsilon_values"),  # Keep if epsilon-greedy used
+            # ("avg_max_q", "avg_max_qs"), # Removed PPO/DQN specific
+            # ("beta", "beta_values"), # Removed PER specific
+            ("buffer_size", "buffer_sizes"),
+            ("lr", "lr_values"),
+            # ("epsilon", "epsilon_values"), # Removed Epsilon-greedy specific
             ("cpu_usage", "cpu_usage"),
             ("memory_usage", "memory_usage"),
             ("gpu_memory_usage_percent", "gpu_memory_usage_percent"),
@@ -123,7 +169,6 @@ class AggregatorLogic:
             if data_key in step_data and step_data[data_key] is not None:
                 val = step_data[data_key]
                 if np.isfinite(val):
-                    # Ensure deque exists before appending
                     if hasattr(self.storage, deque_name):
                         getattr(self.storage, deque_name).append(val)
                     else:
@@ -135,11 +180,10 @@ class AggregatorLogic:
 
         # Update scalar values
         scalar_updates = {
-            # Removed SPS scalars
-            "beta": "current_beta",
+            # "beta": "current_beta", # Removed PER specific
             "buffer_size": "current_buffer_size",
             "lr": "current_lr",
-            "epsilon": "current_epsilon",
+            # "epsilon": "current_epsilon", # Removed Epsilon-greedy specific
             "cpu_usage": "current_cpu_usage",
             "memory_usage": "current_memory_usage",
             "gpu_memory_usage_percent": "current_gpu_memory_usage_percent",
@@ -160,7 +204,6 @@ class AggregatorLogic:
         """Calculates the summary dictionary based on stored data."""
 
         def safe_mean(q_name: str, default=0.0) -> float:
-            # Check if deque exists before accessing
             if not hasattr(self.storage, q_name):
                 return default
             deque_instance = self.storage.get_deque(q_name)
@@ -169,12 +212,11 @@ class AggregatorLogic:
             return float(np.mean(finite_data)) if finite_data else default
 
         summary = {
-            "avg_score_window": safe_mean("episode_scores"),
+            "avg_score_window": safe_mean("episode_scores"),  # Game outcome avg
             "avg_length_window": safe_mean("episode_lengths"),
-            "policy_loss": safe_mean("policy_losses"),  # Added policy loss
+            "policy_loss": safe_mean("policy_losses"),
             "value_loss": safe_mean("value_losses"),
-            # Removed entropy, avg_update_sps, avg_minibatch_sps
-            "avg_max_q_window": safe_mean("avg_max_qs"),
+            # "avg_max_q_window": safe_mean("avg_max_qs"), # Removed PPO/DQN specific
             "avg_game_score_window": safe_mean("game_scores"),
             "avg_triangles_cleared_window": safe_mean("episode_triangles_cleared"),
             "avg_lr_window": safe_mean("lr_values", default=self.storage.current_lr),
@@ -182,12 +224,11 @@ class AggregatorLogic:
             "avg_memory_window": safe_mean("memory_usage"),
             "avg_gpu_memory_window": safe_mean("gpu_memory_usage_percent"),
             "total_episodes": self.storage.total_episodes,
-            "beta": self.storage.current_beta,
+            # "beta": self.storage.current_beta, # Removed PER specific
             "buffer_size": self.storage.current_buffer_size,
-            # Removed SPS scalars
             "global_step": current_global_step,
             "current_lr": self.storage.current_lr,
-            "best_score": self.storage.best_score,
+            "best_score": self.storage.best_score,  # Best game outcome
             "previous_best_score": self.storage.previous_best_score,
             "best_score_step": self.storage.best_score_step,
             "best_game_score": self.storage.best_game_score,
@@ -208,5 +249,6 @@ class AggregatorLogic:
             "current_cpu_usage": self.storage.current_cpu_usage,
             "current_memory_usage": self.storage.current_memory_usage,
             "current_gpu_memory_usage_percent": self.storage.current_gpu_memory_usage_percent,
+            "best_game_state_data": self.storage.best_game_state_data,  # Include best state data
         }
         return summary

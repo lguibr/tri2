@@ -1,3 +1,4 @@
+# File: config/general.py
 import torch
 import os
 import time
@@ -67,5 +68,5 @@ def get_console_log_dir() -> str:
 
 def get_model_save_path() -> str:
     """Gets the base model save path for the current run (adapt name later)."""
-    # Rename from ppo_agent_state to something more generic like 'alphatri_nn.pth'
-    return os.path.join(get_run_checkpoint_dir(), "alphatri_nn.pth")
+    # Updated filename for AlphaZero NN
+    return os.path.join(get_run_checkpoint_dir(), "alphazero_nn.pth")

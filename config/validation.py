@@ -8,10 +8,10 @@ from .core import (
     TensorBoardConfig,
     VisConfig,
     TransformerConfig,
+    MCTSConfig,
 )
 from .general import (
     DEVICE,
-    # Removed TOTAL_TRAINING_STEPS
     get_run_id,
     get_run_log_dir,
     get_run_checkpoint_dir,
@@ -25,6 +25,7 @@ def print_config_info_and_validate():
     transformer_config_instance = TransformerConfig()
     vis_config_instance = VisConfig()
     train_config_instance = TrainConfig()
+    mcts_config_instance = MCTSConfig()
 
     run_id = get_run_id()
     run_log_dir = get_run_log_dir()
@@ -44,7 +45,7 @@ def print_config_info_and_validate():
         print(
             "*" * 70
             + f"\n*** Warning: LOAD CHECKPOINT specified: {train_config_instance.LOAD_CHECKPOINT_PATH} ***\n"
-            "*** CheckpointManager will attempt to load this path (e.g., NN weights). ***\n"
+            "*** CheckpointManager will attempt to load this path (NN weights, Optimizer, Stats). ***\n"
             + "*" * 70
         )
     else:
@@ -52,29 +53,16 @@ def print_config_info_and_validate():
             "--- No explicit checkpoint path. CheckpointManager will attempt auto-resume if applicable. ---"
         )
 
-    print("--- Training Algorithm: AlphaZero (MCTS + NN) ---")  # Updated description
+    print("--- Training Algorithm: AlphaZero (MCTS + NN) ---")
 
-    # Removed PPO specific prints
-
-    print(
-        f"--- Using RNN: {rnn_config_instance.USE_RNN}"
-        + (
-            f" (LSTM Hidden: {rnn_config_instance.LSTM_HIDDEN_SIZE}, Layers: {rnn_config_instance.LSTM_NUM_LAYERS})"
-            if rnn_config_instance.USE_RNN
-            else ""
+    if rnn_config_instance.USE_RNN:
+        print(
+            f"--- Warning: RNN configured ON ({rnn_config_instance.LSTM_HIDDEN_SIZE}, {rnn_config_instance.LSTM_NUM_LAYERS}) but not used by AlphaZeroNet ---"
         )
-        + " ---"
-    )
-    print(
-        f"--- Using Transformer: {transformer_config_instance.USE_TRANSFORMER}"
-        + (
-            f" (d_model={transformer_config_instance.TRANSFORMER_D_MODEL}, nhead={transformer_config_instance.TRANSFORMER_NHEAD}, layers={transformer_config_instance.TRANSFORMER_NUM_LAYERS})"
-            if transformer_config_instance.USE_TRANSFORMER
-            else ""
+    if transformer_config_instance.USE_TRANSFORMER:
+        print(
+            f"--- Warning: Transformer configured ON ({transformer_config_instance.TRANSFORMER_D_MODEL}, {transformer_config_instance.TRANSFORMER_NHEAD}, {transformer_config_instance.TRANSFORMER_NUM_LAYERS}) but not used by AlphaZeroNet ---"
         )
-        + " ---"
-    )
-    # Removed ObsNorm print
 
     print(
         f"Config: Env=(R={env_config_instance.ROWS}, C={env_config_instance.COLS}), "
@@ -87,24 +75,29 @@ def print_config_info_and_validate():
     shape_mlp_cfg_str = str(ModelConfig.Network.SHAPE_FEATURE_MLP_DIMS).replace(" ", "")
     print(
         f"Network Base: CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}"
-    )  # Adapted description
-
-    print(f"Training: NUM_ENVS={env_config_instance.NUM_ENVS}")  # Removed total steps
-    print(
-        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (episodes/updates)"  # Adapted freq description
     )
 
-    if env_config_instance.NUM_ENVS >= 1024:  # Keep warning, though NUM_ENVS is now 1
-        device_type = DEVICE.type if DEVICE else "UNKNOWN"
+    print(
+        f"MCTS: Sims={mcts_config_instance.NUM_SIMULATIONS}, "
+        f"PUCT_C={mcts_config_instance.PUCT_C:.2f}, "
+        f"Temp={mcts_config_instance.TEMPERATURE_INITIAL:.2f}->{mcts_config_instance.TEMPERATURE_FINAL:.2f}, "
+        f"Dirichlet(α={mcts_config_instance.DIRICHLET_ALPHA:.2f}, ε={mcts_config_instance.DIRICHLET_EPSILON:.2f})"
+    )
+
+    print(
+        f"Training: Batch={train_config_instance.BATCH_SIZE}, LR={train_config_instance.LEARNING_RATE:.1e}, "
+        f"WD={train_config_instance.WEIGHT_DECAY:.1e}, Buffer={train_config_instance.BUFFER_CAPACITY:,}, "
+        f"MinBuffer={train_config_instance.MIN_BUFFER_SIZE_TO_TRAIN:,}, Steps/Iter={train_config_instance.NUM_TRAINING_STEPS_PER_ITER}"
+    )
+    print(
+        f"Stats: AVG_WINDOWS={StatsConfig.STATS_AVG_WINDOW}, Console Log Freq={StatsConfig.CONSOLE_LOG_FREQ} (updates/episodes)"
+    )
+
+    if env_config_instance.NUM_ENVS > 1:
         print(
             "*" * 70
-            + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. Monitor system resources. ***"
-            + (
-                "\n*** Using MPS device. Performance varies. Force CPU via env var if needed. ***"
-                if device_type == "mps"
-                else ""
-            )
-            + "\n"
+            + f"\n*** Warning: NUM_ENVS={env_config_instance.NUM_ENVS}. AlphaZero self-play typically uses 1 env. ***\n"
+            "*** Ensure worker implementation handles this correctly if parallel generation is intended. ***\n"
             + "*" * 70
         )
     print(

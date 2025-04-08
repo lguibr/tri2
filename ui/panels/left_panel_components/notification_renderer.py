@@ -1,3 +1,4 @@
+# File: ui/panels/left_panel_components/notification_renderer.py
 import pygame
 import time
 from typing import Dict, Any, Tuple, Optional
@@ -147,16 +148,29 @@ class NotificationRenderer:
         stat_rects["Best Game Score Info"] = rect_game.clip(area_rect)
         y += line_height
 
-        rect_loss = self._render_line(
+        rect_v_loss = self._render_line(
             area_rect,
             y,
-            "Loss:",
-            stats_summary.get("best_loss", float("inf")),
-            stats_summary.get("previous_best_loss", float("inf")),
-            stats_summary.get("best_loss_step", 0),
+            "Value Loss:",
+            stats_summary.get("best_value_loss", float("inf")),
+            stats_summary.get("previous_best_value_loss", float("inf")),
+            stats_summary.get("best_value_loss_step", 0),
             "{:.4f}",
             current_step,
         )
-        stat_rects["Best Loss Info"] = rect_loss.clip(area_rect)
+        stat_rects["Best Value Loss Info"] = rect_v_loss.clip(area_rect)
+        y += line_height
+
+        rect_p_loss = self._render_line(
+            area_rect,
+            y,
+            "Policy Loss:",
+            stats_summary.get("best_policy_loss", float("inf")),
+            stats_summary.get("previous_best_policy_loss", float("inf")),
+            stats_summary.get("best_policy_loss_step", 0),
+            "{:.4f}",
+            current_step,
+        )
+        stat_rects["Best Policy Loss Info"] = rect_p_loss.clip(area_rect)
 
         return stat_rects

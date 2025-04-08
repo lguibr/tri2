@@ -20,17 +20,19 @@ class InfoTextRenderer:
 
     def _get_network_description(self) -> str:
         """Builds a description string based on network components."""
-        # Adapt based on AlphaZero NN architecture later
-        return "AlphaZero Neural Network"  # Placeholder
+        return "AlphaZero Neural Network"
 
     def _get_network_details(self) -> str:
         """Builds a detailed string of network configuration."""
-        # Adapt based on AlphaZero NN architecture later
         details = []
-        # Example: Add details about ResNet blocks, policy/value heads if known
-        # cnn_str = str(self.model_config_net.CONV_CHANNELS).replace(" ", "")
-        # details.append(f"CNN Base: {cnn_str}")
-        return "Details TBD"  # Placeholder
+        cnn_str = str(self.model_config_net.CONV_CHANNELS).replace(" ", "")
+        mlp_str = str(self.model_config_net.COMBINED_FC_DIMS).replace(" ", "")
+        shape_mlp_cfg_str = str(self.model_config_net.SHAPE_FEATURE_MLP_DIMS).replace(
+            " ", ""
+        )
+        details.append(f"CNN={cnn_str}, ShapeMLP={shape_mlp_cfg_str}, Fusion={mlp_str}")
+        # Add more details if needed, e.g., activation functions, batchnorm use
+        return ", ".join(details)
 
     def _get_live_resource_usage(self) -> Dict[str, str]:
         """Fetches live CPU, Memory, and GPU Memory usage from cached summary."""
@@ -60,8 +62,8 @@ class InfoTextRenderer:
         y_start: int,
         stats_summary: Dict[str, Any],
         panel_width: int,
-        agent_param_count: int,  # Keep for NN param count
-        worker_counts: Dict[str, int],  # Keep structure, but content will change
+        agent_param_count: int,
+        worker_counts: Dict[str, int],  # Keep for potential future worker info
     ) -> int:
         """Renders the info text block. Returns next_y."""
         from config.general import DEVICE
@@ -94,14 +96,14 @@ class InfoTextRenderer:
             if start_time_unix > 0
             else "N/A"
         )
-        # Removed worker_str and lr_str (can be added back if needed)
+        # Worker info placeholder (adapt later based on actual workers)
+        worker_str = "Self-Play: ?, Training: ?"  # Placeholder
 
         info_lines = [
             ("Device", device_type_str),
             ("Network", network_desc),
             ("Params", param_str),
-            # ("LR", lr_str), # Removed LR for now
-            # ("Workers", worker_str), # Removed Workers for now
+            # ("Workers", worker_str), # Can add back when workers are implemented
             ("Run Started", start_time_str),
         ]
         last_y, x_pos_key, x_pos_val_offset, current_y = y_start, 10, 5, y_start + 5

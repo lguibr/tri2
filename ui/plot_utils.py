@@ -26,12 +26,12 @@ try:
     plt.style.use("dark_background")
     plt.rcParams.update(
         {
-            "font.size": 9,  # Base font size slightly increased
-            "axes.labelsize": 9,  # Increased label size
-            "axes.titlesize": 11,  # Increased title size
-            "xtick.labelsize": 8,  # Increased tick label size
-            "ytick.labelsize": 8,  # Increased tick label size
-            "legend.fontsize": 8,  # Increased legend font size
+            "font.size": 9,
+            "axes.labelsize": 9,
+            "axes.titlesize": 11,
+            "xtick.labelsize": 8,
+            "ytick.labelsize": 8,
+            "legend.fontsize": 8,
             "figure.facecolor": "#262626",
             "axes.facecolor": "#303030",
             "axes.edgecolor": "#707070",
@@ -41,11 +41,11 @@ try:
             "grid.color": "#505050",
             "grid.linestyle": "--",
             "grid.alpha": 0.5,
-            "axes.titlepad": 6,  # Reduced title padding
-            "legend.frameon": True,  # Add frame to legend
-            "legend.framealpha": 0.85,  # Increased legend background alpha
-            "legend.facecolor": "#202020",  # Darker legend background
-            "legend.title_fontsize": 8,  # Increased legend title font size
+            "axes.titlepad": 6,
+            "legend.frameon": True,
+            "legend.framealpha": 0.85,
+            "legend.facecolor": "#202020",
+            "legend.title_fontsize": 8,
         }
     )
 except Exception as e:
@@ -56,8 +56,12 @@ TREND_SLOPE_TOLERANCE = 1e-5
 TREND_MIN_LINEWIDTH = 1
 TREND_MAX_LINEWIDTH = 2
 TREND_COLOR_STABLE = normalize_color_for_matplotlib(VisConfig.YELLOW)
-TREND_COLOR_INCREASING = normalize_color_for_matplotlib((0, 200, 0))
-TREND_COLOR_DECREASING = normalize_color_for_matplotlib((200, 0, 0))
+TREND_COLOR_INCREASING = normalize_color_for_matplotlib(
+    (0, 200, 0)
+)  # Green for increasing (good)
+TREND_COLOR_DECREASING = normalize_color_for_matplotlib(
+    (200, 0, 0)
+)  # Red for decreasing (bad)
 TREND_SLOPE_SCALE_FACTOR = 5.0
 TREND_BACKGROUND_ALPHA = 0.15
 
@@ -71,8 +75,6 @@ MIN_ALPHA = 0.4
 MAX_ALPHA = 1.0
 MIN_DATA_AVG_LINEWIDTH = 1
 MAX_DATA_AVG_LINEWIDTH = 2
-
-# Y_PADDING_FACTOR = 0.20 # Removed vertical padding factor
 
 
 def calculate_trend_line(data: np.ndarray) -> Optional[Tuple[float, float]]:
@@ -98,23 +100,27 @@ def calculate_trend_line(data: np.ndarray) -> Optional[Tuple[float, float]]:
         return None
 
 
-def get_trend_color(slope: float) -> Tuple[float, float, float]:
+def get_trend_color(slope: float, lower_is_better: bool) -> Tuple[float, float, float]:
     """
     Maps a slope to a color (Red -> Yellow(Stable) -> Green).
-    Assumes positive slope is "good" and negative is "bad".
-    The caller should adjust the slope sign based on metric goal.
+    Adjusts based on whether lower values are better (e.g., for loss).
     """
     if abs(slope) < TREND_SLOPE_TOLERANCE:
         return TREND_COLOR_STABLE
-    norm_slope = math.atan(slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0)
+
+    # If lower is better, decreasing slope is good (green), increasing is bad (red)
+    effective_slope = -slope if lower_is_better else slope
+
+    norm_slope = math.atan(effective_slope * TREND_SLOPE_SCALE_FACTOR) / (math.pi / 2.0)
     norm_slope = np.clip(norm_slope, -1.0, 1.0)
-    if norm_slope > 0:
+
+    if norm_slope > 0:  # Good trend (increasing score or decreasing loss)
         t = norm_slope
         color = tuple(
             TREND_COLOR_STABLE[i] * (1 - t) + TREND_COLOR_INCREASING[i] * t
             for i in range(3)
         )
-    else:
+    else:  # Bad trend (decreasing score or increasing loss)
         t = abs(norm_slope)
         color = tuple(
             TREND_COLOR_STABLE[i] * (1 - t) + TREND_COLOR_DECREASING[i] * t
@@ -144,15 +150,12 @@ def _interpolate_visual_property(
     Rank (total_ranks - 1) corresponds to min_val (least prominent).
     """
     if total_ranks <= 1:
-        return float(max_val)  # Ensure float
+        return float(max_val)
     inverted_rank = (total_ranks - 1) - rank
     fraction = inverted_rank / max(1, total_ranks - 1)
-    # --- Explicitly cast to float before subtraction/addition ---
     f_min_val = float(min_val)
     f_max_val = float(max_val)
     value = f_min_val + (f_max_val - f_min_val) * fraction
-    # --- End explicit cast ---
-    # Clip using original min/max in case casting caused issues, ensure float return
     return float(np.clip(value, min_val, max_val))
 
 
@@ -200,8 +203,6 @@ def render_single_plot(
     Applies a background tint and border to the entire subplot based on trend desirability.
     Legend now includes current values and trend slope, placed at center-left.
     Handles empty data explicitly to show placeholder.
-    Removed vertical padding, removed horizontal padding and xlabel.
-    Increased title and legend font sizes, increased legend background alpha.
     """
     try:
         data_np = np.array(data, dtype=float)
@@ -213,7 +214,8 @@ def render_single_plot(
     n_points = len(valid_data)
     placeholder_text_color = normalize_color_for_matplotlib(VisConfig.GRAY)
 
-    # --- Explicitly handle n_points == 0 case ---
+    is_lower_better = "loss" in label.lower()
+
     if n_points == 0:
         if show_placeholder:
             p_text = placeholder_text if placeholder_text else f"{label}\n(No data)"
@@ -234,17 +236,12 @@ def render_single_plot(
         ax.patch.set_facecolor(plt.rcParams["axes.facecolor"])
         ax.patch.set_edgecolor(plt.rcParams["axes.edgecolor"])
         ax.patch.set_linewidth(0.5)
-        return  # Exit early if no data
-    # --- End n_points == 0 handling ---
+        return
 
-    # --- Continue with plotting if n_points > 0 ---
     trend_params = calculate_trend_line(valid_data)
     trend_slope = trend_params[0] if trend_params is not None else 0.0
 
-    is_lower_better = "loss" in label.lower() or "entropy" in label.lower()
-
-    effective_slope_for_color = -trend_slope if is_lower_better else trend_slope
-    trend_indicator_color = get_trend_color(effective_slope_for_color)
+    trend_indicator_color = get_trend_color(trend_slope, is_lower_better)
     trend_indicator_lw = get_trend_linewidth(trend_slope)
 
     plotted_windows = sorted([w for w in rolling_window_sizes if n_points >= w])
@@ -254,7 +251,6 @@ def render_single_plot(
     best_val = np.min(valid_data) if is_lower_better else np.max(valid_data)
     best_val_str = f"Best: {_format_value(best_val, is_lower_better)}"
 
-    # Set only the main title
     ax.set_title(
         label,
         loc="left",
@@ -343,7 +339,6 @@ def render_single_plot(
                 label=trend_label,
                 zorder=TREND_LINE_ZORDER,
             )
-            # Don't include trend line in min/max calculation for ylim
             plotted_legend_items = True
 
         ax.tick_params(axis="both", which="major")
@@ -353,34 +348,28 @@ def render_single_plot(
             alpha=plt.rcParams["grid.alpha"],
         )
 
-        # --- Adjust Y-axis limits WITHOUT padding ---
         if np.isfinite(min_y_overall) and np.isfinite(max_y_overall):
-            if abs(max_y_overall - min_y_overall) < 1e-6:  # Handle constant data
-                # Add a tiny epsilon to avoid zero range
+            if abs(max_y_overall - min_y_overall) < 1e-6:
                 epsilon = max(abs(min_y_overall * 0.01), 1e-6)
                 ax.set_ylim(min_y_overall - epsilon, max_y_overall + epsilon)
             else:
                 ax.set_ylim(min_y_overall, max_y_overall)
-        # else: Keep default limits if min/max calculation failed
 
         if y_log_scale and min_y_overall > 1e-9:
             ax.set_yscale("log")
-            # Adjust log scale limits if needed, ensuring bottom is positive
             current_bottom, current_top = ax.get_ylim()
-            new_bottom = max(current_bottom, 1e-9)  # Ensure bottom is positive
-            if new_bottom >= current_top:  # Prevent invalid limits
+            new_bottom = max(current_bottom, 1e-9)
+            if new_bottom >= current_top:
                 new_bottom = current_top / 10
             ax.set_ylim(bottom=new_bottom, top=current_top)
         else:
             ax.set_yscale("linear")
 
-        # --- Adjust X-axis limits (remove padding) ---
         if n_points > 1:
-            ax.set_xlim(0, n_points - 1)  # Set limits tightly
+            ax.set_xlim(0, n_points - 1)
         elif n_points == 1:
-            ax.set_xlim(-0.5, 0.5)  # Keep slight padding for single point
+            ax.set_xlim(-0.5, 0.5)
 
-        # --- X-axis Ticks Formatting ---
         if n_points > 1000:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=4))
 
@@ -396,7 +385,6 @@ def render_single_plot(
         elif n_points > 10:
             ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True, nbins=5))
 
-        # --- Legend ---
         if plotted_legend_items:
             ax.legend(
                 loc="center left",
@@ -423,7 +411,6 @@ def render_single_plot(
         ax.set_xticks([])
         ax.grid(False)
 
-    # Apply background tint and border based on trend
     bg_color_with_alpha = (*trend_indicator_color, TREND_BACKGROUND_ALPHA)
     ax.patch.set_facecolor(bg_color_with_alpha)
     ax.patch.set_edgecolor(trend_indicator_color)

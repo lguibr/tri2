@@ -3,7 +3,7 @@ import time
 import numpy as np
 from typing import List, Optional, Tuple, Dict
 
-from config import EnvConfig, VisConfig  # Removed RewardConfig, PPOConfig
+from config import EnvConfig, VisConfig
 from .grid import Grid
 from .shape import Shape
 from .game_logic import GameLogic
@@ -23,22 +23,17 @@ class GameState:
 
     def __init__(self):
         self.env_config = EnvConfig()
-        # Removed self.rewards = RewardConfig()
-        # Removed self.ppo_config = PPOConfig()
         self.vis_config = VisConfig()
 
         self.grid = Grid(self.env_config)
         self.shapes: List[Optional[Shape]] = []
-        # Removed self.score (RL score)
-        self.game_score: int = 0  # Keep game score for tracking performance
+        self.game_score: int = 0
         self.triangles_cleared_this_episode: int = 0
         self.pieces_placed_this_episode: int = 0
 
         # Timers
         self.blink_time: float = 0.0
-        self._last_timer_update_time: float = (
-            time.monotonic()
-        )  # Use monotonic clock for intervals
+        self._last_timer_update_time: float = time.monotonic()
         self.freeze_time: float = 0.0
         self.line_clear_flash_time: float = 0.0
         self.line_clear_highlight_time: float = 0.0
@@ -48,7 +43,6 @@ class GameState:
 
         self.game_over: bool = False
         self._last_action_valid: bool = True
-        # Removed self._last_potential
 
         # Demo state
         self.demo_selected_shape_idx: int = 0
@@ -66,7 +60,6 @@ class GameState:
         """Resets the game to its initial state."""
         self.grid = Grid(self.env_config)
         self.shapes = [Shape() for _ in range(self.env_config.NUM_SHAPE_SLOTS)]
-        # Removed self.score reset
         self.game_score = 0
         self.triangles_cleared_this_episode = 0
         self.pieces_placed_this_episode = 0
@@ -81,24 +74,20 @@ class GameState:
 
         self.game_over = False
         self._last_action_valid = True
-        self._last_timer_update_time = time.monotonic()  # Reset timer time
+        self._last_timer_update_time = time.monotonic()
 
         self.demo_selected_shape_idx = 0
         self.demo_dragged_shape_idx = None
         self.demo_snapped_position = None
-
-        # Removed self._last_potential reset
 
         return self.get_state()
 
     def step(self, action_index: int) -> Tuple[Optional[StateType], bool]:
         """
         Performs one game step based on the action index.
-        Timer updates are handled within GameLogic.step().
         Returns (None, is_game_over). State should be fetched via get_state().
         """
         _, done = self.logic.step(action_index)
-        # Return None for state, caller should call get_state() if needed
         return None, done
 
     def get_state(self) -> StateType:
@@ -107,8 +96,6 @@ class GameState:
 
     def valid_actions(self) -> List[int]:
         """Returns a list of valid action indices for the current state."""
-        # Removed is_frozen check here. Logic.step handles frozen state.
-        # The caller (e.g., MCTS) should check is_frozen separately if needed.
         return self.logic.valid_actions()
 
     def decode_action(self, action_index: int) -> Tuple[int, int, int]:
@@ -119,7 +106,6 @@ class GameState:
         return self.game_over
 
     def is_frozen(self) -> bool:
-        # Check freeze_time before allowing actions or progression
         is_currently_frozen = self.freeze_time > 0
         return is_currently_frozen
 
@@ -141,13 +127,24 @@ class GameState:
     def get_shapes(self) -> List[Optional[Shape]]:
         return self.shapes
 
+    def get_outcome(self) -> float:
+        """
+        Determines the outcome of the game from the perspective of the player.
+        Returns +1 for win, -1 for loss, 0 for draw/ongoing/undetermined.
+        Placeholder: Returns 0 for now, as win/loss condition isn't defined.
+        """
+        if self.is_over():
+            # TODO: Implement actual win/loss condition based on game rules or score
+            # Example: return 1.0 if self.game_score > threshold else -1.0
+            return 0.0  # Placeholder: Game over but outcome is neutral
+        else:
+            return 0.0  # Game is ongoing
+
     def _update_timers(self):
         """Updates timers for visual effects based on elapsed time."""
-        now = time.monotonic()  # Use monotonic clock
+        now = time.monotonic()
         delta_time = now - self._last_timer_update_time
         self._last_timer_update_time = now
-
-        # Ensure delta_time is non-negative
         delta_time = max(0.0, delta_time)
 
         self.freeze_time = max(0, self.freeze_time - delta_time)
@@ -158,10 +155,8 @@ class GameState:
         )
         self.game_over_flash_time = max(0, self.game_over_flash_time - delta_time)
 
-        # Clear highlight coords only when highlight time runs out
         if self.line_clear_highlight_time <= 0 and self.cleared_triangles_coords:
             self.cleared_triangles_coords = []
-        # Clear line clear info only when flash time runs out
         if self.line_clear_flash_time <= 0 and self.last_line_clear_info is not None:
             self.last_line_clear_info = None
 
@@ -176,7 +171,6 @@ class GameState:
         self.demo_logic.update_snapped_position(grid_pos)
 
     def place_dragged_shape(self) -> bool:
-        # Update timers before placing shape in demo mode as well
         self._update_timers()
         return self.demo_logic.place_dragged_shape()
 
@@ -186,6 +180,5 @@ class GameState:
         return self.demo_logic.get_dragged_shape_info()
 
     def toggle_triangle_debug(self, row: int, col: int):
-        # Update timers before toggling in debug mode
         self._update_timers()
         self.demo_logic.toggle_triangle_debug(row, col)

@@ -46,11 +46,11 @@ class UIRenderer:
     def render_all(
         self,
         app_state: str,
-        is_process_running: bool,  # Keep for potential MCTS/NN status display
+        is_process_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
-        envs: List[GameState],  # Keep for visualization
-        num_envs: int,  # Keep for visualization layout
+        envs: List[GameState],
+        num_envs: int,
         env_config: EnvConfig,
         cleanup_confirmation_active: bool,
         cleanup_message: str,
@@ -58,11 +58,10 @@ class UIRenderer:
         tensorboard_log_dir: Optional[str],
         plot_data: Dict[str, Deque],
         demo_env: Optional[GameState] = None,
-        update_progress_details: Dict[str, Any] = {},  # Keep for potential NN progress
-        agent_param_count: int = 0,  # Keep for NN param count
-        worker_counts: Dict[
-            str, int
-        ] = {},  # Keep structure for potential future workers
+        update_progress_details: Dict[str, Any] = {},
+        agent_param_count: int = 0,
+        worker_counts: Dict[str, int] = {},
+        best_game_state_data: Optional[Dict[str, Any]] = None,  # Added best state data
     ):
         """Renders UI based on the application state."""
         try:
@@ -74,7 +73,7 @@ class UIRenderer:
 
             if current_app_state == AppState.MAIN_MENU:
                 self._render_main_menu(
-                    is_process_running=is_process_running,  # Pass to left panel
+                    is_process_running=is_process_running,
                     status=status,
                     stats_summary=stats_summary,
                     envs=envs,
@@ -84,10 +83,11 @@ class UIRenderer:
                     last_cleanup_message_time=last_cleanup_message_time,
                     tensorboard_log_dir=tensorboard_log_dir,
                     plot_data=plot_data,
-                    update_progress_details=update_progress_details,  # Pass to left panel
+                    update_progress_details=update_progress_details,
                     app_state=app_state,
                     agent_param_count=agent_param_count,
-                    worker_counts=worker_counts,  # Pass to left panel
+                    worker_counts=worker_counts,
+                    best_game_state_data=best_game_state_data,  # Pass best state data
                 )
             elif current_app_state == AppState.PLAYING:
                 if demo_env:
@@ -140,6 +140,7 @@ class UIRenderer:
         app_state: str,
         agent_param_count: int,
         worker_counts: Dict[str, int],
+        best_game_state_data: Optional[Dict[str, Any]],  # Added best state data
     ):
         """Renders the main dashboard view."""
         self.screen.fill(VisConfig.BLACK)
@@ -157,24 +158,25 @@ class UIRenderer:
 
         self.left_panel.render(
             panel_width=lp_width,
-            is_process_running=is_process_running,  # Pass for potential future use
+            is_process_running=is_process_running,
             status=status,
             stats_summary=stats_summary,
             tensorboard_log_dir=tensorboard_log_dir,
             plot_data=plot_data,
             app_state=app_state,
-            update_progress_details=update_progress_details,  # Pass for potential NN progress
+            update_progress_details=update_progress_details,
             agent_param_count=agent_param_count,
-            worker_counts=worker_counts,  # Pass for potential future use
+            worker_counts=worker_counts,
         )
-        # Render game area only if width is sufficient
         if ga_width > 0:
             self.game_area.render(
-                envs=envs,  # Pass envs for visualization
-                num_envs=num_envs,  # Pass num_envs for layout
+                envs=envs,  # Pass empty list when running
+                num_envs=num_envs,
                 env_config=env_config,
                 panel_width=ga_width,
                 panel_x_offset=lp_width,
+                is_running=is_process_running,
+                best_game_state_data=best_game_state_data,  # Pass best state data
             )
 
     def _render_initializing_screen(self, status_message: str = "Initializing..."):

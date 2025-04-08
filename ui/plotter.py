@@ -1,3 +1,4 @@
+# File: ui/plotter.py
 import pygame
 from typing import Dict, Optional, Deque
 from collections import deque
@@ -30,15 +31,9 @@ class Plotter:
         self.colors = {
             "rl_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[0]),
             "game_score": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[1]),
-            "policy_loss": normalize_color_for_matplotlib(
-                VisConfig.GOOGLE_COLORS[3]
-            ),  # Keep for NN policy loss
-            "value_loss": normalize_color_for_matplotlib(
-                VisConfig.BLUE
-            ),  # Keep for NN value loss
-            # Removed entropy
+            "policy_loss": normalize_color_for_matplotlib(VisConfig.RED),
+            "value_loss": normalize_color_for_matplotlib(VisConfig.BLUE),
             "len": normalize_color_for_matplotlib(VisConfig.BLUE),
-            # Removed minibatch_sps
             "tris_cleared": normalize_color_for_matplotlib(VisConfig.YELLOW),
             "lr": normalize_color_for_matplotlib(VisConfig.GOOGLE_COLORS[2]),
             "cpu": normalize_color_for_matplotlib((255, 165, 0)),
@@ -54,21 +49,20 @@ class Plotter:
         if target_width <= 10 or target_height <= 10 or not plot_data:
             return None
 
-        # Updated data keys
+        # Ensure keys match AggregatorStorage deque names
         data_keys = [
             "game_scores",
             "episode_triangles_cleared",
-            "episode_scores",  # Keep RL score? Or remove? Keep for now.
+            "episode_scores",  # RL Score (optional)
             "episode_lengths",
-            "policy_losses",  # Added NN policy loss
-            "value_losses",  # Kept NN value loss
-            "lr_values",  # Keep LR for NN
+            "policy_losses",
+            "value_losses",
+            "lr_values",
             "cpu_usage",
             "memory_usage",
             "gpu_memory_usage_percent",
-            # Add placeholders for other potential plots
-            "placeholder1",
-            "placeholder2",
+            "buffer_sizes",  # Added buffer size plot
+            "placeholder2",  # Keep one placeholder
         ]
         data_lists = {key: list(plot_data.get(key, deque())) for key in data_keys}
 
@@ -84,7 +78,6 @@ class Plotter:
                 fig_width_in = max(1, target_width / dpi)
                 fig_height_in = max(1, target_height / dpi)
 
-                # Keep 4x3 layout for now, fill unused plots with placeholders
                 fig, axes = plt.subplots(
                     4, 3, figsize=(fig_width_in, fig_height_in), dpi=dpi, sharex=False
                 )
@@ -141,7 +134,7 @@ class Plotter:
                     self.rolling_window_sizes,
                     placeholder_text="Policy Loss",
                     y_log_scale=True,
-                )  # NN Policy Loss (Log Scale)
+                )
                 render_single_plot(
                     axes_flat[5],
                     data_lists["value_losses"],
@@ -150,7 +143,7 @@ class Plotter:
                     self.rolling_window_sizes,
                     placeholder_text="Value Loss",
                     y_log_scale=True,
-                )  # NN Value Loss (Log Scale)
+                )
 
                 # Row 3: Resource Usage & LR
                 render_single_plot(
@@ -178,36 +171,35 @@ class Plotter:
                     placeholder_text="GPU Mem %",
                 )
 
-                # Row 4: LR & Placeholders
+                # Row 4: LR, Buffer Size & Placeholder
                 render_single_plot(
                     axes_flat[9],
                     data_lists["lr_values"],
                     "Learning Rate",
                     self.colors["lr"],
-                    [],  # No rolling avg for LR
+                    [],
                     placeholder_text="Learning Rate",
                     y_log_scale=True,
                 )
                 render_single_plot(
                     axes_flat[10],
-                    data_lists["placeholder1"],
-                    "Future Plot 1",
+                    data_lists["buffer_sizes"],
+                    "Buffer Size",
                     self.colors["placeholder"],
                     [],
-                    placeholder_text="Future Plot 1",
-                )
+                    placeholder_text="Buffer Size",
+                )  # Added Buffer Size plot
                 render_single_plot(
                     axes_flat[11],
                     data_lists["placeholder2"],
-                    "Future Plot 2",
+                    "Future Plot",
                     self.colors["placeholder"],
                     [],
-                    placeholder_text="Future Plot 2",
+                    placeholder_text="Future Plot",
                 )
 
-                # Remove x-axis labels/ticks for inner plots
                 for i, ax in enumerate(axes_flat):
-                    if i < 9:  # Adjust based on layout (4x3 -> 9 inner plots)
+                    if i < 9:
                         ax.set_xticklabels([])
                         ax.set_xlabel("")
                     ax.tick_params(axis="x", rotation=0)

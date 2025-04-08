@@ -1,13 +1,24 @@
 # File: stats/aggregator.py
+# File: stats/aggregator.py
 import time
 from collections import deque
-from typing import Deque, Dict, Any, Optional, List
+from typing import (
+    Deque,
+    Dict,
+    Any,
+    Optional,
+    List,
+    TYPE_CHECKING,
+)  # Added TYPE_CHECKING
 import numpy as np
 import threading
 
 from config import StatsConfig
 from .aggregator_storage import AggregatorStorage
 from .aggregator_logic import AggregatorLogic
+
+if TYPE_CHECKING:
+    from environment.game_state import GameState  # Import for type hinting
 
 
 class StatsAggregator:
@@ -45,14 +56,16 @@ class StatsAggregator:
 
     def record_episode(
         self,
-        episode_score: float,  # This might be repurposed or removed for AlphaZero
+        episode_score: float,
         episode_length: int,
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
+        game_state_for_best: Optional["GameState"] = None,  # Added optional GameState
     ) -> Dict[str, Any]:
         with self._lock:
+            # Use the passed global_step or the current stored one
             current_step = (
                 global_step
                 if global_step is not None
@@ -65,13 +78,26 @@ class StatsAggregator:
                 current_step,
                 game_score,
                 triangles_cleared,
+                game_state_for_best,  # Pass GameState to logic
             )
             return update_info
 
     def record_step(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
         """Records step data, now likely related to NN training steps."""
         with self._lock:
-            update_info = self.logic.update_step_stats(step_data)
+            # Ensure global_step is updated within the storage based on step_data
+            g_step = step_data.get("global_step")
+            if g_step is not None and g_step > self.storage.current_global_step:
+                self.storage.current_global_step = g_step
+            elif g_step is None:
+                # If no global step provided, maybe increment internally?
+                # Or rely on the caller (TrainingWorker) to always provide it.
+                # For now, use the stored value if not provided.
+                g_step = self.storage.current_global_step
+
+            update_info = self.logic.update_step_stats(
+                step_data, g_step
+            )  # Pass g_step to logic
             return update_info
 
     def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
@@ -109,10 +135,15 @@ class StatsAggregator:
             print(
                 f"  -> Loaded start_time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.storage.start_time))}"
             )
-            # Target step is now loaded within storage.load_state_dict
             print(
                 f"  -> Loaded training_target_step: {self.storage.training_target_step}"
             )
             print(
                 f"  -> Loaded current_global_step: {self.storage.current_global_step}"
             )
+            if self.storage.best_game_state_data:
+                print(
+                    f"  -> Loaded best_game_state_data (Score: {self.storage.best_game_state_data.get('score', 'N/A')})"
+                )
+            else:
+                print("  -> No best_game_state_data found in loaded state.")

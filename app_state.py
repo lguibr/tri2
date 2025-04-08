@@ -7,7 +7,8 @@ class AppState(Enum):
     MAIN_MENU = "MainMenu"
     PLAYING = "Playing"  # Demo Mode
     DEBUG = "Debug"
-    CLEANUP_CONFIRM = "Confirm Cleanup"  # Not used directly, handled by flag
-    CLEANING = "Cleaning"  # Intermediate state during cleanup
+    MCTS_VISUALIZE = "MCTS Visualize"  # New state for MCTS view
+    CLEANUP_CONFIRM = "Confirm Cleanup"
+    CLEANING = "Cleaning"
     ERROR = "Error"
-    UNKNOWN = "Unknown"  # Fallback
+    UNKNOWN = "Unknown"

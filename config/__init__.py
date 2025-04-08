@@ -1,3 +1,4 @@
+# File: config/__init__.py
 # config/__init__.py
 # This file marks the 'config' directory as a Python package.
 
@@ -5,23 +6,20 @@
 from .core import (
     VisConfig,
     EnvConfig,
-    # Removed RewardConfig
-    # Removed PPOConfig
     RNNConfig,
     TrainConfig,
     ModelConfig,
     StatsConfig,
     TensorBoardConfig,
     DemoConfig,
-    # Removed ObsNormConfig
     TransformerConfig,
+    MCTSConfig,
 )
 
 # Import general configuration settings and functions
 from .general import (
     DEVICE,
     RANDOM_SEED,
-    # Removed TOTAL_TRAINING_STEPS
     BASE_CHECKPOINT_DIR,
     BASE_LOG_DIR,
     set_device,
@@ -45,14 +43,35 @@ from .constants import (
     BLACK,
     LIGHTG,
     GRAY,
+    DARK_GRAY,
     RED,
     DARK_RED,
     BLUE,
     YELLOW,
+    GREEN,
+    DARK_GREEN,  # Added DARK_GREEN import
+    ORANGE,
+    PURPLE,
+    CYAN,
     GOOGLE_COLORS,
     LINE_CLEAR_FLASH_COLOR,
     LINE_CLEAR_HIGHLIGHT_COLOR,
     GAME_OVER_FLASH_COLOR,
+    # MCTS Colors (also available directly)
+    MCTS_NODE_WIN_COLOR,
+    MCTS_NODE_LOSS_COLOR,
+    MCTS_NODE_NEUTRAL_COLOR,
+    MCTS_NODE_BORDER_COLOR,
+    MCTS_NODE_SELECTED_BORDER_COLOR,
+    MCTS_EDGE_COLOR,
+    MCTS_EDGE_HIGHLIGHT_COLOR,
+    MCTS_INFO_TEXT_COLOR,
+    MCTS_NODE_TEXT_COLOR,
+    MCTS_NODE_PRIOR_COLOR,
+    MCTS_NODE_SCORE_COLOR,
+    MCTS_MINI_GRID_BG_COLOR,
+    MCTS_MINI_GRID_LINE_COLOR,
+    MCTS_MINI_GRID_OCCUPIED_COLOR,
 )
 
 
@@ -61,20 +80,17 @@ __all__ = [
     # Core Configs
     "VisConfig",
     "EnvConfig",
-    # Removed RewardConfig
-    # Removed PPOConfig
     "RNNConfig",
     "TrainConfig",
     "ModelConfig",
     "StatsConfig",
     "TensorBoardConfig",
     "DemoConfig",
-    # Removed ObsNormConfig
     "TransformerConfig",
+    "MCTSConfig",
     # General Configs
     "DEVICE",
     "RANDOM_SEED",
-    # Removed TOTAL_TRAINING_STEPS
     "BASE_CHECKPOINT_DIR",
     "BASE_LOG_DIR",
     "set_device",
@@ -92,12 +108,33 @@ __all__ = [
     "BLACK",
     "LIGHTG",
     "GRAY",
+    "DARK_GRAY",
     "RED",
     "DARK_RED",
     "BLUE",
     "YELLOW",
+    "GREEN",
+    "DARK_GREEN",  # Added DARK_GREEN export
+    "ORANGE",
+    "PURPLE",
+    "CYAN",
     "GOOGLE_COLORS",
     "LINE_CLEAR_FLASH_COLOR",
     "LINE_CLEAR_HIGHLIGHT_COLOR",
     "GAME_OVER_FLASH_COLOR",
+    # MCTS Colors
+    "MCTS_NODE_WIN_COLOR",
+    "MCTS_NODE_LOSS_COLOR",
+    "MCTS_NODE_NEUTRAL_COLOR",
+    "MCTS_NODE_BORDER_COLOR",
+    "MCTS_NODE_SELECTED_BORDER_COLOR",
+    "MCTS_EDGE_COLOR",
+    "MCTS_EDGE_HIGHLIGHT_COLOR",
+    "MCTS_INFO_TEXT_COLOR",
+    "MCTS_NODE_TEXT_COLOR",
+    "MCTS_NODE_PRIOR_COLOR",
+    "MCTS_NODE_SCORE_COLOR",
+    "MCTS_MINI_GRID_BG_COLOR",
+    "MCTS_MINI_GRID_LINE_COLOR",
+    "MCTS_MINI_GRID_OCCUPIED_COLOR",
 ]
