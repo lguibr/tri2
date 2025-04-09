@@ -6,3 +6,4 @@ cloudpickle
 matplotlib
 psutil
 numba>=0.55.0
+ray[default]>=2.0.0 # Added Ray

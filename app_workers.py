@@ -4,289 +4,320 @@ import queue
 import time
 from typing import TYPE_CHECKING, Optional, List, Dict, Tuple, Any
 import logging
+import multiprocessing as mp
+import ray
+import asyncio
+import torch
 
+# Import Ray actor classes
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
-from environment.game_state import GameState
 
+# Import Actor Handles for type hinting
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    LogicAppState = Any
+    SelfPlayWorkerHandle = ray.actor.ActorHandle
+    TrainingWorkerHandle = ray.actor.ActorHandle
+    AgentPredictorHandle = ray.actor.ActorHandle
+    StatsAggregatorHandle = ray.actor.ActorHandle
+    from ray.util.queue import Queue as RayQueue
 
 logger = logging.getLogger(__name__)
 
 
 class AppWorkerManager:
-    """Manages the creation, starting, and stopping of worker threads."""
+    """Manages the creation, starting, and stopping of Ray worker actors."""
 
-    def __init__(self, app: "MainApp"):
+    DEFAULT_KILL_TIMEOUT = 5.0
+
+    def __init__(self, app: "LogicAppState"):
         self.app = app
-        self.self_play_worker_threads: List[SelfPlayWorker] = (
-            []
-        )  # Holds running thread objects
-        self.training_worker_thread: Optional[TrainingWorker] = (
-            None  # Holds running thread object
+        self.self_play_worker_actors: List["SelfPlayWorkerHandle"] = []
+        self.training_worker_actor: Optional["TrainingWorkerHandle"] = None
+        self.agent_predictor_actor: Optional["AgentPredictorHandle"] = None
+        self._workers_running = False
+        logger.info("[AppWorkerManager] Initialized for Ray Actors.")
+
+    def initialize_actors(self):
+        """Initializes Ray worker actors (SelfPlay, Training). Does NOT start their loops."""
+        logger.info("[AppWorkerManager] Initializing worker actors...")
+        if not self.app.agent_predictor:
+            logger.error(
+                "[AppWorkerManager] ERROR: AgentPredictor actor not initialized in AppInitializer."
+            )
+            self.app.set_state(self.app.app_state.ERROR)
+            self.app.set_status("Worker Init Failed: Missing AgentPredictor")
+            return
+        if not self.app.stats_aggregator:
+            logger.error(
+                "[AppWorkerManager] ERROR: StatsAggregator actor handle not initialized in AppInitializer."
+            )
+            self.app.set_state(self.app.app_state.ERROR)
+            self.app.set_status("Worker Init Failed: Missing StatsAggregator")
+            return
+
+        self.agent_predictor_actor = self.app.agent_predictor
+
+        self._init_self_play_actors()
+        self._init_training_actor()
+
+        num_sp = len(self.self_play_worker_actors)
+        num_tr = 1 if self.training_worker_actor else 0
+        logger.info(
+            f"Worker actors initialized ({num_sp} Self-Play, {num_tr} Training)."
         )
-        print("[AppWorkerManager] Initialized.")
+
+    def _init_self_play_actors(self):
+        """Creates SelfPlayWorker Ray actors."""
+        self.self_play_worker_actors = []
+        num_sp_workers = self.app.train_config_instance.NUM_SELF_PLAY_WORKERS
+        logger.info(f"Initializing {num_sp_workers} SelfPlayWorker actor(s)...")
+        for i in range(num_sp_workers):
+            try:
+                actor = SelfPlayWorker.remote(
+                    worker_id=i,
+                    agent_predictor=self.agent_predictor_actor,
+                    mcts_config=self.app.mcts_config,
+                    env_config=self.app.env_config,
+                    experience_queue=self.app.experience_queue,
+                    stats_aggregator=self.app.stats_aggregator,
+                    max_game_steps=None,
+                )
+                self.self_play_worker_actors.append(actor)
+                logger.info(f"  SelfPlayWorker-{i} actor created.")
+            except Exception as e:
+                logger.error(
+                    f"  ERROR creating SelfPlayWorker-{i} actor: {e}", exc_info=True
+                )
+
+    def _init_training_actor(self):
+        """Creates the TrainingWorker Ray actor."""
+        logger.info("Initializing TrainingWorker actor...")
+        if not self.app.optimizer or not self.app.train_config_instance:
+            logger.error(
+                "[AppWorkerManager] ERROR: Optimizer or TrainConfig missing for TrainingWorker init."
+            )
+            return
+
+        optimizer_cls = type(self.app.optimizer)
+        optimizer_kwargs = self.app.optimizer.defaults
+
+        scheduler_cls = type(self.app.scheduler) if self.app.scheduler else None
+        scheduler_kwargs = {}
+        if self.app.scheduler and hasattr(self.app.scheduler, "state_dict"):
+            sd = self.app.scheduler.state_dict()
+            if isinstance(
+                self.app.scheduler, torch.optim.lr_scheduler.CosineAnnealingLR
+            ):
+                scheduler_kwargs = {
+                    "T_max": sd.get("T_max", 1000),
+                    "eta_min": sd.get("eta_min", 0),
+                }
+            else:
+                logger.warning(
+                    f"Cannot automatically determine kwargs for scheduler type {scheduler_cls}. Scheduler might not be correctly re-initialized in actor."
+                )
+                scheduler_cls = None
+
+        try:
+            actor = TrainingWorker.remote(
+                agent_predictor=self.agent_predictor_actor,
+                optimizer_cls=optimizer_cls,
+                optimizer_kwargs=optimizer_kwargs,
+                scheduler_cls=scheduler_cls,
+                scheduler_kwargs=scheduler_kwargs,
+                experience_queue=self.app.experience_queue,
+                stats_aggregator=self.app.stats_aggregator,
+                train_config=self.app.train_config_instance,
+            )
+            self.training_worker_actor = actor
+            logger.info("  TrainingWorker actor created.")
+        except Exception as e:
+            logger.error(f"  ERROR creating TrainingWorker actor: {e}", exc_info=True)
 
     def get_active_worker_counts(self) -> Dict[str, int]:
-        """Returns the count of currently active workers by type."""
-        # Count based on living threads stored in this manager
-        sp_count = sum(1 for w in self.self_play_worker_threads if w and w.is_alive())
-        tr_count = 1 if self.is_training_running() else 0
+        """Returns the count of initialized worker actors."""
+        sp_count = len(self.self_play_worker_actors)
+        tr_count = 1 if self.training_worker_actor else 0
         return {"SelfPlay": sp_count, "Training": tr_count}
 
-    def is_self_play_running(self) -> bool:
-        """Checks if *any* self-play worker thread is active."""
-        return any(
-            w is not None and w.is_alive() for w in self.self_play_worker_threads
-        )
-
-    def is_training_running(self) -> bool:
-        """Checks if the training worker thread is active."""
-        return (
-            self.training_worker_thread is not None
-            and self.training_worker_thread.is_alive()
-        )
-
     def is_any_worker_running(self) -> bool:
-        """Checks if any worker thread is active."""
-        return self.is_self_play_running() or self.is_training_running()
+        """Checks the internal flag indicating if workers have been started."""
+        return self._workers_running
 
-    def get_worker_render_data(self, max_envs: int) -> List[Optional[Dict[str, Any]]]:
-        """
-        Retrieves render data (state copy and stats) from active self-play workers.
-        Returns a list of dictionaries [{state: GameState, stats: Dict}, ... ] or None.
-        Accesses worker instances directly from the initializer.
-        """
+    async def get_worker_render_data_async(
+        self, max_envs: int
+    ) -> List[Optional[Dict[str, Any]]]:
+        """Retrieves render data from active self-play actors asynchronously."""
+        if not self.self_play_worker_actors:
+            return [None] * max_envs
+
+        tasks = []
+        num_to_fetch = min(len(self.self_play_worker_actors), max_envs)
+        for i in range(num_to_fetch):
+            actor = self.self_play_worker_actors[i]
+            tasks.append(actor.get_current_render_data.remote())
+
         render_data_list: List[Optional[Dict[str, Any]]] = []
-        count = 0
-        # Get worker instances from the initializer, as they persist even if thread stops/restarts
-        worker_instances = self.app.initializer.self_play_workers
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error getting render data from worker {i}: {result}")
+                    render_data_list.append(None)
+                else:
+                    render_data_list.append(result)
+        except Exception as e:
+            logger.error(f"Error gathering render data: {e}")
+            render_data_list = [None] * num_to_fetch
 
-        for worker in worker_instances:
-            if count >= max_envs:
-                break  # Limit reached
-
-            # Check if the worker instance exists and is *currently running*
-            if (
-                worker
-                and worker.is_alive()
-                and hasattr(worker, "get_current_render_data")
-            ):
-                try:
-                    # Fetch the combined state and stats dictionary
-                    data: Dict[str, Any] = worker.get_current_render_data()
-                    render_data_list.append(data)
-                except Exception as e:
-                    logger.error(
-                        f"Error getting render data from worker {worker.worker_id}: {e}"
-                    )
-                    render_data_list.append(None)  # Append None on error
-            else:
-                # Append None if worker doesn't exist, isn't alive, or lacks method
-                render_data_list.append(None)
-
-            count += 1
-
-        # Pad with None if fewer workers than max_envs
         while len(render_data_list) < max_envs:
             render_data_list.append(None)
+        return render_data_list
 
+    def get_worker_render_data(self, max_envs: int) -> List[Optional[Dict[str, Any]]]:
+        """Synchronous wrapper for get_worker_render_data_async."""
+        if not self.self_play_worker_actors:
+            return [None] * max_envs
+
+        refs = []
+        num_to_fetch = min(len(self.self_play_worker_actors), max_envs)
+        for i in range(num_to_fetch):
+            actor = self.self_play_worker_actors[i]
+            refs.append(actor.get_current_render_data.remote())
+
+        render_data_list: List[Optional[Dict[str, Any]]] = []
+        try:
+            results = ray.get(refs)
+            render_data_list.extend(results)
+        except Exception as e:
+            logger.error(f"Error getting render data via ray.get: {e}")
+            render_data_list = [None] * num_to_fetch
+
+        while len(render_data_list) < max_envs:
+            render_data_list.append(None)
         return render_data_list
 
     def start_all_workers(self):
-        """Starts all initialized worker threads if they are not already running."""
-        if self.is_any_worker_running():
-            logger.warning(
-                "[AppWorkerManager] Attempted to start workers, but some are already running."
-            )
+        """Starts the main loops of all initialized worker actors."""
+        if self._workers_running:
+            logger.warning("[AppWorkerManager] Workers already started.")
+            return
+        if not self.self_play_worker_actors and not self.training_worker_actor:
+            logger.error("[AppWorkerManager] No worker actors initialized to start.")
             return
 
-        # Check if necessary components are initialized
-        if (
-            not self.app.initializer.agent
-            or not self.app.initializer.mcts
-            or not self.app.initializer.stats_aggregator
-            or not self.app.initializer.optimizer
-        ):
-            logger.error(
-                "[AppWorkerManager] ERROR: Cannot start workers, core RL components missing."
-            )
-            self.app.app_state = self.app.app_state.ERROR
-            self.app.status = "Worker Init Failed: Missing Components"
-            return
+        logger.info("[AppWorkerManager] Starting all worker actor loops...")
+        self._workers_running = True
 
-        # Check if worker instances exist in the initializer
-        if (
-            not self.app.initializer.self_play_workers
-            or not self.app.initializer.training_worker
-        ):
-            logger.error(
-                "[AppWorkerManager] ERROR: Workers not initialized in AppInitializer."
-            )
-            self.app.app_state = self.app.app_state.ERROR
-            self.app.status = "Worker Init Failed: Not Initialized"
-            return
-
-        logger.info("[AppWorkerManager] Starting all worker threads...")
-        self.app.stop_event.clear()  # Ensure stop event is clear
-
-        # --- Start Self-Play Workers ---
-        self.self_play_worker_threads = []  # Clear list of active threads
-        for i, worker_instance in enumerate(self.app.initializer.self_play_workers):
-            if worker_instance:
-                # Check if the thread associated with this instance is alive
-                if not worker_instance.is_alive():
-                    try:
-                        # Recreate the thread object using the instance's init args
-                        # This ensures we have a fresh thread if the previous one finished/crashed
-                        recreated_worker = SelfPlayWorker(
-                            **worker_instance.get_init_args()
-                        )
-                        # Replace the instance in the initializer list (important for rendering)
-                        self.app.initializer.self_play_workers[i] = recreated_worker
-                        worker_to_start = recreated_worker
-                        logger.info(f"  Recreated SelfPlayWorker-{i}.")
-                    except Exception as e:
-                        logger.error(f"  ERROR recreating SelfPlayWorker-{i}: {e}")
-                        continue  # Skip starting this worker
-                else:
-                    # If already alive (shouldn't happen based on initial check, but safe)
-                    worker_to_start = worker_instance
-                    logger.warning(
-                        f"  SelfPlayWorker-{i} was already alive during start sequence."
-                    )
-
-                # Add to our list of *running* threads and start
-                self.self_play_worker_threads.append(worker_to_start)
-                worker_to_start.start()
-                logger.info(f"  SelfPlayWorker-{i} thread started.")
-            else:
-                logger.error(
-                    f"[AppWorkerManager] ERROR: SelfPlayWorker instance {i} is None during start."
-                )
-
-        # --- Start Training Worker ---
-        training_instance = self.app.initializer.training_worker
-        if training_instance:
-            if not training_instance.is_alive():
-                try:
-                    # Recreate thread object if needed
-                    recreated_worker = TrainingWorker(
-                        **training_instance.get_init_args()
-                    )
-                    self.app.initializer.training_worker = (
-                        recreated_worker  # Update initializer's instance
-                    )
-                    self.training_worker_thread = (
-                        recreated_worker  # Update manager's running thread ref
-                    )
-                    logger.info("  Recreated TrainingWorker.")
-                except Exception as e:
-                    logger.error(f"  ERROR recreating TrainingWorker: {e}")
-                    self.training_worker_thread = None  # Failed to recreate
-            else:
-                self.training_worker_thread = (
-                    training_instance  # Use existing live thread instance
-                )
-                logger.warning(
-                    "  TrainingWorker was already alive during start sequence."
-                )
-
-            if self.training_worker_thread:
-                # Start the thread (safe to call start() again on already started thread)
-                self.training_worker_thread.start()
-                logger.info("  TrainingWorker thread started.")
-        else:
-            logger.error(
-                "[AppWorkerManager] ERROR: TrainingWorker instance is None during start."
-            )
-
-        # Final status update
-        if self.is_any_worker_running():
-            self.app.status = "Running AlphaZero"
-            num_sp = len(self.self_play_worker_threads)
-            num_tr = 1 if self.is_training_running() else 0
-            logger.info(
-                f"[AppWorkerManager] Workers started ({num_sp} SP, {num_tr} TR)."
-            )
-
-    def stop_all_workers(self, join_timeout: float = 5.0):
-        """Signals ALL worker threads to stop and waits for them to join."""
-        # Check if there's anything to stop
-        worker_instances_exist = (
-            self.app.initializer.self_play_workers
-            or self.app.initializer.training_worker
-        )
-        if not self.is_any_worker_running() and not worker_instances_exist:
-            logger.info("[AppWorkerManager] No workers initialized or running to stop.")
-            return
-        elif not self.is_any_worker_running():
-            logger.info("[AppWorkerManager] No workers currently running to stop.")
-            # Proceed to clear queue etc. even if not running
-        else:
-            logger.info("[AppWorkerManager] Stopping ALL worker threads...")
-            self.app.stop_event.set()  # Signal threads to stop
-
-        # Collect threads that need joining (use initializer instances as the source of truth)
-        threads_to_join: List[Tuple[str, threading.Thread]] = []
-        for i, worker in enumerate(self.app.initializer.self_play_workers):
-            # Check if the instance exists and the thread is alive
-            if worker and worker.is_alive():
-                threads_to_join.append((f"SelfPlayWorker-{i}", worker))
-
-        if (
-            self.app.initializer.training_worker
-            and self.app.initializer.training_worker.is_alive()
-        ):
-            threads_to_join.append(
-                ("TrainingWorker", self.app.initializer.training_worker)
-            )
-
-        # Join threads with timeout
-        start_join_time = time.time()
-        if not threads_to_join:
-            logger.info("[AppWorkerManager] No active threads found to join.")
-        else:
-            logger.info(
-                f"[AppWorkerManager] Attempting to join {len(threads_to_join)} threads..."
-            )
-            for name, thread in threads_to_join:
-                # Calculate remaining timeout dynamically
-                elapsed_time = time.time() - start_join_time
-                remaining_timeout = max(
-                    0.1, join_timeout - elapsed_time
-                )  # Ensure minimum timeout
-                logger.info(
-                    f"[AppWorkerManager] Joining {name} (timeout: {remaining_timeout:.1f}s)..."
-                )
-                thread.join(timeout=remaining_timeout)
-                if thread.is_alive():
-                    logger.warning(
-                        f"[AppWorkerManager] WARNING: {name} thread did not join cleanly after timeout."
-                    )
-                else:
-                    logger.info(f"[AppWorkerManager] {name} joined.")
-
-        # Clear internal references to running threads
-        self.self_play_worker_threads = []
-        self.training_worker_thread = None
-
-        # Clear the experience queue after stopping workers
-        logger.info("[AppWorkerManager] Clearing experience queue...")
-        cleared_count = 0
-        while not self.app.experience_queue.empty():
+        for i, actor in enumerate(self.self_play_worker_actors):
             try:
-                self.app.experience_queue.get_nowait()
-                cleared_count += 1
-            except queue.Empty:
-                break
+                actor.run_loop.remote()
+                logger.info(f"  SelfPlayWorker-{i} actor loop started.")
             except Exception as e:
-                logger.error(f"Error clearing queue item: {e}")
-                break  # Stop clearing on error
-        logger.info(
-            f"[AppWorkerManager] Cleared {cleared_count} items from experience queue."
-        )
+                logger.error(f"  ERROR starting SelfPlayWorker-{i} actor loop: {e}")
 
-        logger.info("[AppWorkerManager] All worker threads stopped.")
-        self.app.status = "Ready"  # Update status after stopping
+        if self.training_worker_actor:
+            try:
+                self.training_worker_actor.run_loop.remote()
+                logger.info("  TrainingWorker actor loop started.")
+            except Exception as e:
+                logger.error(f"  ERROR starting TrainingWorker actor loop: {e}")
+
+        if self.is_any_worker_running():
+            self.app.set_status("Running AlphaZero")
+            num_sp = len(self.self_play_worker_actors)
+            num_tr = 1 if self.training_worker_actor else 0
+            logger.info(
+                f"[AppWorkerManager] Worker loops started ({num_sp} SP, {num_tr} TR)."
+            )
+
+    def stop_all_workers(self, timeout: float = DEFAULT_KILL_TIMEOUT):
+        """Signals all worker actors to stop and attempts to terminate them."""
+        if (
+            not self._workers_running
+            and not self.self_play_worker_actors
+            and not self.training_worker_actor
+        ):
+            logger.info("[AppWorkerManager] No workers running or initialized to stop.")
+            return
+
+        logger.info("[AppWorkerManager] Stopping ALL worker actors...")
+        self._workers_running = False
+
+        actors_to_stop: List[ray.actor.ActorHandle] = []
+        actors_to_stop.extend(self.self_play_worker_actors)
+        if self.training_worker_actor:
+            actors_to_stop.append(self.training_worker_actor)
+
+        if not actors_to_stop:
+            logger.info("[AppWorkerManager] No active actor handles found to stop.")
+            return
+
+        logger.info(
+            f"[AppWorkerManager] Sending stop signal to {len(actors_to_stop)} actors..."
+        )
+        for actor in actors_to_stop:
+            try:
+                actor.stop.remote()
+            except Exception as e:
+                logger.warning(f"Error sending stop signal to actor {actor}: {e}")
+
+        time.sleep(0.5)
+
+        logger.info(f"[AppWorkerManager] Killing actors...")
+        for actor in actors_to_stop:
+            try:
+                ray.kill(actor, no_restart=True)
+                logger.info(f"  Killed actor {actor}.")
+            except Exception as e:
+                logger.error(f"  Error killing actor {actor}: {e}")
+
+        self.self_play_worker_actors = []
+        self.training_worker_actor = None
+
+        self._clear_experience_queue()
+
+        logger.info("[AppWorkerManager] All worker actors stopped/killed.")
+        self.app.set_status("Ready")
+
+    def _clear_experience_queue(self):
+        """Safely clears the experience queue (assuming Ray Queue)."""
+        logger.info("[AppWorkerManager] Clearing experience queue...")
+        # Check if it's a RayQueue instance (which acts as a handle)
+        if hasattr(self.app, "experience_queue") and isinstance(
+            self.app.experience_queue, ray.util.queue.Queue
+        ):
+            try:
+                # Call qsize() directly, it returns an ObjectRef
+                qsize_ref = self.app.experience_queue.qsize()
+                qsize = ray.get(qsize_ref)  # Use ray.get() to resolve the ObjectRef
+                logger.info(
+                    f"[AppWorkerManager] Experience queue size before potential drain: {qsize}"
+                )
+                # Optional drain logic can be added here if needed
+                # Example: Drain items if size is large
+                # if qsize > 100:
+                #     logger.info("[AppWorkerManager] Draining experience queue...")
+                #     while qsize > 0:
+                #         try:
+                #             # Use get_nowait_batch to drain efficiently
+                #             items_ref = self.app.experience_queue.get_nowait_batch(100)
+                #             items = ray.get(items_ref)
+                #             if not items: break
+                #             qsize_ref = self.app.experience_queue.qsize()
+                #             qsize = ray.get(qsize_ref)
+                #         except ray.exceptions.RayActorError: # Handle queue actor potentially gone
+                #             logger.warning("[AppWorkerManager] Queue actor error during drain.")
+                #             break
+                #         except Exception as drain_e:
+                #             logger.error(f"Error draining queue: {drain_e}")
+                #             break
+                #     logger.info("[AppWorkerManager] Experience queue drained.")
+
+            except Exception as e:
+                logger.error(f"Error accessing Ray queue size: {e}")
+        else:
+            logger.warning(
+                "[AppWorkerManager] Experience queue not found or not a Ray Queue during clearing."
+            )

@@ -50,41 +50,52 @@ import traceback
 import sys
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR  # Import scheduler
-from typing import TYPE_CHECKING, List, Optional
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from typing import TYPE_CHECKING, List, Optional, Any
+import multiprocessing as mp
+import ray
+from ray.util.queue import Queue as RayQueue
+import logging  # Added logging
 
 from config import (
     ModelConfig,
     StatsConfig,
     DemoConfig,
     MCTSConfig,
+    EnvConfig,
+    TrainConfig,
     BASE_CHECKPOINT_DIR,
     get_run_checkpoint_dir,
 )
 from environment.game_state import GameState
 from stats.stats_recorder import StatsRecorderBase
-from stats.aggregator import StatsAggregator
+from stats.aggregator import StatsAggregatorActor  # Import Actor
 from stats.simple_stats_recorder import SimpleStatsRecorder
-from ui.renderer import UIRenderer
-from ui.input_handler import InputHandler
+
 from training.checkpoint_manager import CheckpointManager
 from app_state import AppState
 from mcts import MCTS
-from agent.alphazero_net import AlphaZeroNet
-from workers.self_play_worker import SelfPlayWorker
-from workers.training_worker import TrainingWorker
+from agent.alphazero_net import AlphaZeroNet, AgentPredictor
+
+# Workers managed by AppWorkerManager
 
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    LogicAppState = Any
     from torch.optim.lr_scheduler import _LRScheduler
+
+    AgentPredictorHandle = ray.actor.ActorHandle
+    SelfPlayWorkerHandle = ray.actor.ActorHandle
+    TrainingWorkerHandle = ray.actor.ActorHandle
+    StatsAggregatorHandle = ray.actor.ActorHandle  # Use Actor Handle type
+
+logger = logging.getLogger(__name__)  # Added logger
 
 
 class AppInitializer:
-    """Handles the initialization of core application components."""
+    """Handles the initialization of core RL application components in the Logic Process."""
 
-    def __init__(self, app: "MainApp"):
+    def __init__(self, app: "LogicAppState"):
         self.app = app
-        # Config instances
         self.vis_config = app.vis_config
         self.env_config = app.env_config
         self.train_config = app.train_config_instance
@@ -92,40 +103,78 @@ class AppInitializer:
         self.stats_config = StatsConfig()
         self.demo_config = DemoConfig()
         self.mcts_config = MCTSConfig()
+        self.worker_stop_event: mp.Event = app.worker_stop_event
 
         # Components to be initialized
         self.agent: Optional[AlphaZeroNet] = None
+        self.agent_predictor: Optional["AgentPredictorHandle"] = None
         self.optimizer: Optional[optim.Optimizer] = None
-        self.scheduler: Optional["_LRScheduler"] = None  # Add scheduler attribute
+        self.scheduler: Optional["_LRScheduler"] = None
         self.stats_recorder: Optional[StatsRecorderBase] = None
-        self.stats_aggregator: Optional[StatsAggregator] = None
+        self.stats_aggregator: Optional["StatsAggregatorHandle"] = (
+            None  # Now an Actor Handle
+        )
         self.demo_env: Optional[GameState] = None
         self.agent_param_count: int = 0
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.mcts: Optional[MCTS] = None
-        self.self_play_workers: List[SelfPlayWorker] = []
-        self.training_worker: Optional[TrainingWorker] = None
+        # MCTS instance not central anymore
 
-    def initialize_all(self, is_reinit: bool = False):
-        """Initializes all core components."""
+    def initialize_logic_components(self):
+        """Initializes only the RL and logic-related components, including Ray actors."""
         try:
             self._check_gpu_memory()
-            if not is_reinit:
-                self._initialize_ui_early()
-
+            self._init_ray_actors()  # Initialize actors first
             self.initialize_rl_components(
-                is_reinit=is_reinit, checkpoint_to_load=self.app.checkpoint_to_load
+                is_reinit=False,
+                checkpoint_to_load=self.app.checkpoint_to_load,
             )
-
-            if not is_reinit:
-                self.initialize_demo_env()
-                self.initialize_input_handler()
-
+            self.initialize_demo_env()
             self._calculate_agent_params()
-            self.initialize_workers()  # Workers now need the scheduler
+            self.app.worker_manager.initialize_actors()  # Initialize worker actors
 
         except Exception as init_err:
             self._handle_init_error(init_err)
+
+    def _init_ray_actors(self):
+        """Initializes core Ray actors like AgentPredictor and StatsAggregatorActor."""
+        logger.info("[AppInitializer] Initializing Ray Actors...")
+        # --- Agent Predictor Actor ---
+        try:
+            self.agent_predictor = AgentPredictor.options(
+                name="AgentPredictorActor",  # Optional: give it a name
+                lifetime="detached",  # Optional: keep actor alive if main script exits abnormally
+            ).remote(
+                env_config=self.env_config, model_config=self.model_config.Network()
+            )
+            ray.get(self.agent_predictor.health_check.remote())  # Wait for actor
+            logger.info("[AppInitializer] AgentPredictor actor created.")
+            self.app.agent_predictor = self.agent_predictor
+        except Exception as e:
+            logger.error(
+                f"[AppInitializer] Failed to create AgentPredictor actor: {e}",
+                exc_info=True,
+            )
+            raise RuntimeError("AgentPredictor actor initialization failed") from e
+
+        # --- Stats Aggregator Actor ---
+        try:
+            self.stats_aggregator = StatsAggregatorActor.options(
+                name="StatsAggregatorActor", lifetime="detached"
+            ).remote(
+                avg_windows=self.stats_config.STATS_AVG_WINDOW,
+                plot_window=self.stats_config.PLOT_DATA_WINDOW,
+            )
+            ray.get(self.stats_aggregator.health_check.remote())  # Wait for actor
+            logger.info("[AppInitializer] StatsAggregatorActor created.")
+            self.app.stats_aggregator = self.stats_aggregator  # Store actor handle
+        except Exception as e:
+            logger.error(
+                f"[AppInitializer] Failed to create StatsAggregator actor: {e}",
+                exc_info=True,
+            )
+            raise RuntimeError("StatsAggregator actor initialization failed") from e
+
+        logger.info("[AppInitializer] Ray Actors initialized.")
 
     def _check_gpu_memory(self):
         """Checks and prints total GPU memory if available."""
@@ -137,98 +186,79 @@ class AppInitializer:
             except Exception as e:
                 print(f"Warning: Could not get total GPU memory: {e}")
 
-    def _initialize_ui_early(self):
-        """Initializes the renderer and performs an initial render."""
-        self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
-        self.app.renderer.render_all(
-            app_state=self.app.app_state.value,
-            is_process_running=False,
-            status=self.app.status,
-            stats_summary={},
-            envs=[],
-            num_envs=0,
-            env_config=self.env_config,
-            cleanup_confirmation_active=False,
-            cleanup_message="",
-            last_cleanup_message_time=0,
-            plot_data={},
-            demo_env=None,
-            update_progress_details={},
-            agent_param_count=0,
-            worker_counts={},
-            best_game_state_data=None,
-        )
-        pygame.display.flip()
-        pygame.time.delay(100)  # Allow UI to update
-
     def _calculate_agent_params(self):
-        """Calculates the number of trainable parameters in the agent."""
-        if self.agent:
+        """Calculates agent parameters by calling the AgentPredictor actor."""
+        if self.agent_predictor:
             try:
-                self.agent_param_count = sum(
-                    p.numel() for p in self.agent.parameters() if p.requires_grad
+                param_count_ref = self.agent_predictor.get_param_count.remote()
+                self.agent_param_count = ray.get(param_count_ref)
+                logger.info(
+                    f"[AppInitializer] Agent Parameters: {self.agent_param_count:,}"
                 )
             except Exception as e:
-                print(f"Warning: Could not calculate agent parameters: {e}")
+                logger.error(f"Warning: Could not get agent parameters from actor: {e}")
                 self.agent_param_count = 0
+        else:
+            logger.warning("AgentPredictor actor not available for param count.")
+            self.agent_param_count = 0
 
     def _handle_init_error(self, error: Exception):
-        """Handles fatal errors during initialization."""
+        """Handles fatal errors during component initialization."""
         print(f"FATAL ERROR during component initialization: {error}")
         traceback.print_exc()
-        if self.app.renderer:
-            try:
-                self.app.app_state = AppState.ERROR
-                self.app.status = "Initialization Failed"
-                self.app.renderer._render_error_screen(self.app.status)
-                pygame.display.flip()
-                time.sleep(5)
-            except Exception:
-                pass
-        pygame.quit()
-        sys.exit(1)
+        self.app.set_state(AppState.ERROR)
+        self.app.set_status(f"Logic Init Failed: {error}")
+        self.app.stop_event.set()
 
     def initialize_rl_components(
         self, is_reinit: bool = False, checkpoint_to_load: Optional[str] = None
     ):
-        """Initializes NN Agent, Optimizer, Scheduler, MCTS, Stats, Checkpoint Manager."""
+        """Initializes local NN Agent (for checkpointing), Optimizer, Scheduler, StatsRecorder, Checkpoint Manager."""
         print(f"Initializing AlphaZero components... Re-init: {is_reinit}")
         start_time = time.time()
         try:
-            self._init_agent()
-            self._init_optimizer_and_scheduler()  # Renamed method
-            self._init_mcts()
-            self._init_stats()
+            self._init_local_agent_for_checkpointing()
+            self._init_optimizer_and_scheduler()
+            self._init_stats_recorder()  # Uses stats_aggregator handle now
             self._init_checkpoint_manager(
                 checkpoint_to_load
-            )  # Checkpoint manager needs scheduler now
+            )  # Interacts with stats_aggregator handle
+
             print(
                 f"AlphaZero components initialized in {time.time() - start_time:.2f}s"
             )
+            self.app.optimizer = self.optimizer
+            self.app.scheduler = self.scheduler
+            self.app.stats_recorder = self.stats_recorder
+            self.app.checkpoint_manager = self.checkpoint_manager
+
         except Exception as e:
             print(f"Error during AlphaZero component initialization: {e}")
             traceback.print_exc()
             raise e
 
-    def _init_agent(self):
+    def _init_local_agent_for_checkpointing(self):
+        """Initializes a local copy of the agent for saving/loading checkpoints."""
         self.agent = AlphaZeroNet(
             env_config=self.env_config, model_config=self.model_config.Network()
         ).to(self.app.device)
-        print(f"AlphaZeroNet initialized on device: {self.app.device}.")
+        print(
+            f"Local AlphaZeroNet (for checkpointing) initialized on device: {self.app.device}."
+        )
 
     def _init_optimizer_and_scheduler(self):
-        """Initializes the optimizer and the learning rate scheduler."""
+        """Initializes the optimizer and scheduler using the local agent copy."""
         if not self.agent:
-            raise RuntimeError("Agent must be initialized before Optimizer.")
-        # Initialize Optimizer
+            raise RuntimeError("Local Agent must be initialized before Optimizer.")
         self.optimizer = optim.Adam(
             self.agent.parameters(),
             lr=self.train_config.LEARNING_RATE,
             weight_decay=self.train_config.WEIGHT_DECAY,
         )
-        print(f"Optimizer initialized (Adam, LR={self.train_config.LEARNING_RATE}).")
+        print(
+            f"Optimizer initialized (Adam, LR={self.train_config.LEARNING_RATE}) for local agent."
+        )
 
-        # Initialize Scheduler (if enabled)
         if self.train_config.USE_LR_SCHEDULER:
             if self.train_config.SCHEDULER_TYPE == "CosineAnnealingLR":
                 self.scheduler = CosineAnnealingLR(
@@ -239,9 +269,6 @@ class AppInitializer:
                 print(
                     f"LR Scheduler initialized (CosineAnnealingLR, T_max={self.train_config.SCHEDULER_T_MAX}, eta_min={self.train_config.SCHEDULER_ETA_MIN})."
                 )
-            # Add other scheduler types here if needed
-            # elif self.train_config.SCHEDULER_TYPE == "OneCycleLR":
-            #     self.scheduler = OneCycleLR(...)
             else:
                 print(
                     f"Warning: Unknown scheduler type '{self.train_config.SCHEDULER_TYPE}'. No scheduler initialized."
@@ -251,150 +278,91 @@ class AppInitializer:
             print("LR Scheduler is DISABLED.")
             self.scheduler = None
 
-    def _init_mcts(self):
-        if not self.agent:
-            raise RuntimeError("Agent must be initialized before MCTS.")
-        self.mcts = MCTS(
-            network_predictor=self.agent.predict,
-            config=self.mcts_config,
-            env_config=self.env_config,
-        )
-        print("MCTS initialized with AlphaZeroNet predictor.")
-
-    def _init_stats(self):
-        print("Initializing StatsAggregator and SimpleStatsRecorder...")
-        self.stats_aggregator = StatsAggregator(
-            avg_windows=self.stats_config.STATS_AVG_WINDOW,
-            plot_window=self.stats_config.PLOT_DATA_WINDOW,
-        )
+    def _init_stats_recorder(self):
+        """Initializes the local StatsRecorder, passing the StatsAggregatorActor handle."""
+        if not self.stats_aggregator:  # Check if handle exists
+            raise RuntimeError(
+                "StatsAggregatorActor handle must be initialized before StatsRecorder."
+            )
+        print("Initializing SimpleStatsRecorder...")
         self.stats_recorder = SimpleStatsRecorder(
-            aggregator=self.stats_aggregator,
+            aggregator=self.stats_aggregator,  # Pass actor handle
             console_log_interval=self.stats_config.CONSOLE_LOG_FREQ,
             train_config=self.train_config,
         )
-        print("StatsAggregator and SimpleStatsRecorder initialized.")
+        print("SimpleStatsRecorder initialized.")
 
     def _init_checkpoint_manager(self, checkpoint_to_load: Optional[str]):
+        """Initializes the CheckpointManager using local agent/optimizer and StatsAggregatorActor handle."""
         if not self.agent or not self.optimizer or not self.stats_aggregator:
             raise RuntimeError(
-                "Agent, Optimizer, StatsAggregator needed for CheckpointManager."
+                "Local Agent, Optimizer, and StatsAggregatorActor handle needed for CheckpointManager."
             )
-        # Pass the scheduler to the CheckpointManager
         self.checkpoint_manager = CheckpointManager(
             agent=self.agent,
             optimizer=self.optimizer,
-            scheduler=self.scheduler,  # Pass scheduler
-            stats_aggregator=self.stats_aggregator,
+            scheduler=self.scheduler,
+            stats_aggregator=self.stats_aggregator,  # Pass actor handle
             base_checkpoint_dir=BASE_CHECKPOINT_DIR,
             run_checkpoint_dir=get_run_checkpoint_dir(),
             load_checkpoint_path_config=checkpoint_to_load,
             device=self.app.device,
         )
         if self.checkpoint_manager.get_checkpoint_path_to_load():
+            # Load checkpoint into local agent/optimizer/scheduler
+            # CheckpointManager's load_checkpoint method now handles loading stats into the actor
             self.checkpoint_manager.load_checkpoint()
-
-    def initialize_workers(self):
-        """Initializes worker threads (Self-Play, Training). Does NOT start them."""
-        print("Initializing worker threads...")
-        if (
-            not self.agent
-            or not self.mcts
-            or not self.stats_aggregator
-            or not self.optimizer
-            # Scheduler is optional, so don't check it here
-        ):
-            print("ERROR: Cannot initialize workers, core RL components missing.")
-            return
-
-        self._init_self_play_workers()
-        self._init_training_worker()  # Training worker needs scheduler
-        num_sp = len(self.self_play_workers)
-        print(f"Worker threads initialized ({num_sp} Self-Play, 1 Training).")
-
-    def _init_self_play_workers(self):
-        self.self_play_workers = []
-        num_sp_workers = self.train_config.NUM_SELF_PLAY_WORKERS
-        print(f"Initializing {num_sp_workers} SelfPlayWorker(s)...")
-        for i in range(num_sp_workers):
-            worker = SelfPlayWorker(
-                worker_id=i,
-                agent=self.agent,
-                mcts=self.mcts,
-                experience_queue=self.app.experience_queue,
-                stats_aggregator=self.stats_aggregator,
-                stop_event=self.app.stop_event,
-                env_config=self.env_config,
-                mcts_config=self.mcts_config,
-                device=self.app.device,
-            )
-            self.self_play_workers.append(worker)
-            print(f"  SelfPlayWorker-{i} initialized.")
-
-    def _init_training_worker(self):
-        # Pass the scheduler to the TrainingWorker
-        self.training_worker = TrainingWorker(
-            agent=self.agent,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,  # Pass scheduler
-            experience_queue=self.app.experience_queue,
-            stats_aggregator=self.stats_aggregator,
-            stop_event=self.app.stop_event,
-            train_config=self.train_config,
-            device=self.app.device,
-        )
-        print("TrainingWorker initialized.")
+            # Push loaded weights to the AgentPredictor actor
+            if self.agent_predictor:
+                try:
+                    loaded_weights = self.agent.state_dict()
+                    set_ref = self.agent_predictor.set_weights.remote(loaded_weights)
+                    ray.get(set_ref)
+                    logger.info(
+                        "[AppInitializer] Pushed loaded checkpoint weights to AgentPredictor actor."
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to push loaded weights to AgentPredictor: {e}"
+                    )
+            # Update App state based on loaded checkpoint AFTER loading
+            # Get step count from the aggregator actor
+            if self.stats_aggregator:
+                try:
+                    step_ref = self.stats_aggregator.get_current_global_step.remote()
+                    self.app.current_global_step = ray.get(step_ref)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to get global step from StatsAggregator actor: {e}"
+                    )
+                    self.app.current_global_step = 0  # Fallback
+            else:
+                self.app.current_global_step = 0
 
     def initialize_demo_env(self):
-        """Initializes the separate environment for demo/debug mode."""
-        print("Initializing Demo/Debug Environment...")
+        """Initializes the separate environment for demo/debug if needed by logic."""
+        print("Initializing Demo/Debug Environment (in Logic Process)...")
         try:
             self.demo_env = GameState()
             self.demo_env.reset()
             print("Demo/Debug environment initialized.")
+            self.app.demo_env = self.demo_env
         except Exception as e:
             print(f"ERROR initializing demo/debug environment: {e}")
             traceback.print_exc()
             self.demo_env = None
-
-    def initialize_input_handler(self):
-        """Initializes the Input Handler."""
-        if not self.app.renderer:
-            print("ERROR: Cannot initialize InputHandler before Renderer.")
-            return
-        self.app.input_handler = InputHandler(
-            screen=self.app.screen,
-            renderer=self.app.renderer,
-            request_cleanup_cb=self.app.logic.request_cleanup,
-            cancel_cleanup_cb=self.app.logic.cancel_cleanup,
-            confirm_cleanup_cb=self.app.logic.confirm_cleanup,
-            exit_app_cb=self.app.logic.exit_app,
-            start_demo_mode_cb=self.app.logic.start_demo_mode,
-            exit_demo_mode_cb=self.app.logic.exit_demo_mode,
-            handle_demo_mouse_motion_cb=self.app.logic.handle_demo_mouse_motion,
-            handle_demo_mouse_button_down_cb=self.app.logic.handle_demo_mouse_button_down,
-            start_debug_mode_cb=self.app.logic.start_debug_mode,
-            exit_debug_mode_cb=self.app.logic.exit_debug_mode,
-            handle_debug_input_cb=self.app.logic.handle_debug_input,
-            start_run_cb=self.app.logic.start_run,
-            stop_run_cb=self.app.logic.stop_run,
-        )
-        if self.app.input_handler:
-            self.app.input_handler.app_ref = self.app
-        if self.app.renderer and self.app.renderer.left_panel:
-            self.app.renderer.left_panel.input_handler = self.app.input_handler
-            if hasattr(self.app.renderer.left_panel, "button_status_renderer"):
-                btn_renderer = self.app.renderer.left_panel.button_status_renderer
-                btn_renderer.input_handler_ref = self.app.input_handler
-                btn_renderer.app_ref = self.app
+            self.app.demo_env = None
 
     def close_stats_recorder(self, is_cleanup: bool = False):
         """Safely closes the stats recorder (if it exists)."""
         print(
             f"[AppInitializer] close_stats_recorder called (is_cleanup={is_cleanup})..."
         )
+        # StatsAggregator is now an actor, termination handled elsewhere (e.g., AppWorkerManager or main shutdown)
         if self.stats_recorder and hasattr(self.stats_recorder, "close"):
             print("[AppInitializer] Stats recorder exists, attempting close...")
             try:
+                # Recorder might need to make final calls to the aggregator actor before closing
                 self.stats_recorder.close(is_cleanup=is_cleanup)
                 print("[AppInitializer] stats_recorder.close() executed.")
             except Exception as log_e:
@@ -411,100 +379,111 @@ import time
 import traceback
 import os
 import shutil
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Tuple, Dict, Any, Optional
+import logging
+import ray  # Added Ray
 
 from app_state import AppState
-from config.general import get_run_checkpoint_dir 
+from config.general import get_run_checkpoint_dir
 
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    LogicAppState = Any
+    StatsAggregatorHandle = ray.actor.ActorHandle  # Type hint
+
+logger = logging.getLogger(__name__)
 
 
 class AppLogic:
-    """Handles the core application logic and state transitions."""
+    """Handles the core application logic and state transitions within the Logic Process."""
 
-    def __init__(self, app: "MainApp"):
+    def __init__(self, app: "LogicAppState"):
         self.app = app
 
     def check_initial_completion_status(self):
-        """Checks if training target was met upon loading (placeholder)."""
-        pass 
+        pass
 
     def update_status_and_check_completion(self):
-        """Updates the status text based on application state."""
         is_running = self.app.worker_manager.is_any_worker_running()
         state = self.app.app_state
+        new_status = self.app.status
+
         if state == AppState.MAIN_MENU:
-            self.app.status = (
+            new_status = (
                 "Confirm Cleanup"
                 if self.app.cleanup_confirmation_active
                 else "Running AlphaZero" if is_running else "Ready"
             )
         elif state == AppState.PLAYING:
-            self.app.status = "Playing Demo"
+            new_status = "Playing Demo"
         elif state == AppState.DEBUG:
-            self.app.status = "Debugging Grid"
+            new_status = "Debugging Grid"
         elif state == AppState.INITIALIZING:
-            self.app.status = "Initializing..."
+            new_status = "Initializing..."
+        elif state == AppState.ERROR:
+            new_status = self.app.status
+        elif state == AppState.CLEANING:
+            new_status = "Cleaning"
 
-    # --- Worker Control ---
+        if new_status != self.app.status:
+            self.app.set_status(new_status)
+
     def start_run(self):
-        """Starts both self-play and training workers."""
         if (
             self.app.app_state != AppState.MAIN_MENU
             or self.app.worker_manager.is_any_worker_running()
         ):
-            print("Cannot start run: Not in Main Menu or already running.")
+            logger.warning(
+                "[AppLogic] Cannot start run: Not in Main Menu or already running."
+            )
             return
-        print("Starting AlphaZero Run (Self-Play & Training)...")
-        self.app.worker_manager.start_all_workers()
+        logger.info("[AppLogic] Starting AlphaZero Run (Self-Play & Training)...")
+        self.app.worker_manager.start_all_workers()  # Starts actor loops
         self.update_status_and_check_completion()
 
     def stop_run(self):
-        """Stops both self-play and training workers."""
         if not self.app.worker_manager.is_any_worker_running():
-            print("Run not currently active.")
+            logger.info("[AppLogic] Run not currently active.")
             return
-        print("Stopping AlphaZero Run...")
-        self.app.worker_manager.stop_all_workers()
+        logger.info("[AppLogic] Stop Run command received. Initiating worker stop...")
+        self.app.worker_manager.stop_all_workers()  # Stops actors
         self.update_status_and_check_completion()
 
-    # --- Mode Transitions & Cleanup ---
     def request_cleanup(self):
         if self.app.app_state != AppState.MAIN_MENU:
             return
         if self.app.worker_manager.is_any_worker_running():
             self._set_temp_message("Stop Run before Cleanup!")
             return
-        self.app.cleanup_confirmation_active = True
-        self.app.status = "Confirm Cleanup"
-        print("Cleanup requested. Confirm action.")
+        self.app.set_cleanup_confirmation(True)
+        self.update_status_and_check_completion()
+        logger.info("[AppLogic] Cleanup requested. Confirm action.")
 
     def start_demo_mode(self):
         if self._can_start_mode("Demo"):
-            print("Entering Demo Mode...")
+            logger.info("[AppLogic] Entering Demo Mode...")
             self.try_save_checkpoint()
-            self.app.app_state = AppState.PLAYING
-            self.app.status = "Playing Demo"
+            self.app.set_state(AppState.PLAYING)
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
+            self.update_status_and_check_completion()
 
     def start_debug_mode(self):
         if self._can_start_mode("Debug"):
-            print("Entering Debug Mode...")
+            logger.info("[AppLogic] Entering Debug Mode...")
             self.try_save_checkpoint()
-            self.app.app_state = AppState.DEBUG
-            self.app.status = "Debugging Grid"
+            self.app.set_state(AppState.DEBUG)
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
+            self.update_status_and_check_completion()
 
     def _can_start_mode(self, mode_name: str) -> bool:
-        """Checks if demo/debug mode can be started."""
         if self.app.initializer.demo_env is None:
-            print(f"Cannot start {mode_name}: Env not initialized.")
+            logger.warning(f"[AppLogic] Cannot start {mode_name}: Env not initialized.")
             return False
         if self.app.app_state != AppState.MAIN_MENU:
-            print(f"Cannot start {mode_name} mode outside MainMenu.")
+            logger.warning(
+                f"[AppLogic] Cannot start {mode_name} mode outside MainMenu."
+            )
             return False
         if self.app.worker_manager.is_any_worker_running():
             self._set_temp_message(f"Stop Run before {mode_name}!")
@@ -513,184 +492,152 @@ class AppLogic:
 
     def exit_demo_mode(self):
         if self.app.app_state == AppState.PLAYING:
-            print("Exiting Demo Mode...")
-            if self.app.initializer.demo_env:
-                self.app.initializer.demo_env.deselect_dragged_shape()
+            logger.info("[AppLogic] Exiting Demo Mode...")
             self._return_to_main_menu()
 
     def exit_debug_mode(self):
         if self.app.app_state == AppState.DEBUG:
-            print("Exiting Debug Mode...")
+            logger.info("[AppLogic] Exiting Debug Mode...")
             self._return_to_main_menu()
 
     def _return_to_main_menu(self):
-        """Helper to transition back to the main menu state."""
-        self.app.app_state = AppState.MAIN_MENU
+        self.app.set_state(AppState.MAIN_MENU)
         self.check_initial_completion_status()
         self.update_status_and_check_completion()
 
     def cancel_cleanup(self):
-        self.app.cleanup_confirmation_active = False
+        self.app.set_cleanup_confirmation(False)
         self._set_temp_message("Cleanup cancelled.")
         self.update_status_and_check_completion()
-        print("Cleanup cancelled by user.")
+        logger.info("[AppLogic] Cleanup cancelled by user.")
 
     def confirm_cleanup(self):
-        print("Cleanup confirmed by user. Starting process...")
+        logger.info("[AppLogic] Cleanup confirmed by user. Starting process...")
         try:
             self._cleanup_data()
         except Exception as e:
-            print(f"FATAL ERROR during cleanup: {e}")
-            traceback.print_exc()
-            self.app.status = "Error: Cleanup Failed Critically"
-            self.app.app_state = AppState.ERROR
+            logger.error(f"[AppLogic] FATAL ERROR during cleanup: {e}", exc_info=True)
+            self.app.set_status("Error: Cleanup Failed Critically")
+            self.app.set_state(AppState.ERROR)
         finally:
-            self.app.cleanup_confirmation_active = False
-            print(
-                f"Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
+            self.app.set_cleanup_confirmation(False)
+            logger.info(
+                f"[AppLogic] Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
             )
 
-    def exit_app(self) -> bool:
-        print("Exit requested.")
-        self.app.stop_event.set()
-        self.app.worker_manager.stop_all_workers()
-        return False  # Signal main loop to stop
-
-    # --- Input Handling Callbacks ---
-    def handle_demo_mouse_motion(self, mouse_pos: Tuple[int, int]):
-        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
+    def handle_demo_mouse_motion(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.PLAYING
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
+        grid_coords = payload.get("pos")
         demo_env = self.app.initializer.demo_env
         if demo_env.is_frozen() or demo_env.is_over():
             return
         if demo_env.demo_dragged_shape_idx is None:
             return
-        grid_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
         demo_env.update_snapped_position(grid_coords)
 
-    def handle_demo_mouse_button_down(self, event: pygame.event.Event):
-        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
+    def handle_demo_mouse_button_down(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.PLAYING
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
         demo_env = self.app.initializer.demo_env
-        if demo_env.is_frozen() or demo_env.is_over() or event.button != 1:
+        if demo_env.is_frozen() or demo_env.is_over():
             return
-
-        mouse_pos = event.pos
-        clicked_preview = self.app.ui_utils.map_screen_to_preview(mouse_pos)
-        if clicked_preview is not None:
-            action = (
-                demo_env.deselect_dragged_shape
-                if clicked_preview == demo_env.demo_dragged_shape_idx
-                else lambda: demo_env.select_shape_for_drag(clicked_preview)
-            )
-            action()
-            return
-
-        grid_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
-        if (
-            grid_coords is not None
-            and demo_env.demo_dragged_shape_idx is not None
-            and demo_env.demo_snapped_position == grid_coords
-        ):
-            placed = demo_env.place_dragged_shape()
-            if placed and demo_env.is_over():
-                print("[Demo] Game Over! Press ESC to exit.")
-        else:
+        click_type = payload.get("type")
+        if click_type == "preview":
+            clicked_preview = payload.get("index")
+            if clicked_preview is not None:
+                action = (
+                    demo_env.deselect_dragged_shape
+                    if clicked_preview == demo_env.demo_dragged_shape_idx
+                    else lambda: demo_env.select_shape_for_drag(clicked_preview)
+                )
+                action()
+        elif click_type == "grid":
+            grid_coords = payload.get("grid_coords")
+            if (
+                grid_coords is not None
+                and demo_env.demo_dragged_shape_idx is not None
+                and demo_env.demo_snapped_position == grid_coords
+            ):
+                placed = demo_env.place_dragged_shape()
+                if placed and demo_env.is_over():
+                    logger.info("[Demo] Game Over! (UI handles exit prompt)")
+            else:
+                demo_env.deselect_dragged_shape()
+        elif click_type == "outside":
             demo_env.deselect_dragged_shape()
 
-    def handle_debug_input(self, event: pygame.event.Event):
-        if self.app.app_state != AppState.DEBUG or not self.app.initializer.demo_env:
+    def handle_debug_input(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.DEBUG
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
         demo_env = self.app.initializer.demo_env
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-            print("[Debug] Resetting grid...")
+        input_type = payload.get("type")
+        if input_type == "reset":
+            logger.info("[Debug] Resetting grid...")
             demo_env.reset()
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            clicked_coords = self.app.ui_utils.map_screen_to_grid(event.pos)
+        elif input_type == "toggle_triangle":
+            clicked_coords = payload.get("grid_coords")
             if clicked_coords:
                 demo_env.toggle_triangle_debug(*clicked_coords)
 
-    # --- Internal Helpers ---
     def _set_temp_message(self, message: str):
-        """Sets a temporary message to be displayed."""
-        self.app.cleanup_message = message
-        self.app.last_cleanup_message_time = time.time()
+        self.app.set_cleanup_message(message, time.time())
 
     def _cleanup_data(self):
-        """Deletes current run's checkpoint and re-initializes components."""
-        print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
-        self.app.app_state = AppState.INITIALIZING
-        self.app.status = "Cleaning"
+        logger.info("\n[AppLogic] --- CLEANUP DATA INITIATED (Current Run Only) ---")
+        self.app.set_state(AppState.CLEANING)
+        self.app.set_status("Cleaning")
         messages = []
-        self._render_during_cleanup()
-
-        print("[Cleanup] Stopping existing worker threads (if any)...")
-        self.app.worker_manager.stop_all_workers()
-        print("[Cleanup] Existing worker threads stopped.")
-        print("[Cleanup] Closing stats recorder...")
+        logger.info("[AppLogic Cleanup] Stopping existing worker actors (if any)...")
+        self.app.worker_manager.stop_all_workers()  # Stops actors
+        logger.info("[AppLogic Cleanup] Existing worker actors stopped.")
+        logger.info("[AppLogic Cleanup] Closing stats recorder...")
         self.app.initializer.close_stats_recorder(is_cleanup=True)
-        print("[Cleanup] Stats recorder closed.")
-
+        logger.info("[AppLogic Cleanup] Stats recorder closed.")
         messages.append(self._delete_checkpoint_dir())
         time.sleep(0.1)
-
-        print("[Cleanup] Re-initializing components...")
+        logger.info("[AppLogic Cleanup] Re-initializing components...")
         try:
+            # Re-init actors (handled by initializer)
+            self.app.initializer._init_ray_actors()
             self.app.initializer.initialize_rl_components(
                 is_reinit=True, checkpoint_to_load=None
             )
-            print("[Cleanup] Components re-initialized.")
+            logger.info("[AppLogic Cleanup] RL Components re-initialized.")
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
-            self.app.initializer.initialize_workers()
-            print("[Cleanup] Workers re-initialized (not started).")
+            self.app.worker_manager.initialize_actors()  # Re-init worker actors
+            logger.info("[AppLogic Cleanup] Workers re-initialized (not started).")
             messages.append("Components re-initialized.")
-            self.app.status = "Ready"
-            self.app.app_state = AppState.MAIN_MENU
+            self.app.set_status("Ready")
+            self.app.set_state(AppState.MAIN_MENU)
         except Exception as e:
-            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
-            traceback.print_exc()
-            self.app.status = "Error: Re-init Failed"
-            self.app.app_state = AppState.ERROR
+            logger.error(
+                f"[AppLogic] FATAL ERROR during re-initialization after cleanup: {e}",
+                exc_info=True,
+            )
+            self.app.set_status("Error: Re-init Failed")
+            self.app.set_state(AppState.ERROR)
             messages.append("ERROR RE-INITIALIZING COMPONENTS!")
-            if self.app.renderer:
-                self.app.renderer._render_error_screen(self.app.status)
-
         self._set_temp_message("\n".join(messages))
-        print(f"--- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}) ---")
-
-    def _render_during_cleanup(self):
-        """Renders the screen while cleanup is in progress."""
-        if self.app.renderer:
-            try:
-                self.app.renderer.render_all(
-                    app_state=self.app.app_state.value,
-                    is_process_running=False,
-                    status=self.app.status,
-                    stats_summary={},
-                    envs=[],
-                    num_envs=0,
-                    env_config=self.app.env_config,
-                    cleanup_confirmation_active=False,
-                    cleanup_message="",
-                    last_cleanup_message_time=0,
-                    plot_data={},
-                    demo_env=self.app.initializer.demo_env,
-                    update_progress_details={},
-                    agent_param_count=getattr(
-                        self.app.initializer, "agent_param_count", 0
-                    ),
-                    worker_counts={},
-                    best_game_state_data=None,
-                )
-                pygame.display.flip()
-                pygame.time.delay(100)
-            except Exception as render_err:
-                print(f"Warning: Error rendering during cleanup start: {render_err}")
+        logger.info(
+            f"[AppLogic] --- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}) ---"
+        )
 
     def _delete_checkpoint_dir(self) -> str:
-        """Deletes the checkpoint directory and returns a status message."""
-        print("[Cleanup] Deleting agent checkpoint file/dir...")
+        logger.info("[AppLogic Cleanup] Deleting agent checkpoint file/dir...")
         msg = ""
         try:
             save_dir = get_run_checkpoint_dir()
@@ -701,12 +648,11 @@ class AppLogic:
                 msg = f"Run checkpoint directory not found: {save_dir}"
         except OSError as e:
             msg = f"Error deleting checkpoint dir: {e}"
-        print(f"  - {msg}")
-        print("[Cleanup] Checkpoint deletion attempt finished.")
+        logger.info(f"  - {msg}")
+        logger.info("[AppLogic Cleanup] Checkpoint deletion attempt finished.")
         return msg
 
     def try_save_checkpoint(self):
-        """Saves checkpoint if in main menu and workers are not running."""
         if (
             self.app.app_state != AppState.MAIN_MENU
             or self.app.worker_manager.is_any_worker_running()
@@ -717,15 +663,17 @@ class AppLogic:
             or not self.app.initializer.stats_aggregator
         ):
             return
-
-        print("Saving checkpoint...")
+        logger.info("[AppLogic] Saving checkpoint...")
         try:
-            agg_storage = self.app.initializer.stats_aggregator.storage
-            current_step = getattr(agg_storage, "current_global_step", 0)
-            episode_count = getattr(agg_storage, "total_episodes", 0)
-            target_step = getattr(
-                self.app.initializer.checkpoint_manager, "training_target_step", 0
+            # Fetch stats from aggregator actor
+            agg_actor: "StatsAggregatorHandle" = self.app.initializer.stats_aggregator
+            step_ref = agg_actor.get_current_global_step.remote()
+            ep_ref = agg_actor.get_total_episodes.remote()
+            target_ref = agg_actor.get_training_target_step.remote()  # Use new getter
+            current_step, episode_count, target_step = ray.get(
+                [step_ref, ep_ref, target_ref]
             )
+
             self.app.initializer.checkpoint_manager.save_checkpoint(
                 current_step,
                 episode_count,
@@ -733,39 +681,60 @@ class AppLogic:
                 is_final=False,
             )
         except Exception as e:
-            print(f"Error saving checkpoint: {e}")
-            traceback.print_exc()
+            logger.error(f"[AppLogic] Error saving checkpoint: {e}", exc_info=True)
 
     def save_final_checkpoint(self):
-        """Saves the final checkpoint."""
         if (
-            not self.app.initializer.checkpoint_manager
+            not hasattr(self.app, "initializer")
+            or not self.app.initializer.checkpoint_manager
             or not self.app.initializer.stats_aggregator
         ):
+            logger.warning(
+                "[AppLogic] Cannot save final checkpoint: components missing."
+            )
             return
         save_on_exit = (
-            self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
+            self.app.app_state != AppState.CLEANING
+            and self.app.app_state != AppState.ERROR
         )
         if save_on_exit:
-            print("Performing final checkpoint save...")
+            logger.info("[AppLogic] Performing final checkpoint save...")
             try:
-                agg_storage = self.app.initializer.stats_aggregator.storage
-                current_step = getattr(agg_storage, "current_global_step", 0)
-                episode_count = getattr(agg_storage, "total_episodes", 0)
-                target_step = getattr(
-                    self.app.initializer.checkpoint_manager, "training_target_step", 0
+                # Fetch stats from aggregator actor
+                agg_actor: "StatsAggregatorHandle" = (
+                    self.app.initializer.stats_aggregator
                 )
+                step_ref = agg_actor.get_current_global_step.remote()
+                ep_ref = agg_actor.get_total_episodes.remote()
+                target_ref = (
+                    agg_actor.get_training_target_step.remote()
+                )  # Use new getter
+                current_step, episode_count, target_step = ray.get(
+                    [step_ref, ep_ref, target_ref]
+                )
+
                 self.app.initializer.checkpoint_manager.save_checkpoint(
                     current_step,
                     episode_count,
                     training_target_step=target_step,
                     is_final=True,
                 )
+                logger.info("[AppLogic] Final checkpoint save successful.")
+            except AttributeError as ae:
+                # This specific error might be less likely now, but keep general exception handling
+                logger.error(
+                    f"[AppLogic] Attribute error during final checkpoint save: {ae}",
+                    exc_info=True,
+                )
             except Exception as final_save_err:
-                print(f"Error during final checkpoint save: {final_save_err}")
-                traceback.print_exc()
+                logger.error(
+                    f"[AppLogic] Error during final checkpoint save: {final_save_err}",
+                    exc_info=True,
+                )
         else:
-            print("Skipping final checkpoint save.")
+            logger.info(
+                f"[AppLogic] Skipping final checkpoint save due to state: {self.app.app_state}"
+            )
 
 
 File: app_setup.py
@@ -939,292 +908,323 @@ import queue
 import time
 from typing import TYPE_CHECKING, Optional, List, Dict, Tuple, Any
 import logging
+import multiprocessing as mp
+import ray
+import asyncio
+import torch
 
+# Import Ray actor classes
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
-from environment.game_state import GameState
 
+# Import Actor Handles for type hinting
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    LogicAppState = Any
+    SelfPlayWorkerHandle = ray.actor.ActorHandle
+    TrainingWorkerHandle = ray.actor.ActorHandle
+    AgentPredictorHandle = ray.actor.ActorHandle
+    StatsAggregatorHandle = ray.actor.ActorHandle
+    from ray.util.queue import Queue as RayQueue
 
 logger = logging.getLogger(__name__)
 
 
 class AppWorkerManager:
-    """Manages the creation, starting, and stopping of worker threads."""
+    """Manages the creation, starting, and stopping of Ray worker actors."""
 
-    def __init__(self, app: "MainApp"):
+    DEFAULT_KILL_TIMEOUT = 5.0
+
+    def __init__(self, app: "LogicAppState"):
         self.app = app
-        self.self_play_worker_threads: List[SelfPlayWorker] = (
-            []
-        )  # Holds running thread objects
-        self.training_worker_thread: Optional[TrainingWorker] = (
-            None  # Holds running thread object
+        self.self_play_worker_actors: List["SelfPlayWorkerHandle"] = []
+        self.training_worker_actor: Optional["TrainingWorkerHandle"] = None
+        self.agent_predictor_actor: Optional["AgentPredictorHandle"] = None
+        self._workers_running = False
+        logger.info("[AppWorkerManager] Initialized for Ray Actors.")
+
+    def initialize_actors(self):
+        """Initializes Ray worker actors (SelfPlay, Training). Does NOT start their loops."""
+        logger.info("[AppWorkerManager] Initializing worker actors...")
+        if not self.app.agent_predictor:
+            logger.error(
+                "[AppWorkerManager] ERROR: AgentPredictor actor not initialized in AppInitializer."
+            )
+            self.app.set_state(self.app.app_state.ERROR)
+            self.app.set_status("Worker Init Failed: Missing AgentPredictor")
+            return
+        if not self.app.stats_aggregator:
+            logger.error(
+                "[AppWorkerManager] ERROR: StatsAggregator actor handle not initialized in AppInitializer."
+            )
+            self.app.set_state(self.app.app_state.ERROR)
+            self.app.set_status("Worker Init Failed: Missing StatsAggregator")
+            return
+
+        self.agent_predictor_actor = self.app.agent_predictor
+
+        self._init_self_play_actors()
+        self._init_training_actor()
+
+        num_sp = len(self.self_play_worker_actors)
+        num_tr = 1 if self.training_worker_actor else 0
+        logger.info(
+            f"Worker actors initialized ({num_sp} Self-Play, {num_tr} Training)."
         )
-        print("[AppWorkerManager] Initialized.")
+
+    def _init_self_play_actors(self):
+        """Creates SelfPlayWorker Ray actors."""
+        self.self_play_worker_actors = []
+        num_sp_workers = self.app.train_config_instance.NUM_SELF_PLAY_WORKERS
+        logger.info(f"Initializing {num_sp_workers} SelfPlayWorker actor(s)...")
+        for i in range(num_sp_workers):
+            try:
+                actor = SelfPlayWorker.remote(
+                    worker_id=i,
+                    agent_predictor=self.agent_predictor_actor,
+                    mcts_config=self.app.mcts_config,
+                    env_config=self.app.env_config,
+                    experience_queue=self.app.experience_queue,
+                    stats_aggregator=self.app.stats_aggregator,
+                    max_game_steps=None,
+                )
+                self.self_play_worker_actors.append(actor)
+                logger.info(f"  SelfPlayWorker-{i} actor created.")
+            except Exception as e:
+                logger.error(
+                    f"  ERROR creating SelfPlayWorker-{i} actor: {e}", exc_info=True
+                )
+
+    def _init_training_actor(self):
+        """Creates the TrainingWorker Ray actor."""
+        logger.info("Initializing TrainingWorker actor...")
+        if not self.app.optimizer or not self.app.train_config_instance:
+            logger.error(
+                "[AppWorkerManager] ERROR: Optimizer or TrainConfig missing for TrainingWorker init."
+            )
+            return
+
+        optimizer_cls = type(self.app.optimizer)
+        optimizer_kwargs = self.app.optimizer.defaults
+
+        scheduler_cls = type(self.app.scheduler) if self.app.scheduler else None
+        scheduler_kwargs = {}
+        if self.app.scheduler and hasattr(self.app.scheduler, "state_dict"):
+            sd = self.app.scheduler.state_dict()
+            if isinstance(
+                self.app.scheduler, torch.optim.lr_scheduler.CosineAnnealingLR
+            ):
+                scheduler_kwargs = {
+                    "T_max": sd.get("T_max", 1000),
+                    "eta_min": sd.get("eta_min", 0),
+                }
+            else:
+                logger.warning(
+                    f"Cannot automatically determine kwargs for scheduler type {scheduler_cls}. Scheduler might not be correctly re-initialized in actor."
+                )
+                scheduler_cls = None
+
+        try:
+            actor = TrainingWorker.remote(
+                agent_predictor=self.agent_predictor_actor,
+                optimizer_cls=optimizer_cls,
+                optimizer_kwargs=optimizer_kwargs,
+                scheduler_cls=scheduler_cls,
+                scheduler_kwargs=scheduler_kwargs,
+                experience_queue=self.app.experience_queue,
+                stats_aggregator=self.app.stats_aggregator,
+                train_config=self.app.train_config_instance,
+            )
+            self.training_worker_actor = actor
+            logger.info("  TrainingWorker actor created.")
+        except Exception as e:
+            logger.error(f"  ERROR creating TrainingWorker actor: {e}", exc_info=True)
 
     def get_active_worker_counts(self) -> Dict[str, int]:
-        """Returns the count of currently active workers by type."""
-        # Count based on living threads stored in this manager
-        sp_count = sum(1 for w in self.self_play_worker_threads if w and w.is_alive())
-        tr_count = 1 if self.is_training_running() else 0
+        """Returns the count of initialized worker actors."""
+        sp_count = len(self.self_play_worker_actors)
+        tr_count = 1 if self.training_worker_actor else 0
         return {"SelfPlay": sp_count, "Training": tr_count}
 
-    def is_self_play_running(self) -> bool:
-        """Checks if *any* self-play worker thread is active."""
-        return any(
-            w is not None and w.is_alive() for w in self.self_play_worker_threads
-        )
-
-    def is_training_running(self) -> bool:
-        """Checks if the training worker thread is active."""
-        return (
-            self.training_worker_thread is not None
-            and self.training_worker_thread.is_alive()
-        )
-
     def is_any_worker_running(self) -> bool:
-        """Checks if any worker thread is active."""
-        return self.is_self_play_running() or self.is_training_running()
+        """Checks the internal flag indicating if workers have been started."""
+        return self._workers_running
 
-    def get_worker_render_data(self, max_envs: int) -> List[Optional[Dict[str, Any]]]:
-        """
-        Retrieves render data (state copy and stats) from active self-play workers.
-        Returns a list of dictionaries [{state: GameState, stats: Dict}, ... ] or None.
-        Accesses worker instances directly from the initializer.
-        """
+    async def get_worker_render_data_async(
+        self, max_envs: int
+    ) -> List[Optional[Dict[str, Any]]]:
+        """Retrieves render data from active self-play actors asynchronously."""
+        if not self.self_play_worker_actors:
+            return [None] * max_envs
+
+        tasks = []
+        num_to_fetch = min(len(self.self_play_worker_actors), max_envs)
+        for i in range(num_to_fetch):
+            actor = self.self_play_worker_actors[i]
+            tasks.append(actor.get_current_render_data.remote())
+
         render_data_list: List[Optional[Dict[str, Any]]] = []
-        count = 0
-        # Get worker instances from the initializer, as they persist even if thread stops/restarts
-        worker_instances = self.app.initializer.self_play_workers
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error getting render data from worker {i}: {result}")
+                    render_data_list.append(None)
+                else:
+                    render_data_list.append(result)
+        except Exception as e:
+            logger.error(f"Error gathering render data: {e}")
+            render_data_list = [None] * num_to_fetch
 
-        for worker in worker_instances:
-            if count >= max_envs:
-                break  # Limit reached
-
-            # Check if the worker instance exists and is *currently running*
-            if (
-                worker
-                and worker.is_alive()
-                and hasattr(worker, "get_current_render_data")
-            ):
-                try:
-                    # Fetch the combined state and stats dictionary
-                    data: Dict[str, Any] = worker.get_current_render_data()
-                    render_data_list.append(data)
-                except Exception as e:
-                    logger.error(
-                        f"Error getting render data from worker {worker.worker_id}: {e}"
-                    )
-                    render_data_list.append(None)  # Append None on error
-            else:
-                # Append None if worker doesn't exist, isn't alive, or lacks method
-                render_data_list.append(None)
-
-            count += 1
-
-        # Pad with None if fewer workers than max_envs
         while len(render_data_list) < max_envs:
             render_data_list.append(None)
+        return render_data_list
 
+    def get_worker_render_data(self, max_envs: int) -> List[Optional[Dict[str, Any]]]:
+        """Synchronous wrapper for get_worker_render_data_async."""
+        if not self.self_play_worker_actors:
+            return [None] * max_envs
+
+        refs = []
+        num_to_fetch = min(len(self.self_play_worker_actors), max_envs)
+        for i in range(num_to_fetch):
+            actor = self.self_play_worker_actors[i]
+            refs.append(actor.get_current_render_data.remote())
+
+        render_data_list: List[Optional[Dict[str, Any]]] = []
+        try:
+            results = ray.get(refs)
+            render_data_list.extend(results)
+        except Exception as e:
+            logger.error(f"Error getting render data via ray.get: {e}")
+            render_data_list = [None] * num_to_fetch
+
+        while len(render_data_list) < max_envs:
+            render_data_list.append(None)
         return render_data_list
 
     def start_all_workers(self):
-        """Starts all initialized worker threads if they are not already running."""
-        if self.is_any_worker_running():
-            logger.warning(
-                "[AppWorkerManager] Attempted to start workers, but some are already running."
-            )
+        """Starts the main loops of all initialized worker actors."""
+        if self._workers_running:
+            logger.warning("[AppWorkerManager] Workers already started.")
+            return
+        if not self.self_play_worker_actors and not self.training_worker_actor:
+            logger.error("[AppWorkerManager] No worker actors initialized to start.")
             return
 
-        # Check if necessary components are initialized
-        if (
-            not self.app.initializer.agent
-            or not self.app.initializer.mcts
-            or not self.app.initializer.stats_aggregator
-            or not self.app.initializer.optimizer
-        ):
-            logger.error(
-                "[AppWorkerManager] ERROR: Cannot start workers, core RL components missing."
-            )
-            self.app.app_state = self.app.app_state.ERROR
-            self.app.status = "Worker Init Failed: Missing Components"
-            return
+        logger.info("[AppWorkerManager] Starting all worker actor loops...")
+        self._workers_running = True
 
-        # Check if worker instances exist in the initializer
-        if (
-            not self.app.initializer.self_play_workers
-            or not self.app.initializer.training_worker
-        ):
-            logger.error(
-                "[AppWorkerManager] ERROR: Workers not initialized in AppInitializer."
-            )
-            self.app.app_state = self.app.app_state.ERROR
-            self.app.status = "Worker Init Failed: Not Initialized"
-            return
-
-        logger.info("[AppWorkerManager] Starting all worker threads...")
-        self.app.stop_event.clear()  # Ensure stop event is clear
-
-        # --- Start Self-Play Workers ---
-        self.self_play_worker_threads = []  # Clear list of active threads
-        for i, worker_instance in enumerate(self.app.initializer.self_play_workers):
-            if worker_instance:
-                # Check if the thread associated with this instance is alive
-                if not worker_instance.is_alive():
-                    try:
-                        # Recreate the thread object using the instance's init args
-                        # This ensures we have a fresh thread if the previous one finished/crashed
-                        recreated_worker = SelfPlayWorker(
-                            **worker_instance.get_init_args()
-                        )
-                        # Replace the instance in the initializer list (important for rendering)
-                        self.app.initializer.self_play_workers[i] = recreated_worker
-                        worker_to_start = recreated_worker
-                        logger.info(f"  Recreated SelfPlayWorker-{i}.")
-                    except Exception as e:
-                        logger.error(f"  ERROR recreating SelfPlayWorker-{i}: {e}")
-                        continue  # Skip starting this worker
-                else:
-                    # If already alive (shouldn't happen based on initial check, but safe)
-                    worker_to_start = worker_instance
-                    logger.warning(
-                        f"  SelfPlayWorker-{i} was already alive during start sequence."
-                    )
-
-                # Add to our list of *running* threads and start
-                self.self_play_worker_threads.append(worker_to_start)
-                worker_to_start.start()
-                logger.info(f"  SelfPlayWorker-{i} thread started.")
-            else:
-                logger.error(
-                    f"[AppWorkerManager] ERROR: SelfPlayWorker instance {i} is None during start."
-                )
-
-        # --- Start Training Worker ---
-        training_instance = self.app.initializer.training_worker
-        if training_instance:
-            if not training_instance.is_alive():
-                try:
-                    # Recreate thread object if needed
-                    recreated_worker = TrainingWorker(
-                        **training_instance.get_init_args()
-                    )
-                    self.app.initializer.training_worker = (
-                        recreated_worker  # Update initializer's instance
-                    )
-                    self.training_worker_thread = (
-                        recreated_worker  # Update manager's running thread ref
-                    )
-                    logger.info("  Recreated TrainingWorker.")
-                except Exception as e:
-                    logger.error(f"  ERROR recreating TrainingWorker: {e}")
-                    self.training_worker_thread = None  # Failed to recreate
-            else:
-                self.training_worker_thread = (
-                    training_instance  # Use existing live thread instance
-                )
-                logger.warning(
-                    "  TrainingWorker was already alive during start sequence."
-                )
-
-            if self.training_worker_thread:
-                # Start the thread (safe to call start() again on already started thread)
-                self.training_worker_thread.start()
-                logger.info("  TrainingWorker thread started.")
-        else:
-            logger.error(
-                "[AppWorkerManager] ERROR: TrainingWorker instance is None during start."
-            )
-
-        # Final status update
-        if self.is_any_worker_running():
-            self.app.status = "Running AlphaZero"
-            num_sp = len(self.self_play_worker_threads)
-            num_tr = 1 if self.is_training_running() else 0
-            logger.info(
-                f"[AppWorkerManager] Workers started ({num_sp} SP, {num_tr} TR)."
-            )
-
-    def stop_all_workers(self, join_timeout: float = 5.0):
-        """Signals ALL worker threads to stop and waits for them to join."""
-        # Check if there's anything to stop
-        worker_instances_exist = (
-            self.app.initializer.self_play_workers
-            or self.app.initializer.training_worker
-        )
-        if not self.is_any_worker_running() and not worker_instances_exist:
-            logger.info("[AppWorkerManager] No workers initialized or running to stop.")
-            return
-        elif not self.is_any_worker_running():
-            logger.info("[AppWorkerManager] No workers currently running to stop.")
-            # Proceed to clear queue etc. even if not running
-        else:
-            logger.info("[AppWorkerManager] Stopping ALL worker threads...")
-            self.app.stop_event.set()  # Signal threads to stop
-
-        # Collect threads that need joining (use initializer instances as the source of truth)
-        threads_to_join: List[Tuple[str, threading.Thread]] = []
-        for i, worker in enumerate(self.app.initializer.self_play_workers):
-            # Check if the instance exists and the thread is alive
-            if worker and worker.is_alive():
-                threads_to_join.append((f"SelfPlayWorker-{i}", worker))
-
-        if (
-            self.app.initializer.training_worker
-            and self.app.initializer.training_worker.is_alive()
-        ):
-            threads_to_join.append(
-                ("TrainingWorker", self.app.initializer.training_worker)
-            )
-
-        # Join threads with timeout
-        start_join_time = time.time()
-        if not threads_to_join:
-            logger.info("[AppWorkerManager] No active threads found to join.")
-        else:
-            logger.info(
-                f"[AppWorkerManager] Attempting to join {len(threads_to_join)} threads..."
-            )
-            for name, thread in threads_to_join:
-                # Calculate remaining timeout dynamically
-                elapsed_time = time.time() - start_join_time
-                remaining_timeout = max(
-                    0.1, join_timeout - elapsed_time
-                )  # Ensure minimum timeout
-                logger.info(
-                    f"[AppWorkerManager] Joining {name} (timeout: {remaining_timeout:.1f}s)..."
-                )
-                thread.join(timeout=remaining_timeout)
-                if thread.is_alive():
-                    logger.warning(
-                        f"[AppWorkerManager] WARNING: {name} thread did not join cleanly after timeout."
-                    )
-                else:
-                    logger.info(f"[AppWorkerManager] {name} joined.")
-
-        # Clear internal references to running threads
-        self.self_play_worker_threads = []
-        self.training_worker_thread = None
-
-        # Clear the experience queue after stopping workers
-        logger.info("[AppWorkerManager] Clearing experience queue...")
-        cleared_count = 0
-        while not self.app.experience_queue.empty():
+        for i, actor in enumerate(self.self_play_worker_actors):
             try:
-                self.app.experience_queue.get_nowait()
-                cleared_count += 1
-            except queue.Empty:
-                break
+                actor.run_loop.remote()
+                logger.info(f"  SelfPlayWorker-{i} actor loop started.")
             except Exception as e:
-                logger.error(f"Error clearing queue item: {e}")
-                break  # Stop clearing on error
-        logger.info(
-            f"[AppWorkerManager] Cleared {cleared_count} items from experience queue."
-        )
+                logger.error(f"  ERROR starting SelfPlayWorker-{i} actor loop: {e}")
 
-        logger.info("[AppWorkerManager] All worker threads stopped.")
-        self.app.status = "Ready"  # Update status after stopping
+        if self.training_worker_actor:
+            try:
+                self.training_worker_actor.run_loop.remote()
+                logger.info("  TrainingWorker actor loop started.")
+            except Exception as e:
+                logger.error(f"  ERROR starting TrainingWorker actor loop: {e}")
+
+        if self.is_any_worker_running():
+            self.app.set_status("Running AlphaZero")
+            num_sp = len(self.self_play_worker_actors)
+            num_tr = 1 if self.training_worker_actor else 0
+            logger.info(
+                f"[AppWorkerManager] Worker loops started ({num_sp} SP, {num_tr} TR)."
+            )
+
+    def stop_all_workers(self, timeout: float = DEFAULT_KILL_TIMEOUT):
+        """Signals all worker actors to stop and attempts to terminate them."""
+        if (
+            not self._workers_running
+            and not self.self_play_worker_actors
+            and not self.training_worker_actor
+        ):
+            logger.info("[AppWorkerManager] No workers running or initialized to stop.")
+            return
+
+        logger.info("[AppWorkerManager] Stopping ALL worker actors...")
+        self._workers_running = False
+
+        actors_to_stop: List[ray.actor.ActorHandle] = []
+        actors_to_stop.extend(self.self_play_worker_actors)
+        if self.training_worker_actor:
+            actors_to_stop.append(self.training_worker_actor)
+
+        if not actors_to_stop:
+            logger.info("[AppWorkerManager] No active actor handles found to stop.")
+            return
+
+        logger.info(
+            f"[AppWorkerManager] Sending stop signal to {len(actors_to_stop)} actors..."
+        )
+        for actor in actors_to_stop:
+            try:
+                actor.stop.remote()
+            except Exception as e:
+                logger.warning(f"Error sending stop signal to actor {actor}: {e}")
+
+        time.sleep(0.5)
+
+        logger.info(f"[AppWorkerManager] Killing actors...")
+        for actor in actors_to_stop:
+            try:
+                ray.kill(actor, no_restart=True)
+                logger.info(f"  Killed actor {actor}.")
+            except Exception as e:
+                logger.error(f"  Error killing actor {actor}: {e}")
+
+        self.self_play_worker_actors = []
+        self.training_worker_actor = None
+
+        self._clear_experience_queue()
+
+        logger.info("[AppWorkerManager] All worker actors stopped/killed.")
+        self.app.set_status("Ready")
+
+    def _clear_experience_queue(self):
+        """Safely clears the experience queue (assuming Ray Queue)."""
+        logger.info("[AppWorkerManager] Clearing experience queue...")
+        # Check if it's a RayQueue instance (which acts as a handle)
+        if hasattr(self.app, "experience_queue") and isinstance(
+            self.app.experience_queue, ray.util.queue.Queue
+        ):
+            try:
+                # Call qsize() directly, it returns an ObjectRef
+                qsize_ref = self.app.experience_queue.qsize()
+                qsize = ray.get(qsize_ref)  # Use ray.get() to resolve the ObjectRef
+                logger.info(
+                    f"[AppWorkerManager] Experience queue size before potential drain: {qsize}"
+                )
+                # Optional drain logic can be added here if needed
+                # Example: Drain items if size is large
+                # if qsize > 100:
+                #     logger.info("[AppWorkerManager] Draining experience queue...")
+                #     while qsize > 0:
+                #         try:
+                #             # Use get_nowait_batch to drain efficiently
+                #             items_ref = self.app.experience_queue.get_nowait_batch(100)
+                #             items = ray.get(items_ref)
+                #             if not items: break
+                #             qsize_ref = self.app.experience_queue.qsize()
+                #             qsize = ray.get(qsize_ref)
+                #         except ray.exceptions.RayActorError: # Handle queue actor potentially gone
+                #             logger.warning("[AppWorkerManager] Queue actor error during drain.")
+                #             break
+                #         except Exception as drain_e:
+                #             logger.error(f"Error draining queue: {drain_e}")
+                #             break
+                #     logger.info("[AppWorkerManager] Experience queue drained.")
+
+            except Exception as e:
+                logger.error(f"Error accessing Ray queue size: {e}")
+        else:
+            logger.warning(
+                "[AppWorkerManager] Experience queue not found or not a Ray Queue during clearing."
+            )
 
 
 File: check_gpu.py
@@ -1311,321 +1311,472 @@ class TeeLogger:
         self.close()
 
 
-File: main_pygame.py
-# File: main_pygame.py
-import pygame
-import sys
+File: logic_process.py
 import time
-import threading
-import logging
-import argparse
-import os
-import traceback
-from typing import Optional, Dict, Any, List
 import queue
-import numpy as np
-from collections import deque
+import logging
+import logging.handlers
+import multiprocessing as mp
+import traceback
+import sys
+from typing import Optional, Dict, Any
+import ray
+from ray.util.queue import Queue as RayQueue
+import asyncio  # Added asyncio
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-
-if script_dir not in sys.path:
-    sys.path.insert(0, script_dir)
-
-# --- Config and Utils Imports ---
 try:
-    from config import (
-        VisConfig,
-        EnvConfig,
-        TrainConfig,
-        MCTSConfig,
-        RANDOM_SEED,
-        BASE_CHECKPOINT_DIR,
-        set_device,
-        get_run_id,
-        set_run_id,
-        get_run_log_dir,
-        get_console_log_dir,
-        get_config_dict,
-    )
+    from config import VisConfig, EnvConfig, TrainConfig, MCTSConfig, set_device
     from utils.helpers import get_device as get_torch_device, set_random_seeds
-    from logger import TeeLogger
     from utils.init_checks import run_pre_checks
-except ImportError as e:
-    print(f"Error importing config/utils: {e}\n{traceback.format_exc()}")
-    sys.exit(1)
-
-# --- App Component Imports ---
-try:
-    from environment.game_state import GameState
-    from ui.renderer import UIRenderer
-    from stats import StatsAggregator
-    from training.checkpoint_manager import (
-        find_latest_run_and_checkpoint,
-    )
     from app_state import AppState
     from app_init import AppInitializer
     from app_logic import AppLogic
     from app_workers import AppWorkerManager
-    from app_setup import (
-        initialize_pygame,
-        initialize_directories,
-    )
-    from app_ui_utils import AppUIUtils
-    from ui.input_handler import InputHandler
-    from agent.alphazero_net import AlphaZeroNet
-    from workers.training_worker import ProcessedExperienceBatch
+    from app_setup import initialize_directories
+    from environment.game_state import GameState
 except ImportError as e:
-    print(f"Error importing app components: {e}\n{traceback.format_exc()}")
+    print(f"[Logic Process Import Error] {e}", file=sys.stderr)
+    try:
+        if ray.is_initialized():
+            ray.shutdown()
+    except Exception:
+        pass
+    sys.exit(1)
+
+RENDER_DATA_SENTINEL = "RENDER_DATA"
+COMMAND_SENTINEL = "COMMAND"
+STOP_SENTINEL = "STOP"
+ERROR_SENTINEL = "ERROR"
+PAYLOAD_KEY = "payload"
+
+
+def run_logic_process(
+    stop_event: mp.Event,
+    command_queue: mp.Queue,
+    render_data_queue: mp.Queue,
+    checkpoint_to_load: Optional[str],
+    log_queue: Optional[mp.Queue] = None,
+):
+    ray_initialized = False
+    try:
+        if not ray.is_initialized():
+            ray.init(logging_level=logging.WARNING, ignore_reinit_error=True)
+            ray_initialized = True
+            print("[Logic Process] Ray initialized.")
+        else:
+            print("[Logic Process] Ray already initialized.")
+            ray_initialized = True
+    except Exception as ray_init_err:
+        print(
+            f"[Logic Process] FATAL: Ray initialization failed: {ray_init_err}",
+            file=sys.stderr,
+        )
+        stop_event.set()
+        try:
+            render_data_queue.put({ERROR_SENTINEL: f"Ray Init Failed: {ray_init_err}"})
+        except Exception:
+            pass
+        return
+
+    if log_queue:
+        qh = logging.handlers.QueueHandler(log_queue)
+        root = logging.getLogger()
+        if not any(isinstance(h, logging.handlers.QueueHandler) for h in root.handlers):
+            root.addHandler(qh)
+            root.setLevel(logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.info("Logic Process starting...")
+    logic_start_time = time.time()
+
+    logic_app_state = None
+    try:
+        vis_config = VisConfig()
+        env_config = EnvConfig()
+        train_config_instance = TrainConfig()
+        mcts_config = MCTSConfig()
+        worker_stop_event = mp.Event()
+
+        # Use Ray Queue Actor
+        experience_ray_queue = RayQueue(
+            maxsize=train_config_instance.BUFFER_CAPACITY * 2
+        )
+        logger.info(
+            f"[Logic Process] Ray Experience Queue created (maxsize={train_config_instance.BUFFER_CAPACITY * 2})."
+        )
+
+        logic_app_state = type(
+            "LogicAppState",
+            (object,),
+            {
+                "vis_config": vis_config,
+                "env_config": env_config,
+                "train_config_instance": train_config_instance,
+                "mcts_config": mcts_config,
+                "app_state": AppState.INITIALIZING,
+                "status": "Initializing...",
+                "stop_event": stop_event,
+                "worker_stop_event": worker_stop_event,
+                "experience_queue": experience_ray_queue,  # Use Ray Queue handle
+                "device": get_torch_device(),
+                "checkpoint_to_load": checkpoint_to_load,
+                "initializer": None,
+                "logic": None,
+                "worker_manager": None,
+                "agent_predictor": None,
+                "stats_aggregator": None,  # Actor handles
+                "ui_utils": None,
+                "cleanup_confirmation_active": False,
+                "cleanup_message": "",
+                "last_cleanup_message_time": 0.0,
+                "total_gpu_memory_bytes": None,
+                "current_global_step": 0,
+                "set_state": lambda self, new_state: setattr(
+                    self, "app_state", new_state
+                ),
+                "set_status": lambda self, new_status: setattr(
+                    self, "status", new_status
+                ),
+                "set_cleanup_confirmation": lambda self, active: setattr(
+                    self, "cleanup_confirmation_active", active
+                ),
+                "set_cleanup_message": lambda self, msg, msg_time: (
+                    setattr(self, "cleanup_message", msg),
+                    setattr(self, "last_cleanup_message_time", msg_time),
+                ),
+                "get_render_data": None,
+            },
+        )()
+        set_device(logic_app_state.device)
+
+        initializer = AppInitializer(logic_app_state)
+        logic = AppLogic(logic_app_state)
+        worker_manager = AppWorkerManager(logic_app_state)
+        logic_app_state.initializer = initializer
+        logic_app_state.logic = logic
+        logic_app_state.worker_manager = worker_manager
+
+        logger.info("Initializing directories...")
+        initialize_directories()
+        set_random_seeds(
+            mcts_config.RANDOM_SEED if hasattr(mcts_config, "RANDOM_SEED") else 42
+        )
+        logger.info("Running pre-checks...")
+        run_pre_checks()
+        logger.info("Initializing RL components and Ray actors...")
+        initializer.initialize_logic_components()  # Initializes actors
+
+        logic_app_state.set_state(AppState.MAIN_MENU)
+        logic_app_state.set_status("Ready")
+        logic.check_initial_completion_status()
+        logger.info("--- Logic Initialization Complete ---")
+
+        # Define async get_render_data
+        async def _get_render_data_async(app_obj) -> Dict[str, Any]:
+            worker_render_task = None
+            if (
+                app_obj.worker_manager.is_any_worker_running()
+                and app_obj.app_state == AppState.MAIN_MENU
+            ):
+                num_to_render = app_obj.vis_config.NUM_ENVS_TO_RENDER
+                if num_to_render > 0:
+                    worker_render_task = (
+                        app_obj.worker_manager.get_worker_render_data_async(
+                            num_to_render
+                        )
+                    )
+
+            # Fetch stats data from StatsAggregatorActor
+            plot_data_ref, summary_ref, best_game_ref = None, None, None
+            if app_obj.stats_aggregator:  # Check if handle exists
+                plot_data_ref = app_obj.stats_aggregator.get_plot_data.remote()
+                summary_ref = app_obj.stats_aggregator.get_summary.remote(
+                    app_obj.current_global_step
+                )
+                best_game_ref = (
+                    app_obj.stats_aggregator.get_best_game_state_data.remote()
+                )
+
+            # Gather results concurrently
+            results = await asyncio.gather(
+                (
+                    worker_render_task
+                    if worker_render_task
+                    else asyncio.sleep(0, result=[])
+                ),  # Handle no task case
+                plot_data_ref if plot_data_ref else asyncio.sleep(0, result={}),
+                summary_ref if summary_ref else asyncio.sleep(0, result={}),
+                best_game_ref if best_game_ref else asyncio.sleep(0, result=None),
+                return_exceptions=True,  # Handle potential errors from remote calls
+            )
+
+            # Process results, handling potential errors
+            worker_render_data_result = (
+                results[0]
+                if not isinstance(results[0], Exception)
+                else ([None] * app_obj.vis_config.NUM_ENVS_TO_RENDER)
+            )
+            plot_data = results[1] if not isinstance(results[1], Exception) else {}
+            stats_summary = results[2] if not isinstance(results[2], Exception) else {}
+            best_game_state_data = (
+                results[3] if not isinstance(results[3], Exception) else None
+            )
+
+            # Log errors if any occurred during gather
+            for i, res in enumerate(results):
+                if isinstance(res, Exception):
+                    task_name = ["worker_render", "plot_data", "summary", "best_game"][
+                        i
+                    ]
+                    logger.error(f"Error fetching {task_name} from actor: {res}")
+
+            data = {
+                "app_state": app_obj.app_state.value,
+                "status": app_obj.status,
+                "cleanup_confirmation_active": app_obj.cleanup_confirmation_active,
+                "cleanup_message": app_obj.cleanup_message,
+                "last_cleanup_message_time": app_obj.last_cleanup_message_time,
+                "update_progress_details": {},
+                "demo_env_state": (
+                    app_obj.demo_env.get_state() if app_obj.demo_env else None
+                ),
+                "demo_env_is_over": (
+                    app_obj.demo_env.is_over() if app_obj.demo_env else False
+                ),
+                "demo_env_score": (
+                    app_obj.demo_env.game_score if app_obj.demo_env else 0
+                ),
+                "demo_env_dragged_shape_idx": (
+                    app_obj.demo_env.demo_dragged_shape_idx
+                    if app_obj.demo_env
+                    else None
+                ),
+                "demo_env_snapped_pos": (
+                    app_obj.demo_env.demo_snapped_position if app_obj.demo_env else None
+                ),
+                "demo_env_selected_shape_idx": (
+                    app_obj.demo_env.demo_selected_shape_idx if app_obj.demo_env else -1
+                ),
+                "env_config_rows": app_obj.env_config.ROWS,
+                "env_config_cols": app_obj.env_config.COLS,
+                "env_config_num_shape_slots": app_obj.env_config.NUM_SHAPE_SLOTS,
+                "num_envs": app_obj.train_config_instance.NUM_SELF_PLAY_WORKERS,
+                "plot_data": plot_data,
+                "stats_summary": stats_summary,
+                "best_game_state_data": best_game_state_data,
+                "agent_param_count": app_obj.initializer.agent_param_count,
+                "worker_counts": app_obj.worker_manager.get_active_worker_counts(),
+                "is_process_running": app_obj.worker_manager.is_any_worker_running(),
+                "worker_render_data": worker_render_data_result,
+            }
+            return data
+
+        logic_app_state.get_render_data = _get_render_data_async.__get__(
+            logic_app_state
+        )
+
+    except Exception as init_err:
+        logger.critical(f"Logic Initialization failed: {init_err}", exc_info=True)
+        stop_event.set()
+        try:
+            render_data_queue.put({ERROR_SENTINEL: f"Logic Init Failed: {init_err}"})
+        except Exception:
+            pass
+        if ray_initialized:
+            ray.shutdown()
+        return
+
+    # --- Main Logic Loop (Async) ---
+    last_render_send_time = 0
+    render_send_interval = 1.0 / 30.0
+
+    async def main_loop():
+        nonlocal last_render_send_time
+        while not stop_event.is_set():
+            loop_start = time.monotonic()
+
+            # Process Commands (Synchronous)
+            try:
+                command_data = command_queue.get_nowait()
+                if isinstance(command_data, dict) and COMMAND_SENTINEL in command_data:
+                    command = command_data[COMMAND_SENTINEL]
+                    logger.info(f"Received command from UI: {command}")
+                    if command == STOP_SENTINEL:
+                        stop_event.set()
+                        break
+                    logic_method_name = command_data.get(COMMAND_SENTINEL)
+                    logic_method = getattr(
+                        logic_app_state.logic, logic_method_name, None
+                    )
+                    if callable(logic_method):
+                        payload = command_data.get(PAYLOAD_KEY)
+                        if payload is not None:
+                            logic_method(payload)
+                        else:
+                            logic_method()
+                    else:
+                        logger.warning(f"Unknown command: {logic_method_name}")
+                elif command_data is not None:
+                    logger.warning(f"Invalid data on command queue: {command_data}")
+            except queue.Empty:
+                pass
+            except (EOFError, BrokenPipeError):
+                logger.warning("Command queue connection lost.")
+                stop_event.set()
+                break
+            except Exception as cmd_err:
+                logger.error(f"Error processing command: {cmd_err}", exc_info=True)
+
+            # Update Logic State (Synchronous)
+            logic_app_state.logic.update_status_and_check_completion()
+
+            # Send Render Data (Async)
+            current_time = time.monotonic()
+            if current_time - last_render_send_time > render_send_interval:
+                try:
+                    render_data = await logic_app_state.get_render_data()
+                    render_data_queue.put(
+                        {RENDER_DATA_SENTINEL: render_data}, block=False
+                    )
+                    last_render_send_time = current_time
+                except queue.Full:
+                    logger.debug("Render data queue full.")
+                    last_render_send_time = current_time
+                except (EOFError, BrokenPipeError):
+                    logger.warning("Render data queue connection lost.")
+                    stop_event.set()
+                    break
+                except Exception as send_err:
+                    logger.error(
+                        f"Error sending render data: {send_err}", exc_info=True
+                    )
+
+            # Loop Timing
+            loop_duration = time.monotonic() - loop_start
+            sleep_time = max(0, 0.005 - loop_duration)
+            await asyncio.sleep(sleep_time)
+
+    try:
+        asyncio.run(main_loop())
+    except KeyboardInterrupt:
+        logger.warning("Logic process received KeyboardInterrupt.")
+        stop_event.set()
+    except Exception as loop_err:
+        logger.critical(f"Critical error in logic main loop: {loop_err}", exc_info=True)
+        stop_event.set()
+
+    # --- Shutdown Logic ---
+    logger.info("Logic Process shutting down...")
+    try:
+        if logic_app_state:
+            if logic_app_state.worker_manager:
+                logic_app_state.worker_manager.stop_all_workers()  # Stops Ray actors
+            if logic_app_state.logic:
+                logic_app_state.logic.save_final_checkpoint()  # CheckpointManager interacts with actors
+            if logic_app_state.initializer:
+                logic_app_state.initializer.close_stats_recorder()
+            # Terminate other actors if needed (e.g., AgentPredictor, StatsAggregatorActor)
+            if logic_app_state.agent_predictor:
+                try:
+                    ray.kill(logic_app_state.agent_predictor)
+                except Exception as e:
+                    logger.error(f"Error killing AgentPredictor: {e}")
+            if logic_app_state.stats_aggregator and isinstance(
+                logic_app_state.stats_aggregator, ray.actor.ActorHandle
+            ):
+                try:
+                    ray.kill(logic_app_state.stats_aggregator)
+                except Exception as e:
+                    logger.error(f"Error killing StatsAggregatorActor: {e}")
+        else:
+            logger.warning("logic_app_state not initialized during shutdown sequence.")
+    except Exception as shutdown_err:
+        logger.error(
+            f"Error during logic process shutdown: {shutdown_err}", exc_info=True
+        )
+    finally:
+        try:
+            render_data_queue.put(STOP_SENTINEL)
+        except Exception as q_err_final:
+            logger.warning(f"Could not send final STOP sentinel to UI: {q_err_final}")
+        if ray_initialized:
+            logger.info("Shutting down Ray...")
+            try:
+                ray.shutdown()
+            except Exception as ray_down_err:
+                logger.error(f"Error during Ray shutdown: {ray_down_err}")
+        logger.info(
+            f"Logic Process finished. Runtime: {time.time() - logic_start_time:.2f}s"
+        )
+
+
+File: main_pygame.py
+# File: main_pygame.py
+import sys
+import time
+import threading
+import logging
+import logging.handlers
+import argparse
+import os
+import traceback
+import multiprocessing as mp
+from typing import Optional
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
+try:
+    from config import BASE_CHECKPOINT_DIR, set_run_id, get_run_id, get_run_log_dir
+    from training.checkpoint_manager import find_latest_run_and_checkpoint
+    from logger import TeeLogger
+    from ui_process import run_ui_process
+    from logic_process import run_logic_process
+except ImportError as e:
+    print(f"Error importing core modules/functions: {e}\n{traceback.format_exc()}")
     sys.exit(1)
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.INFO, format="[%(levelname)s|%(processName)s] %(message)s"
 )
-# Reduce default logging noise
-logging.getLogger("mcts").setLevel(logging.WARNING)
-logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
-logging.getLogger("workers.training_worker").setLevel(logging.INFO)
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
-logging.getLogger("PIL").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)  # Main app logger
-
-# --- Constants ---
-LOOP_TIMING_INTERVAL = 60
-
-
-class MainApp:
-    """Main application class orchestrating Pygame UI and AlphaZero components."""
-
-    def __init__(self, checkpoint_to_load: Optional[str] = None):
-        # Config Instances
-        self.vis_config = VisConfig()
-        self.env_config = EnvConfig()
-        self.train_config_instance = TrainConfig()
-        self.mcts_config = MCTSConfig()
-
-        # Core Components
-        self.screen: Optional[pygame.Surface] = None
-        self.clock: Optional[pygame.time.Clock] = None
-        self.renderer: Optional[UIRenderer] = None
-        self.input_handler: Optional[InputHandler] = None
-
-        # State
-        self.app_state: AppState = AppState.INITIALIZING
-        self.status: str = "Initializing..."
-        self.running: bool = True
-        self.update_progress_details: Dict[str, Any] = {}
-
-        # Threading & Communication
-        self.stop_event = threading.Event()
-        self.experience_queue: queue.Queue[ProcessedExperienceBatch] = queue.Queue(
-            maxsize=self.train_config_instance.BUFFER_CAPACITY
-        )
-        logger.info(
-            f"Experience Queue Size: {self.train_config_instance.BUFFER_CAPACITY}"
-        )
-
-        # RL Components (Managed by Initializer)
-        self.agent: Optional[AlphaZeroNet] = None
-        self.stats_aggregator: Optional[StatsAggregator] = None
-        self.demo_env: Optional[GameState] = None
-
-        # Helper Classes
-        self.device = get_torch_device()
-        set_device(self.device)
-        self.checkpoint_to_load = checkpoint_to_load
-        self.initializer = AppInitializer(self)
-        self.logic = AppLogic(self)
-        self.worker_manager = AppWorkerManager(self)
-        self.ui_utils = AppUIUtils(self)
-
-        # UI State
-        self.cleanup_confirmation_active: bool = False
-        self.cleanup_message: str = ""
-        self.last_cleanup_message_time: float = 0.0
-        self.total_gpu_memory_bytes: Optional[int] = None
-
-        # Timing
-        self.frame_count = 0
-        self.loop_times = deque(maxlen=LOOP_TIMING_INTERVAL)
-
-    def initialize(self):
-        """Initializes Pygame, directories, configs, and core components."""
-        logger.info("--- Application Initialization ---")
-        self.screen, self.clock = initialize_pygame(self.vis_config)
-        initialize_directories()
-        set_random_seeds(RANDOM_SEED)
-        run_pre_checks()
-
-        self.app_state = AppState.INITIALIZING
-        self.initializer.initialize_all()
-
-        self.agent = self.initializer.agent
-        self.stats_aggregator = self.initializer.stats_aggregator
-        self.demo_env = self.initializer.demo_env
-
-        if self.renderer and self.input_handler:
-            self.renderer.set_input_handler(self.input_handler)
-            if hasattr(self.input_handler, "app_ref"):
-                self.input_handler.app_ref = self
-
-        self.logic.check_initial_completion_status()
-        self.status = "Ready"
-        self.app_state = AppState.MAIN_MENU
-        logger.info("--- Initialization Complete ---")
-
-    def _handle_input(self) -> bool:
-        """Handles user input using the InputHandler."""
-        if self.input_handler:
-            return self.input_handler.handle_input(
-                self.app_state.value, self.cleanup_confirmation_active
-            )
-        else:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.logic.exit_app()
-                    return False
-            return True
-
-    def _update_state(self):
-        """Updates application logic and status."""
-        self.update_progress_details = {}
-        self.logic.update_status_and_check_completion()
-
-        # Update demo env timers if in demo/debug mode
-        if self.app_state in [AppState.PLAYING, AppState.DEBUG] and self.demo_env:
-            try:
-                self.demo_env._update_timers()
-            except Exception as e:
-                logger.error(f"Error updating demo env timers: {e}")
-
-    def _prepare_render_data(self) -> Dict[str, Any]:
-        """Gathers all necessary data for rendering the current frame."""
-        render_data = {
-            "app_state": self.app_state.value,
-            "status": self.status,
-            "cleanup_confirmation_active": self.cleanup_confirmation_active,
-            "cleanup_message": self.cleanup_message,
-            "last_cleanup_message_time": self.last_cleanup_message_time,
-            "update_progress_details": self.update_progress_details,
-            "demo_env": self.demo_env,  # Pass the demo env object itself
-            "env_config": self.env_config,
-            "num_envs": self.train_config_instance.NUM_SELF_PLAY_WORKERS,
-            "plot_data": {},
-            "stats_summary": {},
-            "best_game_state_data": None,
-            "agent_param_count": 0,
-            "worker_counts": {},
-            "is_process_running": False,
-            "worker_render_data": [],
-        }
-
-        if self.stats_aggregator:
-            render_data["plot_data"] = self.stats_aggregator.get_plot_data()
-            current_step = self.stats_aggregator.storage.current_global_step
-            render_data["stats_summary"] = self.stats_aggregator.get_summary(
-                current_step
-            )
-            render_data["best_game_state_data"] = (
-                self.stats_aggregator.get_best_game_state_data()
-            )
-
-        if self.initializer:
-            render_data["agent_param_count"] = self.initializer.agent_param_count
-
-        if self.worker_manager:
-            render_data["worker_counts"] = (
-                self.worker_manager.get_active_worker_counts()
-            )
-            render_data["is_process_running"] = (
-                self.worker_manager.is_any_worker_running()
-            )
-            if (
-                render_data["is_process_running"]
-                and self.app_state == AppState.MAIN_MENU
-            ):
-                num_to_render = self.vis_config.NUM_ENVS_TO_RENDER
-                if num_to_render > 0:
-                    render_data["worker_render_data"] = (
-                        self.worker_manager.get_worker_render_data(num_to_render)
-                    )
-
-        return render_data
-
-    def _render_frame(self, render_data: Dict[str, Any]):
-        """Renders the UI frame using the collected data."""
-        if self.renderer:
-            self.renderer.render_all(**render_data)
-        else:
-            try:
-                self.screen.fill((20, 0, 0))
-                font = pygame.font.Font(None, 30)
-                text_surf = font.render(
-                    "Renderer Initialization Failed!", True, (255, 50, 50)
-                )
-                self.screen.blit(
-                    text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
-                )
-                pygame.display.flip()
-            except Exception:
-                pass
-
-    def _log_loop_timing(self, loop_start_time: float):
-        """Logs average loop time periodically."""
-        self.loop_times.append(time.monotonic() - loop_start_time)
-        self.frame_count += 1
-
-    def run_main_loop(self):
-        """The main application loop."""
-        logger.info("Starting main application loop...")
-        while self.running:
-            loop_start_time = time.monotonic()
-
-            if not self.clock or not self.screen:
-                logger.error("Pygame clock or screen not initialized. Exiting.")
-                break
-
-            dt = self.clock.tick(self.vis_config.FPS) / 1000.0
-
-            self.running = self._handle_input()
-            if not self.running:
-                break
-
-            self._update_state()  # Updates demo timers if needed
-            render_data = self._prepare_render_data()
-            self._render_frame(render_data)
-
-            self._log_loop_timing(loop_start_time)
-
-        logger.info("Main application loop exited.")
-
-    def shutdown(self):
-        """Cleans up resources and exits."""
-        logger.info("Initiating shutdown sequence...")
-        logger.info("Stopping worker threads...")
-        self.worker_manager.stop_all_workers()
-        logger.info("Worker threads stopped.")
-        logger.info("Attempting final checkpoint save...")
-        self.logic.save_final_checkpoint()
-        logger.info("Final checkpoint save attempt finished.")
-        logger.info("Closing stats recorder (before pygame.quit)...")
-        self.initializer.close_stats_recorder()
-        logger.info("Stats recorder closed.")
-        logger.info("Quitting Pygame...")
-        pygame.quit()
-        logger.info("Pygame quit.")
-        logger.info("Shutdown complete.")
-
-
-# --- Main Execution ---
 tee_logger_instance: Optional[TeeLogger] = None
+log_listener_thread: Optional[threading.Thread] = None
+
+
+# --- Logging Setup Functions (remain the same) ---
+def setup_logging_queue_listener(log_queue: mp.Queue):
+    global log_listener_thread
+
+    def listener_process():
+        listener_logger = logging.getLogger("LogListener")
+        listener_logger.info("Log listener started.")
+        while True:
+            try:
+                record = log_queue.get()
+                if record is None:
+                    break
+                logger_handler = logging.getLogger(record.name)
+                logger_handler.handle(record)
+            except (EOFError, OSError):
+                listener_logger.warning("Log queue closed or broken pipe.")
+                break
+            except Exception as e:
+                print(f"Log listener error: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+        listener_logger.info("Log listener stopped.")
+
+    log_listener_thread = threading.Thread(
+        target=listener_process, daemon=True, name="LogListener"
+    )
+    log_listener_thread.start()
+    return log_listener_thread
 
 
 def setup_logging_and_run_id(args: argparse.Namespace):
-    """Sets up logging (including TeeLogger) and determines the run ID."""
     global tee_logger_instance
     run_id_source = "New"
-
     if args.load_checkpoint:
         try:
             run_id_from_path = os.path.basename(os.path.dirname(args.load_checkpoint))
@@ -1651,10 +1802,8 @@ def setup_logging_and_run_id(args: argparse.Namespace):
         else:
             get_run_id()
             run_id_source = f"New (No previous runs found)"
-
     current_run_id = get_run_id()
     print(f"Run ID: {current_run_id} (Source: {run_id_source})")
-
     original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
         log_file_dir = get_run_log_dir()
@@ -1663,42 +1812,43 @@ def setup_logging_and_run_id(args: argparse.Namespace):
         tee_logger_instance = TeeLogger(log_file_path, sys.stdout)
         sys.stdout = tee_logger_instance
         sys.stderr = tee_logger_instance
-        print(f"Console output will be mirrored to: {log_file_path}")
+        print(f"Main process console output will be mirrored to: {log_file_path}")
     except Exception as e:
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         logger.error(f"Error setting up TeeLogger: {e}", exc_info=True)
-
-    # Configure Python's logging system
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
-    # Set default levels for noisy libraries
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("PIL").setLevel(logging.WARNING)
-    # Set default levels for our workers unless overridden by args.log_level
-    if log_level <= logging.INFO:
-        logging.getLogger("mcts").setLevel(logging.WARNING)  # Keep MCTS quieter
-        logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
-        logging.getLogger("workers.training_worker").setLevel(logging.INFO)
-    # If DEBUG is requested, set workers/MCTS to DEBUG too
-    if log_level == logging.DEBUG:
-        logging.getLogger("mcts").setLevel(logging.DEBUG)
-        logging.getLogger("workers.self_play_worker").setLevel(logging.DEBUG)
-        logging.getLogger("workers.training_worker").setLevel(logging.DEBUG)
-
-    logger.info(f"Logging level set to: {args.log_level.upper()}")
+    logger.info(f"Main process logging level set to: {args.log_level.upper()}")
     logger.info(f"Using Run ID: {current_run_id}")
     if args.load_checkpoint:
         logger.info(f"Attempting to load checkpoint: {args.load_checkpoint}")
-
     return original_stdout, original_stderr
 
 
-def cleanup_logging(original_stdout, original_stderr, exit_code):
-    """Restores standard output/error and closes logger."""
+def cleanup_logging(
+    original_stdout, original_stderr, log_queue: Optional[mp.Queue], exit_code
+):
     print("[Main Finally] Restoring stdout/stderr and closing logger...")
-    logger = logging.getLogger(__name__)
-
+    if log_queue:
+        try:
+            log_queue.put(None)
+            log_queue.close()
+            log_queue.join_thread()
+        except Exception as qe:
+            print(f"Error closing log queue: {qe}", file=original_stderr)
+    if log_listener_thread:
+        try:
+            log_listener_thread.join(timeout=2.0)
+            if log_listener_thread.is_alive():
+                print(
+                    "Warning: Log listener thread did not join cleanly.",
+                    file=original_stderr,
+                )
+        except Exception as le:
+            print(f"Error joining log listener thread: {le}", file=original_stderr)
     if tee_logger_instance:
         try:
             if isinstance(sys.stdout, TeeLogger):
@@ -1712,57 +1862,139 @@ def cleanup_logging(original_stdout, original_stderr, exit_code):
         except Exception as log_close_err:
             original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
             traceback.print_exc(file=original_stderr)
-
     print(f"[Main Finally] Exiting with code {exit_code}.")
     sys.exit(exit_code)
 
 
+# =========================================================================
+# Main Execution Block
+# =========================================================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AlphaZero Trainer")
+    mp.freeze_support()
+    try:
+        mp.set_start_method("spawn", force=True)
+        print("Multiprocessing start method set to 'spawn'.")
+    except RuntimeError:
+        print("Could not set start method to 'spawn', using default.")
+
+    parser = argparse.ArgumentParser(description="AlphaZero Trainer - Multiprocess")
     parser.add_argument(
-        "--load-checkpoint",
-        type=str,
-        default=None,
-        help="Path to a specific checkpoint file (.pth) to load.",
+        "--load-checkpoint", type=str, default=None, help="Path to checkpoint."
     )
     parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level.",
+        help="Logging level.",
     )
     args = parser.parse_args()
 
     original_stdout, original_stderr = setup_logging_and_run_id(args)
 
-    app = None
+    ui_to_logic_queue = mp.Queue()
+    logic_to_ui_queue = mp.Queue(maxsize=10)
+    stop_event = mp.Event()
+    log_queue = mp.Queue()
+    log_listener = setup_logging_queue_listener(log_queue)
+
+    # Set daemon=True for simpler exit handling, rely on stop_event and timeouts
+    ui_process = mp.Process(
+        target=run_ui_process,
+        args=(stop_event, ui_to_logic_queue, logic_to_ui_queue, log_queue),
+        name="UIProcess",
+        daemon=True,
+    )
+    logic_process = mp.Process(
+        target=run_logic_process,
+        args=(
+            stop_event,
+            ui_to_logic_queue,
+            logic_to_ui_queue,
+            args.load_checkpoint,
+            log_queue,
+        ),
+        name="LogicProcess",
+        daemon=True,
+    )
+
     exit_code = 0
     try:
-        app = MainApp(checkpoint_to_load=args.load_checkpoint)
-        app.initialize()
-        app.run_main_loop()
+        logger.info("Starting UI process...")
+        ui_process.start()
+        logger.info("Starting Logic process...")
+        logic_process.start()
 
-    except KeyboardInterrupt:
-        logger.warning("KeyboardInterrupt received. Shutting down gracefully...")
-        if app:
-            app.logic.exit_app()
-        else:
-            pygame.quit()
-        exit_code = 130
+        # --- Wait for Processes ---
+        while True:  # Loop indefinitely until stop_event or error
+            if stop_event.is_set():
+                logger.info("Stop event detected by main process. Exiting wait loop.")
+                break
+            if not logic_process.is_alive():
+                logger.warning("Logic process terminated unexpectedly. Signaling stop.")
+                stop_event.set()
+                exit_code = 1  # Indicate error
+                break
+            if not ui_process.is_alive():
+                logger.warning("UI process terminated unexpectedly. Signaling stop.")
+                stop_event.set()
+                exit_code = 1  # Indicate error
+                break
+            try:
+                # Sleep briefly to prevent busy-waiting
+                time.sleep(0.2)
+            except KeyboardInterrupt:
+                logger.warning(
+                    "Main process received KeyboardInterrupt. Signaling stop..."
+                )
+                stop_event.set()
+                exit_code = 130
+                break  # Exit the waiting loop
 
-    except Exception as e:
-        logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
-        if app:
-            app.logic.exit_app()
-        else:
-            pygame.quit()
+    except Exception as main_err:
+        logger.critical(
+            f"Error in main process coordination: {main_err}", exc_info=True
+        )
+        stop_event.set()
         exit_code = 1
 
     finally:
-        if app:
-            app.shutdown()
-        cleanup_logging(original_stdout, original_stderr, exit_code)
+        logger.info("Main process initiating cleanup...")
+        if not stop_event.is_set():
+            stop_event.set()  # Ensure stop is signaled
+
+        time.sleep(0.5)  # Allow processes to potentially react
+
+        # --- Join Processes with Timeouts ---
+        join_timeout_logic = 10.0  # More time for logic to save
+        join_timeout_ui = 3.0
+
+        logger.info(
+            f"Waiting for Logic process to join (timeout: {join_timeout_logic}s)..."
+        )
+        if logic_process.is_alive():
+            logic_process.join(timeout=join_timeout_logic)
+        if logic_process.is_alive():
+            logger.warning("Logic process did not join cleanly. Terminating.")
+            try:
+                logic_process.terminate()
+                logic_process.join(1.0)
+            except Exception as term_err:
+                logger.error(f"Error terminating Logic process: {term_err}")
+
+        logger.info(f"Waiting for UI process to join (timeout: {join_timeout_ui}s)...")
+        if ui_process.is_alive():
+            ui_process.join(timeout=join_timeout_ui)
+        if ui_process.is_alive():
+            logger.warning("UI process did not join cleanly. Terminating.")
+            try:
+                ui_process.terminate()
+                ui_process.join(1.0)
+            except Exception as term_err:
+                logger.error(f"Error terminating UI process: {term_err}")
+
+        logger.info("Processes joined or terminated.")
+        cleanup_logging(original_stdout, original_stderr, log_queue, exit_code)
 
 
 File: out.md
@@ -1818,41 +2050,52 @@ import traceback
 import sys
 import torch
 import torch.optim as optim
-from torch.optim.lr_scheduler import CosineAnnealingLR  # Import scheduler
-from typing import TYPE_CHECKING, List, Optional
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from typing import TYPE_CHECKING, List, Optional, Any
+import multiprocessing as mp
+import ray
+from ray.util.queue import Queue as RayQueue
+import logging  # Added logging
 
 from config import (
     ModelConfig,
     StatsConfig,
     DemoConfig,
     MCTSConfig,
+    EnvConfig,
+    TrainConfig,
     BASE_CHECKPOINT_DIR,
     get_run_checkpoint_dir,
 )
 from environment.game_state import GameState
 from stats.stats_recorder import StatsRecorderBase
-from stats.aggregator import StatsAggregator
+from stats.aggregator import StatsAggregatorActor  # Import Actor
 from stats.simple_stats_recorder import SimpleStatsRecorder
-from ui.renderer import UIRenderer
-from ui.input_handler import InputHandler
+
 from training.checkpoint_manager import CheckpointManager
 from app_state import AppState
 from mcts import MCTS
-from agent.alphazero_net import AlphaZeroNet
-from workers.self_play_worker import SelfPlayWorker
-from workers.training_worker import TrainingWorker
+from agent.alphazero_net import AlphaZeroNet, AgentPredictor
+
+# Workers managed by AppWorkerManager
 
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    LogicAppState = Any
     from torch.optim.lr_scheduler import _LRScheduler
+
+    AgentPredictorHandle = ray.actor.ActorHandle
+    SelfPlayWorkerHandle = ray.actor.ActorHandle
+    TrainingWorkerHandle = ray.actor.ActorHandle
+    StatsAggregatorHandle = ray.actor.ActorHandle  # Use Actor Handle type
+
+logger = logging.getLogger(__name__)  # Added logger
 
 
 class AppInitializer:
-    """Handles the initialization of core application components."""
+    """Handles the initialization of core RL application components in the Logic Process."""
 
-    def __init__(self, app: "MainApp"):
+    def __init__(self, app: "LogicAppState"):
         self.app = app
-        # Config instances
         self.vis_config = app.vis_config
         self.env_config = app.env_config
         self.train_config = app.train_config_instance
@@ -1860,40 +2103,78 @@ class AppInitializer:
         self.stats_config = StatsConfig()
         self.demo_config = DemoConfig()
         self.mcts_config = MCTSConfig()
+        self.worker_stop_event: mp.Event = app.worker_stop_event
 
         # Components to be initialized
         self.agent: Optional[AlphaZeroNet] = None
+        self.agent_predictor: Optional["AgentPredictorHandle"] = None
         self.optimizer: Optional[optim.Optimizer] = None
-        self.scheduler: Optional["_LRScheduler"] = None  # Add scheduler attribute
+        self.scheduler: Optional["_LRScheduler"] = None
         self.stats_recorder: Optional[StatsRecorderBase] = None
-        self.stats_aggregator: Optional[StatsAggregator] = None
+        self.stats_aggregator: Optional["StatsAggregatorHandle"] = (
+            None  # Now an Actor Handle
+        )
         self.demo_env: Optional[GameState] = None
         self.agent_param_count: int = 0
         self.checkpoint_manager: Optional[CheckpointManager] = None
-        self.mcts: Optional[MCTS] = None
-        self.self_play_workers: List[SelfPlayWorker] = []
-        self.training_worker: Optional[TrainingWorker] = None
+        # MCTS instance not central anymore
 
-    def initialize_all(self, is_reinit: bool = False):
-        """Initializes all core components."""
+    def initialize_logic_components(self):
+        """Initializes only the RL and logic-related components, including Ray actors."""
         try:
             self._check_gpu_memory()
-            if not is_reinit:
-                self._initialize_ui_early()
-
+            self._init_ray_actors()  # Initialize actors first
             self.initialize_rl_components(
-                is_reinit=is_reinit, checkpoint_to_load=self.app.checkpoint_to_load
+                is_reinit=False,
+                checkpoint_to_load=self.app.checkpoint_to_load,
             )
-
-            if not is_reinit:
-                self.initialize_demo_env()
-                self.initialize_input_handler()
-
+            self.initialize_demo_env()
             self._calculate_agent_params()
-            self.initialize_workers()  # Workers now need the scheduler
+            self.app.worker_manager.initialize_actors()  # Initialize worker actors
 
         except Exception as init_err:
             self._handle_init_error(init_err)
+
+    def _init_ray_actors(self):
+        """Initializes core Ray actors like AgentPredictor and StatsAggregatorActor."""
+        logger.info("[AppInitializer] Initializing Ray Actors...")
+        # --- Agent Predictor Actor ---
+        try:
+            self.agent_predictor = AgentPredictor.options(
+                name="AgentPredictorActor",  # Optional: give it a name
+                lifetime="detached",  # Optional: keep actor alive if main script exits abnormally
+            ).remote(
+                env_config=self.env_config, model_config=self.model_config.Network()
+            )
+            ray.get(self.agent_predictor.health_check.remote())  # Wait for actor
+            logger.info("[AppInitializer] AgentPredictor actor created.")
+            self.app.agent_predictor = self.agent_predictor
+        except Exception as e:
+            logger.error(
+                f"[AppInitializer] Failed to create AgentPredictor actor: {e}",
+                exc_info=True,
+            )
+            raise RuntimeError("AgentPredictor actor initialization failed") from e
+
+        # --- Stats Aggregator Actor ---
+        try:
+            self.stats_aggregator = StatsAggregatorActor.options(
+                name="StatsAggregatorActor", lifetime="detached"
+            ).remote(
+                avg_windows=self.stats_config.STATS_AVG_WINDOW,
+                plot_window=self.stats_config.PLOT_DATA_WINDOW,
+            )
+            ray.get(self.stats_aggregator.health_check.remote())  # Wait for actor
+            logger.info("[AppInitializer] StatsAggregatorActor created.")
+            self.app.stats_aggregator = self.stats_aggregator  # Store actor handle
+        except Exception as e:
+            logger.error(
+                f"[AppInitializer] Failed to create StatsAggregator actor: {e}",
+                exc_info=True,
+            )
+            raise RuntimeError("StatsAggregator actor initialization failed") from e
+
+        logger.info("[AppInitializer] Ray Actors initialized.")
 
     def _check_gpu_memory(self):
         """Checks and prints total GPU memory if available."""
@@ -1905,98 +2186,79 @@ class AppInitializer:
             except Exception as e:
                 print(f"Warning: Could not get total GPU memory: {e}")
 
-    def _initialize_ui_early(self):
-        """Initializes the renderer and performs an initial render."""
-        self.app.renderer = UIRenderer(self.app.screen, self.vis_config)
-        self.app.renderer.render_all(
-            app_state=self.app.app_state.value,
-            is_process_running=False,
-            status=self.app.status,
-            stats_summary={},
-            envs=[],
-            num_envs=0,
-            env_config=self.env_config,
-            cleanup_confirmation_active=False,
-            cleanup_message="",
-            last_cleanup_message_time=0,
-            plot_data={},
-            demo_env=None,
-            update_progress_details={},
-            agent_param_count=0,
-            worker_counts={},
-            best_game_state_data=None,
-        )
-        pygame.display.flip()
-        pygame.time.delay(100)  # Allow UI to update
-
     def _calculate_agent_params(self):
-        """Calculates the number of trainable parameters in the agent."""
-        if self.agent:
+        """Calculates agent parameters by calling the AgentPredictor actor."""
+        if self.agent_predictor:
             try:
-                self.agent_param_count = sum(
-                    p.numel() for p in self.agent.parameters() if p.requires_grad
+                param_count_ref = self.agent_predictor.get_param_count.remote()
+                self.agent_param_count = ray.get(param_count_ref)
+                logger.info(
+                    f"[AppInitializer] Agent Parameters: {self.agent_param_count:,}"
                 )
             except Exception as e:
-                print(f"Warning: Could not calculate agent parameters: {e}")
+                logger.error(f"Warning: Could not get agent parameters from actor: {e}")
                 self.agent_param_count = 0
+        else:
+            logger.warning("AgentPredictor actor not available for param count.")
+            self.agent_param_count = 0
 
     def _handle_init_error(self, error: Exception):
-        """Handles fatal errors during initialization."""
+        """Handles fatal errors during component initialization."""
         print(f"FATAL ERROR during component initialization: {error}")
         traceback.print_exc()
-        if self.app.renderer:
-            try:
-                self.app.app_state = AppState.ERROR
-                self.app.status = "Initialization Failed"
-                self.app.renderer._render_error_screen(self.app.status)
-                pygame.display.flip()
-                time.sleep(5)
-            except Exception:
-                pass
-        pygame.quit()
-        sys.exit(1)
+        self.app.set_state(AppState.ERROR)
+        self.app.set_status(f"Logic Init Failed: {error}")
+        self.app.stop_event.set()
 
     def initialize_rl_components(
         self, is_reinit: bool = False, checkpoint_to_load: Optional[str] = None
     ):
-        """Initializes NN Agent, Optimizer, Scheduler, MCTS, Stats, Checkpoint Manager."""
+        """Initializes local NN Agent (for checkpointing), Optimizer, Scheduler, StatsRecorder, Checkpoint Manager."""
         print(f"Initializing AlphaZero components... Re-init: {is_reinit}")
         start_time = time.time()
         try:
-            self._init_agent()
-            self._init_optimizer_and_scheduler()  # Renamed method
-            self._init_mcts()
-            self._init_stats()
+            self._init_local_agent_for_checkpointing()
+            self._init_optimizer_and_scheduler()
+            self._init_stats_recorder()  # Uses stats_aggregator handle now
             self._init_checkpoint_manager(
                 checkpoint_to_load
-            )  # Checkpoint manager needs scheduler now
+            )  # Interacts with stats_aggregator handle
+
             print(
                 f"AlphaZero components initialized in {time.time() - start_time:.2f}s"
             )
+            self.app.optimizer = self.optimizer
+            self.app.scheduler = self.scheduler
+            self.app.stats_recorder = self.stats_recorder
+            self.app.checkpoint_manager = self.checkpoint_manager
+
         except Exception as e:
             print(f"Error during AlphaZero component initialization: {e}")
             traceback.print_exc()
             raise e
 
-    def _init_agent(self):
+    def _init_local_agent_for_checkpointing(self):
+        """Initializes a local copy of the agent for saving/loading checkpoints."""
         self.agent = AlphaZeroNet(
             env_config=self.env_config, model_config=self.model_config.Network()
         ).to(self.app.device)
-        print(f"AlphaZeroNet initialized on device: {self.app.device}.")
+        print(
+            f"Local AlphaZeroNet (for checkpointing) initialized on device: {self.app.device}."
+        )
 
     def _init_optimizer_and_scheduler(self):
-        """Initializes the optimizer and the learning rate scheduler."""
+        """Initializes the optimizer and scheduler using the local agent copy."""
         if not self.agent:
-            raise RuntimeError("Agent must be initialized before Optimizer.")
-        # Initialize Optimizer
+            raise RuntimeError("Local Agent must be initialized before Optimizer.")
         self.optimizer = optim.Adam(
             self.agent.parameters(),
             lr=self.train_config.LEARNING_RATE,
             weight_decay=self.train_config.WEIGHT_DECAY,
         )
-        print(f"Optimizer initialized (Adam, LR={self.train_config.LEARNING_RATE}).")
+        print(
+            f"Optimizer initialized (Adam, LR={self.train_config.LEARNING_RATE}) for local agent."
+        )
 
-        # Initialize Scheduler (if enabled)
         if self.train_config.USE_LR_SCHEDULER:
             if self.train_config.SCHEDULER_TYPE == "CosineAnnealingLR":
                 self.scheduler = CosineAnnealingLR(
@@ -2007,9 +2269,6 @@ class AppInitializer:
                 print(
                     f"LR Scheduler initialized (CosineAnnealingLR, T_max={self.train_config.SCHEDULER_T_MAX}, eta_min={self.train_config.SCHEDULER_ETA_MIN})."
                 )
-            # Add other scheduler types here if needed
-            # elif self.train_config.SCHEDULER_TYPE == "OneCycleLR":
-            #     self.scheduler = OneCycleLR(...)
             else:
                 print(
                     f"Warning: Unknown scheduler type '{self.train_config.SCHEDULER_TYPE}'. No scheduler initialized."
@@ -2019,150 +2278,91 @@ class AppInitializer:
             print("LR Scheduler is DISABLED.")
             self.scheduler = None
 
-    def _init_mcts(self):
-        if not self.agent:
-            raise RuntimeError("Agent must be initialized before MCTS.")
-        self.mcts = MCTS(
-            network_predictor=self.agent.predict,
-            config=self.mcts_config,
-            env_config=self.env_config,
-        )
-        print("MCTS initialized with AlphaZeroNet predictor.")
-
-    def _init_stats(self):
-        print("Initializing StatsAggregator and SimpleStatsRecorder...")
-        self.stats_aggregator = StatsAggregator(
-            avg_windows=self.stats_config.STATS_AVG_WINDOW,
-            plot_window=self.stats_config.PLOT_DATA_WINDOW,
-        )
+    def _init_stats_recorder(self):
+        """Initializes the local StatsRecorder, passing the StatsAggregatorActor handle."""
+        if not self.stats_aggregator:  # Check if handle exists
+            raise RuntimeError(
+                "StatsAggregatorActor handle must be initialized before StatsRecorder."
+            )
+        print("Initializing SimpleStatsRecorder...")
         self.stats_recorder = SimpleStatsRecorder(
-            aggregator=self.stats_aggregator,
+            aggregator=self.stats_aggregator,  # Pass actor handle
             console_log_interval=self.stats_config.CONSOLE_LOG_FREQ,
             train_config=self.train_config,
         )
-        print("StatsAggregator and SimpleStatsRecorder initialized.")
+        print("SimpleStatsRecorder initialized.")
 
     def _init_checkpoint_manager(self, checkpoint_to_load: Optional[str]):
+        """Initializes the CheckpointManager using local agent/optimizer and StatsAggregatorActor handle."""
         if not self.agent or not self.optimizer or not self.stats_aggregator:
             raise RuntimeError(
-                "Agent, Optimizer, StatsAggregator needed for CheckpointManager."
+                "Local Agent, Optimizer, and StatsAggregatorActor handle needed for CheckpointManager."
             )
-        # Pass the scheduler to the CheckpointManager
         self.checkpoint_manager = CheckpointManager(
             agent=self.agent,
             optimizer=self.optimizer,
-            scheduler=self.scheduler,  # Pass scheduler
-            stats_aggregator=self.stats_aggregator,
+            scheduler=self.scheduler,
+            stats_aggregator=self.stats_aggregator,  # Pass actor handle
             base_checkpoint_dir=BASE_CHECKPOINT_DIR,
             run_checkpoint_dir=get_run_checkpoint_dir(),
             load_checkpoint_path_config=checkpoint_to_load,
             device=self.app.device,
         )
         if self.checkpoint_manager.get_checkpoint_path_to_load():
+            # Load checkpoint into local agent/optimizer/scheduler
+            # CheckpointManager's load_checkpoint method now handles loading stats into the actor
             self.checkpoint_manager.load_checkpoint()
-
-    def initialize_workers(self):
-        """Initializes worker threads (Self-Play, Training). Does NOT start them."""
-        print("Initializing worker threads...")
-        if (
-            not self.agent
-            or not self.mcts
-            or not self.stats_aggregator
-            or not self.optimizer
-            # Scheduler is optional, so don't check it here
-        ):
-            print("ERROR: Cannot initialize workers, core RL components missing.")
-            return
-
-        self._init_self_play_workers()
-        self._init_training_worker()  # Training worker needs scheduler
-        num_sp = len(self.self_play_workers)
-        print(f"Worker threads initialized ({num_sp} Self-Play, 1 Training).")
-
-    def _init_self_play_workers(self):
-        self.self_play_workers = []
-        num_sp_workers = self.train_config.NUM_SELF_PLAY_WORKERS
-        print(f"Initializing {num_sp_workers} SelfPlayWorker(s)...")
-        for i in range(num_sp_workers):
-            worker = SelfPlayWorker(
-                worker_id=i,
-                agent=self.agent,
-                mcts=self.mcts,
-                experience_queue=self.app.experience_queue,
-                stats_aggregator=self.stats_aggregator,
-                stop_event=self.app.stop_event,
-                env_config=self.env_config,
-                mcts_config=self.mcts_config,
-                device=self.app.device,
-            )
-            self.self_play_workers.append(worker)
-            print(f"  SelfPlayWorker-{i} initialized.")
-
-    def _init_training_worker(self):
-        # Pass the scheduler to the TrainingWorker
-        self.training_worker = TrainingWorker(
-            agent=self.agent,
-            optimizer=self.optimizer,
-            scheduler=self.scheduler,  # Pass scheduler
-            experience_queue=self.app.experience_queue,
-            stats_aggregator=self.stats_aggregator,
-            stop_event=self.app.stop_event,
-            train_config=self.train_config,
-            device=self.app.device,
-        )
-        print("TrainingWorker initialized.")
+            # Push loaded weights to the AgentPredictor actor
+            if self.agent_predictor:
+                try:
+                    loaded_weights = self.agent.state_dict()
+                    set_ref = self.agent_predictor.set_weights.remote(loaded_weights)
+                    ray.get(set_ref)
+                    logger.info(
+                        "[AppInitializer] Pushed loaded checkpoint weights to AgentPredictor actor."
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to push loaded weights to AgentPredictor: {e}"
+                    )
+            # Update App state based on loaded checkpoint AFTER loading
+            # Get step count from the aggregator actor
+            if self.stats_aggregator:
+                try:
+                    step_ref = self.stats_aggregator.get_current_global_step.remote()
+                    self.app.current_global_step = ray.get(step_ref)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to get global step from StatsAggregator actor: {e}"
+                    )
+                    self.app.current_global_step = 0  # Fallback
+            else:
+                self.app.current_global_step = 0
 
     def initialize_demo_env(self):
-        """Initializes the separate environment for demo/debug mode."""
-        print("Initializing Demo/Debug Environment...")
+        """Initializes the separate environment for demo/debug if needed by logic."""
+        print("Initializing Demo/Debug Environment (in Logic Process)...")
         try:
             self.demo_env = GameState()
             self.demo_env.reset()
             print("Demo/Debug environment initialized.")
+            self.app.demo_env = self.demo_env
         except Exception as e:
             print(f"ERROR initializing demo/debug environment: {e}")
             traceback.print_exc()
             self.demo_env = None
-
-    def initialize_input_handler(self):
-        """Initializes the Input Handler."""
-        if not self.app.renderer:
-            print("ERROR: Cannot initialize InputHandler before Renderer.")
-            return
-        self.app.input_handler = InputHandler(
-            screen=self.app.screen,
-            renderer=self.app.renderer,
-            request_cleanup_cb=self.app.logic.request_cleanup,
-            cancel_cleanup_cb=self.app.logic.cancel_cleanup,
-            confirm_cleanup_cb=self.app.logic.confirm_cleanup,
-            exit_app_cb=self.app.logic.exit_app,
-            start_demo_mode_cb=self.app.logic.start_demo_mode,
-            exit_demo_mode_cb=self.app.logic.exit_demo_mode,
-            handle_demo_mouse_motion_cb=self.app.logic.handle_demo_mouse_motion,
-            handle_demo_mouse_button_down_cb=self.app.logic.handle_demo_mouse_button_down,
-            start_debug_mode_cb=self.app.logic.start_debug_mode,
-            exit_debug_mode_cb=self.app.logic.exit_debug_mode,
-            handle_debug_input_cb=self.app.logic.handle_debug_input,
-            start_run_cb=self.app.logic.start_run,
-            stop_run_cb=self.app.logic.stop_run,
-        )
-        if self.app.input_handler:
-            self.app.input_handler.app_ref = self.app
-        if self.app.renderer and self.app.renderer.left_panel:
-            self.app.renderer.left_panel.input_handler = self.app.input_handler
-            if hasattr(self.app.renderer.left_panel, "button_status_renderer"):
-                btn_renderer = self.app.renderer.left_panel.button_status_renderer
-                btn_renderer.input_handler_ref = self.app.input_handler
-                btn_renderer.app_ref = self.app
+            self.app.demo_env = None
 
     def close_stats_recorder(self, is_cleanup: bool = False):
         """Safely closes the stats recorder (if it exists)."""
         print(
             f"[AppInitializer] close_stats_recorder called (is_cleanup={is_cleanup})..."
         )
+        # StatsAggregator is now an actor, termination handled elsewhere (e.g., AppWorkerManager or main shutdown)
         if self.stats_recorder and hasattr(self.stats_recorder, "close"):
             print("[AppInitializer] Stats recorder exists, attempting close...")
             try:
+                # Recorder might need to make final calls to the aggregator actor before closing
                 self.stats_recorder.close(is_cleanup=is_cleanup)
                 print("[AppInitializer] stats_recorder.close() executed.")
             except Exception as log_e:
@@ -2179,100 +2379,111 @@ import time
 import traceback
 import os
 import shutil
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Tuple, Dict, Any, Optional
+import logging
+import ray  # Added Ray
 
 from app_state import AppState
-from config.general import get_run_checkpoint_dir 
+from config.general import get_run_checkpoint_dir
 
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    LogicAppState = Any
+    StatsAggregatorHandle = ray.actor.ActorHandle  # Type hint
+
+logger = logging.getLogger(__name__)
 
 
 class AppLogic:
-    """Handles the core application logic and state transitions."""
+    """Handles the core application logic and state transitions within the Logic Process."""
 
-    def __init__(self, app: "MainApp"):
+    def __init__(self, app: "LogicAppState"):
         self.app = app
 
     def check_initial_completion_status(self):
-        """Checks if training target was met upon loading (placeholder)."""
-        pass 
+        pass
 
     def update_status_and_check_completion(self):
-        """Updates the status text based on application state."""
         is_running = self.app.worker_manager.is_any_worker_running()
         state = self.app.app_state
+        new_status = self.app.status
+
         if state == AppState.MAIN_MENU:
-            self.app.status = (
+            new_status = (
                 "Confirm Cleanup"
                 if self.app.cleanup_confirmation_active
                 else "Running AlphaZero" if is_running else "Ready"
             )
         elif state == AppState.PLAYING:
-            self.app.status = "Playing Demo"
+            new_status = "Playing Demo"
         elif state == AppState.DEBUG:
-            self.app.status = "Debugging Grid"
+            new_status = "Debugging Grid"
         elif state == AppState.INITIALIZING:
-            self.app.status = "Initializing..."
+            new_status = "Initializing..."
+        elif state == AppState.ERROR:
+            new_status = self.app.status
+        elif state == AppState.CLEANING:
+            new_status = "Cleaning"
 
-    # --- Worker Control ---
+        if new_status != self.app.status:
+            self.app.set_status(new_status)
+
     def start_run(self):
-        """Starts both self-play and training workers."""
         if (
             self.app.app_state != AppState.MAIN_MENU
             or self.app.worker_manager.is_any_worker_running()
         ):
-            print("Cannot start run: Not in Main Menu or already running.")
+            logger.warning(
+                "[AppLogic] Cannot start run: Not in Main Menu or already running."
+            )
             return
-        print("Starting AlphaZero Run (Self-Play & Training)...")
-        self.app.worker_manager.start_all_workers()
+        logger.info("[AppLogic] Starting AlphaZero Run (Self-Play & Training)...")
+        self.app.worker_manager.start_all_workers()  # Starts actor loops
         self.update_status_and_check_completion()
 
     def stop_run(self):
-        """Stops both self-play and training workers."""
         if not self.app.worker_manager.is_any_worker_running():
-            print("Run not currently active.")
+            logger.info("[AppLogic] Run not currently active.")
             return
-        print("Stopping AlphaZero Run...")
-        self.app.worker_manager.stop_all_workers()
+        logger.info("[AppLogic] Stop Run command received. Initiating worker stop...")
+        self.app.worker_manager.stop_all_workers()  # Stops actors
         self.update_status_and_check_completion()
 
-    # --- Mode Transitions & Cleanup ---
     def request_cleanup(self):
         if self.app.app_state != AppState.MAIN_MENU:
             return
         if self.app.worker_manager.is_any_worker_running():
             self._set_temp_message("Stop Run before Cleanup!")
             return
-        self.app.cleanup_confirmation_active = True
-        self.app.status = "Confirm Cleanup"
-        print("Cleanup requested. Confirm action.")
+        self.app.set_cleanup_confirmation(True)
+        self.update_status_and_check_completion()
+        logger.info("[AppLogic] Cleanup requested. Confirm action.")
 
     def start_demo_mode(self):
         if self._can_start_mode("Demo"):
-            print("Entering Demo Mode...")
+            logger.info("[AppLogic] Entering Demo Mode...")
             self.try_save_checkpoint()
-            self.app.app_state = AppState.PLAYING
-            self.app.status = "Playing Demo"
+            self.app.set_state(AppState.PLAYING)
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
+            self.update_status_and_check_completion()
 
     def start_debug_mode(self):
         if self._can_start_mode("Debug"):
-            print("Entering Debug Mode...")
+            logger.info("[AppLogic] Entering Debug Mode...")
             self.try_save_checkpoint()
-            self.app.app_state = AppState.DEBUG
-            self.app.status = "Debugging Grid"
+            self.app.set_state(AppState.DEBUG)
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
+            self.update_status_and_check_completion()
 
     def _can_start_mode(self, mode_name: str) -> bool:
-        """Checks if demo/debug mode can be started."""
         if self.app.initializer.demo_env is None:
-            print(f"Cannot start {mode_name}: Env not initialized.")
+            logger.warning(f"[AppLogic] Cannot start {mode_name}: Env not initialized.")
             return False
         if self.app.app_state != AppState.MAIN_MENU:
-            print(f"Cannot start {mode_name} mode outside MainMenu.")
+            logger.warning(
+                f"[AppLogic] Cannot start {mode_name} mode outside MainMenu."
+            )
             return False
         if self.app.worker_manager.is_any_worker_running():
             self._set_temp_message(f"Stop Run before {mode_name}!")
@@ -2281,184 +2492,152 @@ class AppLogic:
 
     def exit_demo_mode(self):
         if self.app.app_state == AppState.PLAYING:
-            print("Exiting Demo Mode...")
-            if self.app.initializer.demo_env:
-                self.app.initializer.demo_env.deselect_dragged_shape()
+            logger.info("[AppLogic] Exiting Demo Mode...")
             self._return_to_main_menu()
 
     def exit_debug_mode(self):
         if self.app.app_state == AppState.DEBUG:
-            print("Exiting Debug Mode...")
+            logger.info("[AppLogic] Exiting Debug Mode...")
             self._return_to_main_menu()
 
     def _return_to_main_menu(self):
-        """Helper to transition back to the main menu state."""
-        self.app.app_state = AppState.MAIN_MENU
+        self.app.set_state(AppState.MAIN_MENU)
         self.check_initial_completion_status()
         self.update_status_and_check_completion()
 
     def cancel_cleanup(self):
-        self.app.cleanup_confirmation_active = False
+        self.app.set_cleanup_confirmation(False)
         self._set_temp_message("Cleanup cancelled.")
         self.update_status_and_check_completion()
-        print("Cleanup cancelled by user.")
+        logger.info("[AppLogic] Cleanup cancelled by user.")
 
     def confirm_cleanup(self):
-        print("Cleanup confirmed by user. Starting process...")
+        logger.info("[AppLogic] Cleanup confirmed by user. Starting process...")
         try:
             self._cleanup_data()
         except Exception as e:
-            print(f"FATAL ERROR during cleanup: {e}")
-            traceback.print_exc()
-            self.app.status = "Error: Cleanup Failed Critically"
-            self.app.app_state = AppState.ERROR
+            logger.error(f"[AppLogic] FATAL ERROR during cleanup: {e}", exc_info=True)
+            self.app.set_status("Error: Cleanup Failed Critically")
+            self.app.set_state(AppState.ERROR)
         finally:
-            self.app.cleanup_confirmation_active = False
-            print(
-                f"Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
+            self.app.set_cleanup_confirmation(False)
+            logger.info(
+                f"[AppLogic] Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
             )
 
-    def exit_app(self) -> bool:
-        print("Exit requested.")
-        self.app.stop_event.set()
-        self.app.worker_manager.stop_all_workers()
-        return False  # Signal main loop to stop
-
-    # --- Input Handling Callbacks ---
-    def handle_demo_mouse_motion(self, mouse_pos: Tuple[int, int]):
-        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
+    def handle_demo_mouse_motion(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.PLAYING
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
+        grid_coords = payload.get("pos")
         demo_env = self.app.initializer.demo_env
         if demo_env.is_frozen() or demo_env.is_over():
             return
         if demo_env.demo_dragged_shape_idx is None:
             return
-        grid_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
         demo_env.update_snapped_position(grid_coords)
 
-    def handle_demo_mouse_button_down(self, event: pygame.event.Event):
-        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
+    def handle_demo_mouse_button_down(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.PLAYING
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
         demo_env = self.app.initializer.demo_env
-        if demo_env.is_frozen() or demo_env.is_over() or event.button != 1:
+        if demo_env.is_frozen() or demo_env.is_over():
             return
-
-        mouse_pos = event.pos
-        clicked_preview = self.app.ui_utils.map_screen_to_preview(mouse_pos)
-        if clicked_preview is not None:
-            action = (
-                demo_env.deselect_dragged_shape
-                if clicked_preview == demo_env.demo_dragged_shape_idx
-                else lambda: demo_env.select_shape_for_drag(clicked_preview)
-            )
-            action()
-            return
-
-        grid_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
-        if (
-            grid_coords is not None
-            and demo_env.demo_dragged_shape_idx is not None
-            and demo_env.demo_snapped_position == grid_coords
-        ):
-            placed = demo_env.place_dragged_shape()
-            if placed and demo_env.is_over():
-                print("[Demo] Game Over! Press ESC to exit.")
-        else:
+        click_type = payload.get("type")
+        if click_type == "preview":
+            clicked_preview = payload.get("index")
+            if clicked_preview is not None:
+                action = (
+                    demo_env.deselect_dragged_shape
+                    if clicked_preview == demo_env.demo_dragged_shape_idx
+                    else lambda: demo_env.select_shape_for_drag(clicked_preview)
+                )
+                action()
+        elif click_type == "grid":
+            grid_coords = payload.get("grid_coords")
+            if (
+                grid_coords is not None
+                and demo_env.demo_dragged_shape_idx is not None
+                and demo_env.demo_snapped_position == grid_coords
+            ):
+                placed = demo_env.place_dragged_shape()
+                if placed and demo_env.is_over():
+                    logger.info("[Demo] Game Over! (UI handles exit prompt)")
+            else:
+                demo_env.deselect_dragged_shape()
+        elif click_type == "outside":
             demo_env.deselect_dragged_shape()
 
-    def handle_debug_input(self, event: pygame.event.Event):
-        if self.app.app_state != AppState.DEBUG or not self.app.initializer.demo_env:
+    def handle_debug_input(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.DEBUG
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
         demo_env = self.app.initializer.demo_env
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-            print("[Debug] Resetting grid...")
+        input_type = payload.get("type")
+        if input_type == "reset":
+            logger.info("[Debug] Resetting grid...")
             demo_env.reset()
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            clicked_coords = self.app.ui_utils.map_screen_to_grid(event.pos)
+        elif input_type == "toggle_triangle":
+            clicked_coords = payload.get("grid_coords")
             if clicked_coords:
                 demo_env.toggle_triangle_debug(*clicked_coords)
 
-    # --- Internal Helpers ---
     def _set_temp_message(self, message: str):
-        """Sets a temporary message to be displayed."""
-        self.app.cleanup_message = message
-        self.app.last_cleanup_message_time = time.time()
+        self.app.set_cleanup_message(message, time.time())
 
     def _cleanup_data(self):
-        """Deletes current run's checkpoint and re-initializes components."""
-        print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
-        self.app.app_state = AppState.INITIALIZING
-        self.app.status = "Cleaning"
+        logger.info("\n[AppLogic] --- CLEANUP DATA INITIATED (Current Run Only) ---")
+        self.app.set_state(AppState.CLEANING)
+        self.app.set_status("Cleaning")
         messages = []
-        self._render_during_cleanup()
-
-        print("[Cleanup] Stopping existing worker threads (if any)...")
-        self.app.worker_manager.stop_all_workers()
-        print("[Cleanup] Existing worker threads stopped.")
-        print("[Cleanup] Closing stats recorder...")
+        logger.info("[AppLogic Cleanup] Stopping existing worker actors (if any)...")
+        self.app.worker_manager.stop_all_workers()  # Stops actors
+        logger.info("[AppLogic Cleanup] Existing worker actors stopped.")
+        logger.info("[AppLogic Cleanup] Closing stats recorder...")
         self.app.initializer.close_stats_recorder(is_cleanup=True)
-        print("[Cleanup] Stats recorder closed.")
-
+        logger.info("[AppLogic Cleanup] Stats recorder closed.")
         messages.append(self._delete_checkpoint_dir())
         time.sleep(0.1)
-
-        print("[Cleanup] Re-initializing components...")
+        logger.info("[AppLogic Cleanup] Re-initializing components...")
         try:
+            # Re-init actors (handled by initializer)
+            self.app.initializer._init_ray_actors()
             self.app.initializer.initialize_rl_components(
                 is_reinit=True, checkpoint_to_load=None
             )
-            print("[Cleanup] Components re-initialized.")
+            logger.info("[AppLogic Cleanup] RL Components re-initialized.")
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
-            self.app.initializer.initialize_workers()
-            print("[Cleanup] Workers re-initialized (not started).")
+            self.app.worker_manager.initialize_actors()  # Re-init worker actors
+            logger.info("[AppLogic Cleanup] Workers re-initialized (not started).")
             messages.append("Components re-initialized.")
-            self.app.status = "Ready"
-            self.app.app_state = AppState.MAIN_MENU
+            self.app.set_status("Ready")
+            self.app.set_state(AppState.MAIN_MENU)
         except Exception as e:
-            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
-            traceback.print_exc()
-            self.app.status = "Error: Re-init Failed"
-            self.app.app_state = AppState.ERROR
+            logger.error(
+                f"[AppLogic] FATAL ERROR during re-initialization after cleanup: {e}",
+                exc_info=True,
+            )
+            self.app.set_status("Error: Re-init Failed")
+            self.app.set_state(AppState.ERROR)
             messages.append("ERROR RE-INITIALIZING COMPONENTS!")
-            if self.app.renderer:
-                self.app.renderer._render_error_screen(self.app.status)
-
         self._set_temp_message("\n".join(messages))
-        print(f"--- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}) ---")
-
-    def _render_during_cleanup(self):
-        """Renders the screen while cleanup is in progress."""
-        if self.app.renderer:
-            try:
-                self.app.renderer.render_all(
-                    app_state=self.app.app_state.value,
-                    is_process_running=False,
-                    status=self.app.status,
-                    stats_summary={},
-                    envs=[],
-                    num_envs=0,
-                    env_config=self.app.env_config,
-                    cleanup_confirmation_active=False,
-                    cleanup_message="",
-                    last_cleanup_message_time=0,
-                    plot_data={},
-                    demo_env=self.app.initializer.demo_env,
-                    update_progress_details={},
-                    agent_param_count=getattr(
-                        self.app.initializer, "agent_param_count", 0
-                    ),
-                    worker_counts={},
-                    best_game_state_data=None,
-                )
-                pygame.display.flip()
-                pygame.time.delay(100)
-            except Exception as render_err:
-                print(f"Warning: Error rendering during cleanup start: {render_err}")
+        logger.info(
+            f"[AppLogic] --- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}) ---"
+        )
 
     def _delete_checkpoint_dir(self) -> str:
-        """Deletes the checkpoint directory and returns a status message."""
-        print("[Cleanup] Deleting agent checkpoint file/dir...")
+        logger.info("[AppLogic Cleanup] Deleting agent checkpoint file/dir...")
         msg = ""
         try:
             save_dir = get_run_checkpoint_dir()
@@ -2469,12 +2648,11 @@ class AppLogic:
                 msg = f"Run checkpoint directory not found: {save_dir}"
         except OSError as e:
             msg = f"Error deleting checkpoint dir: {e}"
-        print(f"  - {msg}")
-        print("[Cleanup] Checkpoint deletion attempt finished.")
+        logger.info(f"  - {msg}")
+        logger.info("[AppLogic Cleanup] Checkpoint deletion attempt finished.")
         return msg
 
     def try_save_checkpoint(self):
-        """Saves checkpoint if in main menu and workers are not running."""
         if (
             self.app.app_state != AppState.MAIN_MENU
             or self.app.worker_manager.is_any_worker_running()
@@ -2485,15 +2663,17 @@ class AppLogic:
             or not self.app.initializer.stats_aggregator
         ):
             return
-
-        print("Saving checkpoint...")
+        logger.info("[AppLogic] Saving checkpoint...")
         try:
-            agg_storage = self.app.initializer.stats_aggregator.storage
-            current_step = getattr(agg_storage, "current_global_step", 0)
-            episode_count = getattr(agg_storage, "total_episodes", 0)
-            target_step = getattr(
-                self.app.initializer.checkpoint_manager, "training_target_step", 0
+            # Fetch stats from aggregator actor
+            agg_actor: "StatsAggregatorHandle" = self.app.initializer.stats_aggregator
+            step_ref = agg_actor.get_current_global_step.remote()
+            ep_ref = agg_actor.get_total_episodes.remote()
+            target_ref = agg_actor.get_training_target_step.remote()  # Use new getter
+            current_step, episode_count, target_step = ray.get(
+                [step_ref, ep_ref, target_ref]
             )
+
             self.app.initializer.checkpoint_manager.save_checkpoint(
                 current_step,
                 episode_count,
@@ -2501,39 +2681,60 @@ class AppLogic:
                 is_final=False,
             )
         except Exception as e:
-            print(f"Error saving checkpoint: {e}")
-            traceback.print_exc()
+            logger.error(f"[AppLogic] Error saving checkpoint: {e}", exc_info=True)
 
     def save_final_checkpoint(self):
-        """Saves the final checkpoint."""
         if (
-            not self.app.initializer.checkpoint_manager
+            not hasattr(self.app, "initializer")
+            or not self.app.initializer.checkpoint_manager
             or not self.app.initializer.stats_aggregator
         ):
+            logger.warning(
+                "[AppLogic] Cannot save final checkpoint: components missing."
+            )
             return
         save_on_exit = (
-            self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
+            self.app.app_state != AppState.CLEANING
+            and self.app.app_state != AppState.ERROR
         )
         if save_on_exit:
-            print("Performing final checkpoint save...")
+            logger.info("[AppLogic] Performing final checkpoint save...")
             try:
-                agg_storage = self.app.initializer.stats_aggregator.storage
-                current_step = getattr(agg_storage, "current_global_step", 0)
-                episode_count = getattr(agg_storage, "total_episodes", 0)
-                target_step = getattr(
-                    self.app.initializer.checkpoint_manager, "training_target_step", 0
+                # Fetch stats from aggregator actor
+                agg_actor: "StatsAggregatorHandle" = (
+                    self.app.initializer.stats_aggregator
                 )
+                step_ref = agg_actor.get_current_global_step.remote()
+                ep_ref = agg_actor.get_total_episodes.remote()
+                target_ref = (
+                    agg_actor.get_training_target_step.remote()
+                )  # Use new getter
+                current_step, episode_count, target_step = ray.get(
+                    [step_ref, ep_ref, target_ref]
+                )
+
                 self.app.initializer.checkpoint_manager.save_checkpoint(
                     current_step,
                     episode_count,
                     training_target_step=target_step,
                     is_final=True,
                 )
+                logger.info("[AppLogic] Final checkpoint save successful.")
+            except AttributeError as ae:
+                # This specific error might be less likely now, but keep general exception handling
+                logger.error(
+                    f"[AppLogic] Attribute error during final checkpoint save: {ae}",
+                    exc_info=True,
+                )
             except Exception as final_save_err:
-                print(f"Error during final checkpoint save: {final_save_err}")
-                traceback.print_exc()
+                logger.error(
+                    f"[AppLogic] Error during final checkpoint save: {final_save_err}",
+                    exc_info=True,
+                )
         else:
-            print("Skipping final checkpoint save.")
+            logger.info(
+                f"[AppLogic] Skipping final checkpoint save due to state: {self.app.app_state}"
+            )
 
 
 File: app_setup.py
@@ -2707,292 +2908,323 @@ import queue
 import time
 from typing import TYPE_CHECKING, Optional, List, Dict, Tuple, Any
 import logging
+import multiprocessing as mp
+import ray
+import asyncio
+import torch
 
+# Import Ray actor classes
 from workers.self_play_worker import SelfPlayWorker
 from workers.training_worker import TrainingWorker
-from environment.game_state import GameState
 
+# Import Actor Handles for type hinting
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    LogicAppState = Any
+    SelfPlayWorkerHandle = ray.actor.ActorHandle
+    TrainingWorkerHandle = ray.actor.ActorHandle
+    AgentPredictorHandle = ray.actor.ActorHandle
+    StatsAggregatorHandle = ray.actor.ActorHandle
+    from ray.util.queue import Queue as RayQueue
 
 logger = logging.getLogger(__name__)
 
 
 class AppWorkerManager:
-    """Manages the creation, starting, and stopping of worker threads."""
+    """Manages the creation, starting, and stopping of Ray worker actors."""
 
-    def __init__(self, app: "MainApp"):
+    DEFAULT_KILL_TIMEOUT = 5.0
+
+    def __init__(self, app: "LogicAppState"):
         self.app = app
-        self.self_play_worker_threads: List[SelfPlayWorker] = (
-            []
-        )  # Holds running thread objects
-        self.training_worker_thread: Optional[TrainingWorker] = (
-            None  # Holds running thread object
+        self.self_play_worker_actors: List["SelfPlayWorkerHandle"] = []
+        self.training_worker_actor: Optional["TrainingWorkerHandle"] = None
+        self.agent_predictor_actor: Optional["AgentPredictorHandle"] = None
+        self._workers_running = False
+        logger.info("[AppWorkerManager] Initialized for Ray Actors.")
+
+    def initialize_actors(self):
+        """Initializes Ray worker actors (SelfPlay, Training). Does NOT start their loops."""
+        logger.info("[AppWorkerManager] Initializing worker actors...")
+        if not self.app.agent_predictor:
+            logger.error(
+                "[AppWorkerManager] ERROR: AgentPredictor actor not initialized in AppInitializer."
+            )
+            self.app.set_state(self.app.app_state.ERROR)
+            self.app.set_status("Worker Init Failed: Missing AgentPredictor")
+            return
+        if not self.app.stats_aggregator:
+            logger.error(
+                "[AppWorkerManager] ERROR: StatsAggregator actor handle not initialized in AppInitializer."
+            )
+            self.app.set_state(self.app.app_state.ERROR)
+            self.app.set_status("Worker Init Failed: Missing StatsAggregator")
+            return
+
+        self.agent_predictor_actor = self.app.agent_predictor
+
+        self._init_self_play_actors()
+        self._init_training_actor()
+
+        num_sp = len(self.self_play_worker_actors)
+        num_tr = 1 if self.training_worker_actor else 0
+        logger.info(
+            f"Worker actors initialized ({num_sp} Self-Play, {num_tr} Training)."
         )
-        print("[AppWorkerManager] Initialized.")
+
+    def _init_self_play_actors(self):
+        """Creates SelfPlayWorker Ray actors."""
+        self.self_play_worker_actors = []
+        num_sp_workers = self.app.train_config_instance.NUM_SELF_PLAY_WORKERS
+        logger.info(f"Initializing {num_sp_workers} SelfPlayWorker actor(s)...")
+        for i in range(num_sp_workers):
+            try:
+                actor = SelfPlayWorker.remote(
+                    worker_id=i,
+                    agent_predictor=self.agent_predictor_actor,
+                    mcts_config=self.app.mcts_config,
+                    env_config=self.app.env_config,
+                    experience_queue=self.app.experience_queue,
+                    stats_aggregator=self.app.stats_aggregator,
+                    max_game_steps=None,
+                )
+                self.self_play_worker_actors.append(actor)
+                logger.info(f"  SelfPlayWorker-{i} actor created.")
+            except Exception as e:
+                logger.error(
+                    f"  ERROR creating SelfPlayWorker-{i} actor: {e}", exc_info=True
+                )
+
+    def _init_training_actor(self):
+        """Creates the TrainingWorker Ray actor."""
+        logger.info("Initializing TrainingWorker actor...")
+        if not self.app.optimizer or not self.app.train_config_instance:
+            logger.error(
+                "[AppWorkerManager] ERROR: Optimizer or TrainConfig missing for TrainingWorker init."
+            )
+            return
+
+        optimizer_cls = type(self.app.optimizer)
+        optimizer_kwargs = self.app.optimizer.defaults
+
+        scheduler_cls = type(self.app.scheduler) if self.app.scheduler else None
+        scheduler_kwargs = {}
+        if self.app.scheduler and hasattr(self.app.scheduler, "state_dict"):
+            sd = self.app.scheduler.state_dict()
+            if isinstance(
+                self.app.scheduler, torch.optim.lr_scheduler.CosineAnnealingLR
+            ):
+                scheduler_kwargs = {
+                    "T_max": sd.get("T_max", 1000),
+                    "eta_min": sd.get("eta_min", 0),
+                }
+            else:
+                logger.warning(
+                    f"Cannot automatically determine kwargs for scheduler type {scheduler_cls}. Scheduler might not be correctly re-initialized in actor."
+                )
+                scheduler_cls = None
+
+        try:
+            actor = TrainingWorker.remote(
+                agent_predictor=self.agent_predictor_actor,
+                optimizer_cls=optimizer_cls,
+                optimizer_kwargs=optimizer_kwargs,
+                scheduler_cls=scheduler_cls,
+                scheduler_kwargs=scheduler_kwargs,
+                experience_queue=self.app.experience_queue,
+                stats_aggregator=self.app.stats_aggregator,
+                train_config=self.app.train_config_instance,
+            )
+            self.training_worker_actor = actor
+            logger.info("  TrainingWorker actor created.")
+        except Exception as e:
+            logger.error(f"  ERROR creating TrainingWorker actor: {e}", exc_info=True)
 
     def get_active_worker_counts(self) -> Dict[str, int]:
-        """Returns the count of currently active workers by type."""
-        # Count based on living threads stored in this manager
-        sp_count = sum(1 for w in self.self_play_worker_threads if w and w.is_alive())
-        tr_count = 1 if self.is_training_running() else 0
+        """Returns the count of initialized worker actors."""
+        sp_count = len(self.self_play_worker_actors)
+        tr_count = 1 if self.training_worker_actor else 0
         return {"SelfPlay": sp_count, "Training": tr_count}
 
-    def is_self_play_running(self) -> bool:
-        """Checks if *any* self-play worker thread is active."""
-        return any(
-            w is not None and w.is_alive() for w in self.self_play_worker_threads
-        )
-
-    def is_training_running(self) -> bool:
-        """Checks if the training worker thread is active."""
-        return (
-            self.training_worker_thread is not None
-            and self.training_worker_thread.is_alive()
-        )
-
     def is_any_worker_running(self) -> bool:
-        """Checks if any worker thread is active."""
-        return self.is_self_play_running() or self.is_training_running()
+        """Checks the internal flag indicating if workers have been started."""
+        return self._workers_running
 
-    def get_worker_render_data(self, max_envs: int) -> List[Optional[Dict[str, Any]]]:
-        """
-        Retrieves render data (state copy and stats) from active self-play workers.
-        Returns a list of dictionaries [{state: GameState, stats: Dict}, ... ] or None.
-        Accesses worker instances directly from the initializer.
-        """
+    async def get_worker_render_data_async(
+        self, max_envs: int
+    ) -> List[Optional[Dict[str, Any]]]:
+        """Retrieves render data from active self-play actors asynchronously."""
+        if not self.self_play_worker_actors:
+            return [None] * max_envs
+
+        tasks = []
+        num_to_fetch = min(len(self.self_play_worker_actors), max_envs)
+        for i in range(num_to_fetch):
+            actor = self.self_play_worker_actors[i]
+            tasks.append(actor.get_current_render_data.remote())
+
         render_data_list: List[Optional[Dict[str, Any]]] = []
-        count = 0
-        # Get worker instances from the initializer, as they persist even if thread stops/restarts
-        worker_instances = self.app.initializer.self_play_workers
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error getting render data from worker {i}: {result}")
+                    render_data_list.append(None)
+                else:
+                    render_data_list.append(result)
+        except Exception as e:
+            logger.error(f"Error gathering render data: {e}")
+            render_data_list = [None] * num_to_fetch
 
-        for worker in worker_instances:
-            if count >= max_envs:
-                break  # Limit reached
-
-            # Check if the worker instance exists and is *currently running*
-            if (
-                worker
-                and worker.is_alive()
-                and hasattr(worker, "get_current_render_data")
-            ):
-                try:
-                    # Fetch the combined state and stats dictionary
-                    data: Dict[str, Any] = worker.get_current_render_data()
-                    render_data_list.append(data)
-                except Exception as e:
-                    logger.error(
-                        f"Error getting render data from worker {worker.worker_id}: {e}"
-                    )
-                    render_data_list.append(None)  # Append None on error
-            else:
-                # Append None if worker doesn't exist, isn't alive, or lacks method
-                render_data_list.append(None)
-
-            count += 1
-
-        # Pad with None if fewer workers than max_envs
         while len(render_data_list) < max_envs:
             render_data_list.append(None)
+        return render_data_list
 
+    def get_worker_render_data(self, max_envs: int) -> List[Optional[Dict[str, Any]]]:
+        """Synchronous wrapper for get_worker_render_data_async."""
+        if not self.self_play_worker_actors:
+            return [None] * max_envs
+
+        refs = []
+        num_to_fetch = min(len(self.self_play_worker_actors), max_envs)
+        for i in range(num_to_fetch):
+            actor = self.self_play_worker_actors[i]
+            refs.append(actor.get_current_render_data.remote())
+
+        render_data_list: List[Optional[Dict[str, Any]]] = []
+        try:
+            results = ray.get(refs)
+            render_data_list.extend(results)
+        except Exception as e:
+            logger.error(f"Error getting render data via ray.get: {e}")
+            render_data_list = [None] * num_to_fetch
+
+        while len(render_data_list) < max_envs:
+            render_data_list.append(None)
         return render_data_list
 
     def start_all_workers(self):
-        """Starts all initialized worker threads if they are not already running."""
-        if self.is_any_worker_running():
-            logger.warning(
-                "[AppWorkerManager] Attempted to start workers, but some are already running."
-            )
+        """Starts the main loops of all initialized worker actors."""
+        if self._workers_running:
+            logger.warning("[AppWorkerManager] Workers already started.")
+            return
+        if not self.self_play_worker_actors and not self.training_worker_actor:
+            logger.error("[AppWorkerManager] No worker actors initialized to start.")
             return
 
-        # Check if necessary components are initialized
-        if (
-            not self.app.initializer.agent
-            or not self.app.initializer.mcts
-            or not self.app.initializer.stats_aggregator
-            or not self.app.initializer.optimizer
-        ):
-            logger.error(
-                "[AppWorkerManager] ERROR: Cannot start workers, core RL components missing."
-            )
-            self.app.app_state = self.app.app_state.ERROR
-            self.app.status = "Worker Init Failed: Missing Components"
-            return
+        logger.info("[AppWorkerManager] Starting all worker actor loops...")
+        self._workers_running = True
 
-        # Check if worker instances exist in the initializer
-        if (
-            not self.app.initializer.self_play_workers
-            or not self.app.initializer.training_worker
-        ):
-            logger.error(
-                "[AppWorkerManager] ERROR: Workers not initialized in AppInitializer."
-            )
-            self.app.app_state = self.app.app_state.ERROR
-            self.app.status = "Worker Init Failed: Not Initialized"
-            return
-
-        logger.info("[AppWorkerManager] Starting all worker threads...")
-        self.app.stop_event.clear()  # Ensure stop event is clear
-
-        # --- Start Self-Play Workers ---
-        self.self_play_worker_threads = []  # Clear list of active threads
-        for i, worker_instance in enumerate(self.app.initializer.self_play_workers):
-            if worker_instance:
-                # Check if the thread associated with this instance is alive
-                if not worker_instance.is_alive():
-                    try:
-                        # Recreate the thread object using the instance's init args
-                        # This ensures we have a fresh thread if the previous one finished/crashed
-                        recreated_worker = SelfPlayWorker(
-                            **worker_instance.get_init_args()
-                        )
-                        # Replace the instance in the initializer list (important for rendering)
-                        self.app.initializer.self_play_workers[i] = recreated_worker
-                        worker_to_start = recreated_worker
-                        logger.info(f"  Recreated SelfPlayWorker-{i}.")
-                    except Exception as e:
-                        logger.error(f"  ERROR recreating SelfPlayWorker-{i}: {e}")
-                        continue  # Skip starting this worker
-                else:
-                    # If already alive (shouldn't happen based on initial check, but safe)
-                    worker_to_start = worker_instance
-                    logger.warning(
-                        f"  SelfPlayWorker-{i} was already alive during start sequence."
-                    )
-
-                # Add to our list of *running* threads and start
-                self.self_play_worker_threads.append(worker_to_start)
-                worker_to_start.start()
-                logger.info(f"  SelfPlayWorker-{i} thread started.")
-            else:
-                logger.error(
-                    f"[AppWorkerManager] ERROR: SelfPlayWorker instance {i} is None during start."
-                )
-
-        # --- Start Training Worker ---
-        training_instance = self.app.initializer.training_worker
-        if training_instance:
-            if not training_instance.is_alive():
-                try:
-                    # Recreate thread object if needed
-                    recreated_worker = TrainingWorker(
-                        **training_instance.get_init_args()
-                    )
-                    self.app.initializer.training_worker = (
-                        recreated_worker  # Update initializer's instance
-                    )
-                    self.training_worker_thread = (
-                        recreated_worker  # Update manager's running thread ref
-                    )
-                    logger.info("  Recreated TrainingWorker.")
-                except Exception as e:
-                    logger.error(f"  ERROR recreating TrainingWorker: {e}")
-                    self.training_worker_thread = None  # Failed to recreate
-            else:
-                self.training_worker_thread = (
-                    training_instance  # Use existing live thread instance
-                )
-                logger.warning(
-                    "  TrainingWorker was already alive during start sequence."
-                )
-
-            if self.training_worker_thread:
-                # Start the thread (safe to call start() again on already started thread)
-                self.training_worker_thread.start()
-                logger.info("  TrainingWorker thread started.")
-        else:
-            logger.error(
-                "[AppWorkerManager] ERROR: TrainingWorker instance is None during start."
-            )
-
-        # Final status update
-        if self.is_any_worker_running():
-            self.app.status = "Running AlphaZero"
-            num_sp = len(self.self_play_worker_threads)
-            num_tr = 1 if self.is_training_running() else 0
-            logger.info(
-                f"[AppWorkerManager] Workers started ({num_sp} SP, {num_tr} TR)."
-            )
-
-    def stop_all_workers(self, join_timeout: float = 5.0):
-        """Signals ALL worker threads to stop and waits for them to join."""
-        # Check if there's anything to stop
-        worker_instances_exist = (
-            self.app.initializer.self_play_workers
-            or self.app.initializer.training_worker
-        )
-        if not self.is_any_worker_running() and not worker_instances_exist:
-            logger.info("[AppWorkerManager] No workers initialized or running to stop.")
-            return
-        elif not self.is_any_worker_running():
-            logger.info("[AppWorkerManager] No workers currently running to stop.")
-            # Proceed to clear queue etc. even if not running
-        else:
-            logger.info("[AppWorkerManager] Stopping ALL worker threads...")
-            self.app.stop_event.set()  # Signal threads to stop
-
-        # Collect threads that need joining (use initializer instances as the source of truth)
-        threads_to_join: List[Tuple[str, threading.Thread]] = []
-        for i, worker in enumerate(self.app.initializer.self_play_workers):
-            # Check if the instance exists and the thread is alive
-            if worker and worker.is_alive():
-                threads_to_join.append((f"SelfPlayWorker-{i}", worker))
-
-        if (
-            self.app.initializer.training_worker
-            and self.app.initializer.training_worker.is_alive()
-        ):
-            threads_to_join.append(
-                ("TrainingWorker", self.app.initializer.training_worker)
-            )
-
-        # Join threads with timeout
-        start_join_time = time.time()
-        if not threads_to_join:
-            logger.info("[AppWorkerManager] No active threads found to join.")
-        else:
-            logger.info(
-                f"[AppWorkerManager] Attempting to join {len(threads_to_join)} threads..."
-            )
-            for name, thread in threads_to_join:
-                # Calculate remaining timeout dynamically
-                elapsed_time = time.time() - start_join_time
-                remaining_timeout = max(
-                    0.1, join_timeout - elapsed_time
-                )  # Ensure minimum timeout
-                logger.info(
-                    f"[AppWorkerManager] Joining {name} (timeout: {remaining_timeout:.1f}s)..."
-                )
-                thread.join(timeout=remaining_timeout)
-                if thread.is_alive():
-                    logger.warning(
-                        f"[AppWorkerManager] WARNING: {name} thread did not join cleanly after timeout."
-                    )
-                else:
-                    logger.info(f"[AppWorkerManager] {name} joined.")
-
-        # Clear internal references to running threads
-        self.self_play_worker_threads = []
-        self.training_worker_thread = None
-
-        # Clear the experience queue after stopping workers
-        logger.info("[AppWorkerManager] Clearing experience queue...")
-        cleared_count = 0
-        while not self.app.experience_queue.empty():
+        for i, actor in enumerate(self.self_play_worker_actors):
             try:
-                self.app.experience_queue.get_nowait()
-                cleared_count += 1
-            except queue.Empty:
-                break
+                actor.run_loop.remote()
+                logger.info(f"  SelfPlayWorker-{i} actor loop started.")
             except Exception as e:
-                logger.error(f"Error clearing queue item: {e}")
-                break  # Stop clearing on error
-        logger.info(
-            f"[AppWorkerManager] Cleared {cleared_count} items from experience queue."
-        )
+                logger.error(f"  ERROR starting SelfPlayWorker-{i} actor loop: {e}")
 
-        logger.info("[AppWorkerManager] All worker threads stopped.")
-        self.app.status = "Ready"  # Update status after stopping
+        if self.training_worker_actor:
+            try:
+                self.training_worker_actor.run_loop.remote()
+                logger.info("  TrainingWorker actor loop started.")
+            except Exception as e:
+                logger.error(f"  ERROR starting TrainingWorker actor loop: {e}")
+
+        if self.is_any_worker_running():
+            self.app.set_status("Running AlphaZero")
+            num_sp = len(self.self_play_worker_actors)
+            num_tr = 1 if self.training_worker_actor else 0
+            logger.info(
+                f"[AppWorkerManager] Worker loops started ({num_sp} SP, {num_tr} TR)."
+            )
+
+    def stop_all_workers(self, timeout: float = DEFAULT_KILL_TIMEOUT):
+        """Signals all worker actors to stop and attempts to terminate them."""
+        if (
+            not self._workers_running
+            and not self.self_play_worker_actors
+            and not self.training_worker_actor
+        ):
+            logger.info("[AppWorkerManager] No workers running or initialized to stop.")
+            return
+
+        logger.info("[AppWorkerManager] Stopping ALL worker actors...")
+        self._workers_running = False
+
+        actors_to_stop: List[ray.actor.ActorHandle] = []
+        actors_to_stop.extend(self.self_play_worker_actors)
+        if self.training_worker_actor:
+            actors_to_stop.append(self.training_worker_actor)
+
+        if not actors_to_stop:
+            logger.info("[AppWorkerManager] No active actor handles found to stop.")
+            return
+
+        logger.info(
+            f"[AppWorkerManager] Sending stop signal to {len(actors_to_stop)} actors..."
+        )
+        for actor in actors_to_stop:
+            try:
+                actor.stop.remote()
+            except Exception as e:
+                logger.warning(f"Error sending stop signal to actor {actor}: {e}")
+
+        time.sleep(0.5)
+
+        logger.info(f"[AppWorkerManager] Killing actors...")
+        for actor in actors_to_stop:
+            try:
+                ray.kill(actor, no_restart=True)
+                logger.info(f"  Killed actor {actor}.")
+            except Exception as e:
+                logger.error(f"  Error killing actor {actor}: {e}")
+
+        self.self_play_worker_actors = []
+        self.training_worker_actor = None
+
+        self._clear_experience_queue()
+
+        logger.info("[AppWorkerManager] All worker actors stopped/killed.")
+        self.app.set_status("Ready")
+
+    def _clear_experience_queue(self):
+        """Safely clears the experience queue (assuming Ray Queue)."""
+        logger.info("[AppWorkerManager] Clearing experience queue...")
+        # Check if it's a RayQueue instance (which acts as a handle)
+        if hasattr(self.app, "experience_queue") and isinstance(
+            self.app.experience_queue, ray.util.queue.Queue
+        ):
+            try:
+                # Call qsize() directly, it returns an ObjectRef
+                qsize_ref = self.app.experience_queue.qsize()
+                qsize = ray.get(qsize_ref)  # Use ray.get() to resolve the ObjectRef
+                logger.info(
+                    f"[AppWorkerManager] Experience queue size before potential drain: {qsize}"
+                )
+                # Optional drain logic can be added here if needed
+                # Example: Drain items if size is large
+                # if qsize > 100:
+                #     logger.info("[AppWorkerManager] Draining experience queue...")
+                #     while qsize > 0:
+                #         try:
+                #             # Use get_nowait_batch to drain efficiently
+                #             items_ref = self.app.experience_queue.get_nowait_batch(100)
+                #             items = ray.get(items_ref)
+                #             if not items: break
+                #             qsize_ref = self.app.experience_queue.qsize()
+                #             qsize = ray.get(qsize_ref)
+                #         except ray.exceptions.RayActorError: # Handle queue actor potentially gone
+                #             logger.warning("[AppWorkerManager] Queue actor error during drain.")
+                #             break
+                #         except Exception as drain_e:
+                #             logger.error(f"Error draining queue: {drain_e}")
+                #             break
+                #     logger.info("[AppWorkerManager] Experience queue drained.")
+
+            except Exception as e:
+                logger.error(f"Error accessing Ray queue size: {e}")
+        else:
+            logger.warning(
+                "[AppWorkerManager] Experience queue not found or not a Ray Queue during clearing."
+            )
 
 
 File: check_gpu.py
@@ -3079,321 +3311,472 @@ class TeeLogger:
         self.close()
 
 
-File: main_pygame.py
-# File: main_pygame.py
-import pygame
-import sys
+File: logic_process.py
 import time
-import threading
-import logging
-import argparse
-import os
-import traceback
-from typing import Optional, Dict, Any, List
 import queue
-import numpy as np
-from collections import deque
+import logging
+import logging.handlers
+import multiprocessing as mp
+import traceback
+import sys
+from typing import Optional, Dict, Any
+import ray
+from ray.util.queue import Queue as RayQueue
+import asyncio  # Added asyncio
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-
-if script_dir not in sys.path:
-    sys.path.insert(0, script_dir)
-
-# --- Config and Utils Imports ---
 try:
-    from config import (
-        VisConfig,
-        EnvConfig,
-        TrainConfig,
-        MCTSConfig,
-        RANDOM_SEED,
-        BASE_CHECKPOINT_DIR,
-        set_device,
-        get_run_id,
-        set_run_id,
-        get_run_log_dir,
-        get_console_log_dir,
-        get_config_dict,
-    )
+    from config import VisConfig, EnvConfig, TrainConfig, MCTSConfig, set_device
     from utils.helpers import get_device as get_torch_device, set_random_seeds
-    from logger import TeeLogger
     from utils.init_checks import run_pre_checks
-except ImportError as e:
-    print(f"Error importing config/utils: {e}\n{traceback.format_exc()}")
-    sys.exit(1)
-
-# --- App Component Imports ---
-try:
-    from environment.game_state import GameState
-    from ui.renderer import UIRenderer
-    from stats import StatsAggregator
-    from training.checkpoint_manager import (
-        find_latest_run_and_checkpoint,
-    )
     from app_state import AppState
     from app_init import AppInitializer
     from app_logic import AppLogic
     from app_workers import AppWorkerManager
-    from app_setup import (
-        initialize_pygame,
-        initialize_directories,
-    )
-    from app_ui_utils import AppUIUtils
-    from ui.input_handler import InputHandler
-    from agent.alphazero_net import AlphaZeroNet
-    from workers.training_worker import ProcessedExperienceBatch
+    from app_setup import initialize_directories
+    from environment.game_state import GameState
 except ImportError as e:
-    print(f"Error importing app components: {e}\n{traceback.format_exc()}")
+    print(f"[Logic Process Import Error] {e}", file=sys.stderr)
+    try:
+        if ray.is_initialized():
+            ray.shutdown()
+    except Exception:
+        pass
+    sys.exit(1)
+
+RENDER_DATA_SENTINEL = "RENDER_DATA"
+COMMAND_SENTINEL = "COMMAND"
+STOP_SENTINEL = "STOP"
+ERROR_SENTINEL = "ERROR"
+PAYLOAD_KEY = "payload"
+
+
+def run_logic_process(
+    stop_event: mp.Event,
+    command_queue: mp.Queue,
+    render_data_queue: mp.Queue,
+    checkpoint_to_load: Optional[str],
+    log_queue: Optional[mp.Queue] = None,
+):
+    ray_initialized = False
+    try:
+        if not ray.is_initialized():
+            ray.init(logging_level=logging.WARNING, ignore_reinit_error=True)
+            ray_initialized = True
+            print("[Logic Process] Ray initialized.")
+        else:
+            print("[Logic Process] Ray already initialized.")
+            ray_initialized = True
+    except Exception as ray_init_err:
+        print(
+            f"[Logic Process] FATAL: Ray initialization failed: {ray_init_err}",
+            file=sys.stderr,
+        )
+        stop_event.set()
+        try:
+            render_data_queue.put({ERROR_SENTINEL: f"Ray Init Failed: {ray_init_err}"})
+        except Exception:
+            pass
+        return
+
+    if log_queue:
+        qh = logging.handlers.QueueHandler(log_queue)
+        root = logging.getLogger()
+        if not any(isinstance(h, logging.handlers.QueueHandler) for h in root.handlers):
+            root.addHandler(qh)
+            root.setLevel(logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.info("Logic Process starting...")
+    logic_start_time = time.time()
+
+    logic_app_state = None
+    try:
+        vis_config = VisConfig()
+        env_config = EnvConfig()
+        train_config_instance = TrainConfig()
+        mcts_config = MCTSConfig()
+        worker_stop_event = mp.Event()
+
+        # Use Ray Queue Actor
+        experience_ray_queue = RayQueue(
+            maxsize=train_config_instance.BUFFER_CAPACITY * 2
+        )
+        logger.info(
+            f"[Logic Process] Ray Experience Queue created (maxsize={train_config_instance.BUFFER_CAPACITY * 2})."
+        )
+
+        logic_app_state = type(
+            "LogicAppState",
+            (object,),
+            {
+                "vis_config": vis_config,
+                "env_config": env_config,
+                "train_config_instance": train_config_instance,
+                "mcts_config": mcts_config,
+                "app_state": AppState.INITIALIZING,
+                "status": "Initializing...",
+                "stop_event": stop_event,
+                "worker_stop_event": worker_stop_event,
+                "experience_queue": experience_ray_queue,  # Use Ray Queue handle
+                "device": get_torch_device(),
+                "checkpoint_to_load": checkpoint_to_load,
+                "initializer": None,
+                "logic": None,
+                "worker_manager": None,
+                "agent_predictor": None,
+                "stats_aggregator": None,  # Actor handles
+                "ui_utils": None,
+                "cleanup_confirmation_active": False,
+                "cleanup_message": "",
+                "last_cleanup_message_time": 0.0,
+                "total_gpu_memory_bytes": None,
+                "current_global_step": 0,
+                "set_state": lambda self, new_state: setattr(
+                    self, "app_state", new_state
+                ),
+                "set_status": lambda self, new_status: setattr(
+                    self, "status", new_status
+                ),
+                "set_cleanup_confirmation": lambda self, active: setattr(
+                    self, "cleanup_confirmation_active", active
+                ),
+                "set_cleanup_message": lambda self, msg, msg_time: (
+                    setattr(self, "cleanup_message", msg),
+                    setattr(self, "last_cleanup_message_time", msg_time),
+                ),
+                "get_render_data": None,
+            },
+        )()
+        set_device(logic_app_state.device)
+
+        initializer = AppInitializer(logic_app_state)
+        logic = AppLogic(logic_app_state)
+        worker_manager = AppWorkerManager(logic_app_state)
+        logic_app_state.initializer = initializer
+        logic_app_state.logic = logic
+        logic_app_state.worker_manager = worker_manager
+
+        logger.info("Initializing directories...")
+        initialize_directories()
+        set_random_seeds(
+            mcts_config.RANDOM_SEED if hasattr(mcts_config, "RANDOM_SEED") else 42
+        )
+        logger.info("Running pre-checks...")
+        run_pre_checks()
+        logger.info("Initializing RL components and Ray actors...")
+        initializer.initialize_logic_components()  # Initializes actors
+
+        logic_app_state.set_state(AppState.MAIN_MENU)
+        logic_app_state.set_status("Ready")
+        logic.check_initial_completion_status()
+        logger.info("--- Logic Initialization Complete ---")
+
+        # Define async get_render_data
+        async def _get_render_data_async(app_obj) -> Dict[str, Any]:
+            worker_render_task = None
+            if (
+                app_obj.worker_manager.is_any_worker_running()
+                and app_obj.app_state == AppState.MAIN_MENU
+            ):
+                num_to_render = app_obj.vis_config.NUM_ENVS_TO_RENDER
+                if num_to_render > 0:
+                    worker_render_task = (
+                        app_obj.worker_manager.get_worker_render_data_async(
+                            num_to_render
+                        )
+                    )
+
+            # Fetch stats data from StatsAggregatorActor
+            plot_data_ref, summary_ref, best_game_ref = None, None, None
+            if app_obj.stats_aggregator:  # Check if handle exists
+                plot_data_ref = app_obj.stats_aggregator.get_plot_data.remote()
+                summary_ref = app_obj.stats_aggregator.get_summary.remote(
+                    app_obj.current_global_step
+                )
+                best_game_ref = (
+                    app_obj.stats_aggregator.get_best_game_state_data.remote()
+                )
+
+            # Gather results concurrently
+            results = await asyncio.gather(
+                (
+                    worker_render_task
+                    if worker_render_task
+                    else asyncio.sleep(0, result=[])
+                ),  # Handle no task case
+                plot_data_ref if plot_data_ref else asyncio.sleep(0, result={}),
+                summary_ref if summary_ref else asyncio.sleep(0, result={}),
+                best_game_ref if best_game_ref else asyncio.sleep(0, result=None),
+                return_exceptions=True,  # Handle potential errors from remote calls
+            )
+
+            # Process results, handling potential errors
+            worker_render_data_result = (
+                results[0]
+                if not isinstance(results[0], Exception)
+                else ([None] * app_obj.vis_config.NUM_ENVS_TO_RENDER)
+            )
+            plot_data = results[1] if not isinstance(results[1], Exception) else {}
+            stats_summary = results[2] if not isinstance(results[2], Exception) else {}
+            best_game_state_data = (
+                results[3] if not isinstance(results[3], Exception) else None
+            )
+
+            # Log errors if any occurred during gather
+            for i, res in enumerate(results):
+                if isinstance(res, Exception):
+                    task_name = ["worker_render", "plot_data", "summary", "best_game"][
+                        i
+                    ]
+                    logger.error(f"Error fetching {task_name} from actor: {res}")
+
+            data = {
+                "app_state": app_obj.app_state.value,
+                "status": app_obj.status,
+                "cleanup_confirmation_active": app_obj.cleanup_confirmation_active,
+                "cleanup_message": app_obj.cleanup_message,
+                "last_cleanup_message_time": app_obj.last_cleanup_message_time,
+                "update_progress_details": {},
+                "demo_env_state": (
+                    app_obj.demo_env.get_state() if app_obj.demo_env else None
+                ),
+                "demo_env_is_over": (
+                    app_obj.demo_env.is_over() if app_obj.demo_env else False
+                ),
+                "demo_env_score": (
+                    app_obj.demo_env.game_score if app_obj.demo_env else 0
+                ),
+                "demo_env_dragged_shape_idx": (
+                    app_obj.demo_env.demo_dragged_shape_idx
+                    if app_obj.demo_env
+                    else None
+                ),
+                "demo_env_snapped_pos": (
+                    app_obj.demo_env.demo_snapped_position if app_obj.demo_env else None
+                ),
+                "demo_env_selected_shape_idx": (
+                    app_obj.demo_env.demo_selected_shape_idx if app_obj.demo_env else -1
+                ),
+                "env_config_rows": app_obj.env_config.ROWS,
+                "env_config_cols": app_obj.env_config.COLS,
+                "env_config_num_shape_slots": app_obj.env_config.NUM_SHAPE_SLOTS,
+                "num_envs": app_obj.train_config_instance.NUM_SELF_PLAY_WORKERS,
+                "plot_data": plot_data,
+                "stats_summary": stats_summary,
+                "best_game_state_data": best_game_state_data,
+                "agent_param_count": app_obj.initializer.agent_param_count,
+                "worker_counts": app_obj.worker_manager.get_active_worker_counts(),
+                "is_process_running": app_obj.worker_manager.is_any_worker_running(),
+                "worker_render_data": worker_render_data_result,
+            }
+            return data
+
+        logic_app_state.get_render_data = _get_render_data_async.__get__(
+            logic_app_state
+        )
+
+    except Exception as init_err:
+        logger.critical(f"Logic Initialization failed: {init_err}", exc_info=True)
+        stop_event.set()
+        try:
+            render_data_queue.put({ERROR_SENTINEL: f"Logic Init Failed: {init_err}"})
+        except Exception:
+            pass
+        if ray_initialized:
+            ray.shutdown()
+        return
+
+    # --- Main Logic Loop (Async) ---
+    last_render_send_time = 0
+    render_send_interval = 1.0 / 30.0
+
+    async def main_loop():
+        nonlocal last_render_send_time
+        while not stop_event.is_set():
+            loop_start = time.monotonic()
+
+            # Process Commands (Synchronous)
+            try:
+                command_data = command_queue.get_nowait()
+                if isinstance(command_data, dict) and COMMAND_SENTINEL in command_data:
+                    command = command_data[COMMAND_SENTINEL]
+                    logger.info(f"Received command from UI: {command}")
+                    if command == STOP_SENTINEL:
+                        stop_event.set()
+                        break
+                    logic_method_name = command_data.get(COMMAND_SENTINEL)
+                    logic_method = getattr(
+                        logic_app_state.logic, logic_method_name, None
+                    )
+                    if callable(logic_method):
+                        payload = command_data.get(PAYLOAD_KEY)
+                        if payload is not None:
+                            logic_method(payload)
+                        else:
+                            logic_method()
+                    else:
+                        logger.warning(f"Unknown command: {logic_method_name}")
+                elif command_data is not None:
+                    logger.warning(f"Invalid data on command queue: {command_data}")
+            except queue.Empty:
+                pass
+            except (EOFError, BrokenPipeError):
+                logger.warning("Command queue connection lost.")
+                stop_event.set()
+                break
+            except Exception as cmd_err:
+                logger.error(f"Error processing command: {cmd_err}", exc_info=True)
+
+            # Update Logic State (Synchronous)
+            logic_app_state.logic.update_status_and_check_completion()
+
+            # Send Render Data (Async)
+            current_time = time.monotonic()
+            if current_time - last_render_send_time > render_send_interval:
+                try:
+                    render_data = await logic_app_state.get_render_data()
+                    render_data_queue.put(
+                        {RENDER_DATA_SENTINEL: render_data}, block=False
+                    )
+                    last_render_send_time = current_time
+                except queue.Full:
+                    logger.debug("Render data queue full.")
+                    last_render_send_time = current_time
+                except (EOFError, BrokenPipeError):
+                    logger.warning("Render data queue connection lost.")
+                    stop_event.set()
+                    break
+                except Exception as send_err:
+                    logger.error(
+                        f"Error sending render data: {send_err}", exc_info=True
+                    )
+
+            # Loop Timing
+            loop_duration = time.monotonic() - loop_start
+            sleep_time = max(0, 0.005 - loop_duration)
+            await asyncio.sleep(sleep_time)
+
+    try:
+        asyncio.run(main_loop())
+    except KeyboardInterrupt:
+        logger.warning("Logic process received KeyboardInterrupt.")
+        stop_event.set()
+    except Exception as loop_err:
+        logger.critical(f"Critical error in logic main loop: {loop_err}", exc_info=True)
+        stop_event.set()
+
+    # --- Shutdown Logic ---
+    logger.info("Logic Process shutting down...")
+    try:
+        if logic_app_state:
+            if logic_app_state.worker_manager:
+                logic_app_state.worker_manager.stop_all_workers()  # Stops Ray actors
+            if logic_app_state.logic:
+                logic_app_state.logic.save_final_checkpoint()  # CheckpointManager interacts with actors
+            if logic_app_state.initializer:
+                logic_app_state.initializer.close_stats_recorder()
+            # Terminate other actors if needed (e.g., AgentPredictor, StatsAggregatorActor)
+            if logic_app_state.agent_predictor:
+                try:
+                    ray.kill(logic_app_state.agent_predictor)
+                except Exception as e:
+                    logger.error(f"Error killing AgentPredictor: {e}")
+            if logic_app_state.stats_aggregator and isinstance(
+                logic_app_state.stats_aggregator, ray.actor.ActorHandle
+            ):
+                try:
+                    ray.kill(logic_app_state.stats_aggregator)
+                except Exception as e:
+                    logger.error(f"Error killing StatsAggregatorActor: {e}")
+        else:
+            logger.warning("logic_app_state not initialized during shutdown sequence.")
+    except Exception as shutdown_err:
+        logger.error(
+            f"Error during logic process shutdown: {shutdown_err}", exc_info=True
+        )
+    finally:
+        try:
+            render_data_queue.put(STOP_SENTINEL)
+        except Exception as q_err_final:
+            logger.warning(f"Could not send final STOP sentinel to UI: {q_err_final}")
+        if ray_initialized:
+            logger.info("Shutting down Ray...")
+            try:
+                ray.shutdown()
+            except Exception as ray_down_err:
+                logger.error(f"Error during Ray shutdown: {ray_down_err}")
+        logger.info(
+            f"Logic Process finished. Runtime: {time.time() - logic_start_time:.2f}s"
+        )
+
+
+File: main_pygame.py
+# File: main_pygame.py
+import sys
+import time
+import threading
+import logging
+import logging.handlers
+import argparse
+import os
+import traceback
+import multiprocessing as mp
+from typing import Optional
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+
+try:
+    from config import BASE_CHECKPOINT_DIR, set_run_id, get_run_id, get_run_log_dir
+    from training.checkpoint_manager import find_latest_run_and_checkpoint
+    from logger import TeeLogger
+    from ui_process import run_ui_process
+    from logic_process import run_logic_process
+except ImportError as e:
+    print(f"Error importing core modules/functions: {e}\n{traceback.format_exc()}")
     sys.exit(1)
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.INFO, format="[%(levelname)s|%(processName)s] %(message)s"
 )
-# Reduce default logging noise
-logging.getLogger("mcts").setLevel(logging.WARNING)
-logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
-logging.getLogger("workers.training_worker").setLevel(logging.INFO)
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
-logging.getLogger("PIL").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)  # Main app logger
-
-# --- Constants ---
-LOOP_TIMING_INTERVAL = 60
-
-
-class MainApp:
-    """Main application class orchestrating Pygame UI and AlphaZero components."""
-
-    def __init__(self, checkpoint_to_load: Optional[str] = None):
-        # Config Instances
-        self.vis_config = VisConfig()
-        self.env_config = EnvConfig()
-        self.train_config_instance = TrainConfig()
-        self.mcts_config = MCTSConfig()
-
-        # Core Components
-        self.screen: Optional[pygame.Surface] = None
-        self.clock: Optional[pygame.time.Clock] = None
-        self.renderer: Optional[UIRenderer] = None
-        self.input_handler: Optional[InputHandler] = None
-
-        # State
-        self.app_state: AppState = AppState.INITIALIZING
-        self.status: str = "Initializing..."
-        self.running: bool = True
-        self.update_progress_details: Dict[str, Any] = {}
-
-        # Threading & Communication
-        self.stop_event = threading.Event()
-        self.experience_queue: queue.Queue[ProcessedExperienceBatch] = queue.Queue(
-            maxsize=self.train_config_instance.BUFFER_CAPACITY
-        )
-        logger.info(
-            f"Experience Queue Size: {self.train_config_instance.BUFFER_CAPACITY}"
-        )
-
-        # RL Components (Managed by Initializer)
-        self.agent: Optional[AlphaZeroNet] = None
-        self.stats_aggregator: Optional[StatsAggregator] = None
-        self.demo_env: Optional[GameState] = None
-
-        # Helper Classes
-        self.device = get_torch_device()
-        set_device(self.device)
-        self.checkpoint_to_load = checkpoint_to_load
-        self.initializer = AppInitializer(self)
-        self.logic = AppLogic(self)
-        self.worker_manager = AppWorkerManager(self)
-        self.ui_utils = AppUIUtils(self)
-
-        # UI State
-        self.cleanup_confirmation_active: bool = False
-        self.cleanup_message: str = ""
-        self.last_cleanup_message_time: float = 0.0
-        self.total_gpu_memory_bytes: Optional[int] = None
-
-        # Timing
-        self.frame_count = 0
-        self.loop_times = deque(maxlen=LOOP_TIMING_INTERVAL)
-
-    def initialize(self):
-        """Initializes Pygame, directories, configs, and core components."""
-        logger.info("--- Application Initialization ---")
-        self.screen, self.clock = initialize_pygame(self.vis_config)
-        initialize_directories()
-        set_random_seeds(RANDOM_SEED)
-        run_pre_checks()
-
-        self.app_state = AppState.INITIALIZING
-        self.initializer.initialize_all()
-
-        self.agent = self.initializer.agent
-        self.stats_aggregator = self.initializer.stats_aggregator
-        self.demo_env = self.initializer.demo_env
-
-        if self.renderer and self.input_handler:
-            self.renderer.set_input_handler(self.input_handler)
-            if hasattr(self.input_handler, "app_ref"):
-                self.input_handler.app_ref = self
-
-        self.logic.check_initial_completion_status()
-        self.status = "Ready"
-        self.app_state = AppState.MAIN_MENU
-        logger.info("--- Initialization Complete ---")
-
-    def _handle_input(self) -> bool:
-        """Handles user input using the InputHandler."""
-        if self.input_handler:
-            return self.input_handler.handle_input(
-                self.app_state.value, self.cleanup_confirmation_active
-            )
-        else:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.logic.exit_app()
-                    return False
-            return True
-
-    def _update_state(self):
-        """Updates application logic and status."""
-        self.update_progress_details = {}
-        self.logic.update_status_and_check_completion()
-
-        # Update demo env timers if in demo/debug mode
-        if self.app_state in [AppState.PLAYING, AppState.DEBUG] and self.demo_env:
-            try:
-                self.demo_env._update_timers()
-            except Exception as e:
-                logger.error(f"Error updating demo env timers: {e}")
-
-    def _prepare_render_data(self) -> Dict[str, Any]:
-        """Gathers all necessary data for rendering the current frame."""
-        render_data = {
-            "app_state": self.app_state.value,
-            "status": self.status,
-            "cleanup_confirmation_active": self.cleanup_confirmation_active,
-            "cleanup_message": self.cleanup_message,
-            "last_cleanup_message_time": self.last_cleanup_message_time,
-            "update_progress_details": self.update_progress_details,
-            "demo_env": self.demo_env,  # Pass the demo env object itself
-            "env_config": self.env_config,
-            "num_envs": self.train_config_instance.NUM_SELF_PLAY_WORKERS,
-            "plot_data": {},
-            "stats_summary": {},
-            "best_game_state_data": None,
-            "agent_param_count": 0,
-            "worker_counts": {},
-            "is_process_running": False,
-            "worker_render_data": [],
-        }
-
-        if self.stats_aggregator:
-            render_data["plot_data"] = self.stats_aggregator.get_plot_data()
-            current_step = self.stats_aggregator.storage.current_global_step
-            render_data["stats_summary"] = self.stats_aggregator.get_summary(
-                current_step
-            )
-            render_data["best_game_state_data"] = (
-                self.stats_aggregator.get_best_game_state_data()
-            )
-
-        if self.initializer:
-            render_data["agent_param_count"] = self.initializer.agent_param_count
-
-        if self.worker_manager:
-            render_data["worker_counts"] = (
-                self.worker_manager.get_active_worker_counts()
-            )
-            render_data["is_process_running"] = (
-                self.worker_manager.is_any_worker_running()
-            )
-            if (
-                render_data["is_process_running"]
-                and self.app_state == AppState.MAIN_MENU
-            ):
-                num_to_render = self.vis_config.NUM_ENVS_TO_RENDER
-                if num_to_render > 0:
-                    render_data["worker_render_data"] = (
-                        self.worker_manager.get_worker_render_data(num_to_render)
-                    )
-
-        return render_data
-
-    def _render_frame(self, render_data: Dict[str, Any]):
-        """Renders the UI frame using the collected data."""
-        if self.renderer:
-            self.renderer.render_all(**render_data)
-        else:
-            try:
-                self.screen.fill((20, 0, 0))
-                font = pygame.font.Font(None, 30)
-                text_surf = font.render(
-                    "Renderer Initialization Failed!", True, (255, 50, 50)
-                )
-                self.screen.blit(
-                    text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
-                )
-                pygame.display.flip()
-            except Exception:
-                pass
-
-    def _log_loop_timing(self, loop_start_time: float):
-        """Logs average loop time periodically."""
-        self.loop_times.append(time.monotonic() - loop_start_time)
-        self.frame_count += 1
-
-    def run_main_loop(self):
-        """The main application loop."""
-        logger.info("Starting main application loop...")
-        while self.running:
-            loop_start_time = time.monotonic()
-
-            if not self.clock or not self.screen:
-                logger.error("Pygame clock or screen not initialized. Exiting.")
-                break
-
-            dt = self.clock.tick(self.vis_config.FPS) / 1000.0
-
-            self.running = self._handle_input()
-            if not self.running:
-                break
-
-            self._update_state()  # Updates demo timers if needed
-            render_data = self._prepare_render_data()
-            self._render_frame(render_data)
-
-            self._log_loop_timing(loop_start_time)
-
-        logger.info("Main application loop exited.")
-
-    def shutdown(self):
-        """Cleans up resources and exits."""
-        logger.info("Initiating shutdown sequence...")
-        logger.info("Stopping worker threads...")
-        self.worker_manager.stop_all_workers()
-        logger.info("Worker threads stopped.")
-        logger.info("Attempting final checkpoint save...")
-        self.logic.save_final_checkpoint()
-        logger.info("Final checkpoint save attempt finished.")
-        logger.info("Closing stats recorder (before pygame.quit)...")
-        self.initializer.close_stats_recorder()
-        logger.info("Stats recorder closed.")
-        logger.info("Quitting Pygame...")
-        pygame.quit()
-        logger.info("Pygame quit.")
-        logger.info("Shutdown complete.")
-
-
-# --- Main Execution ---
 tee_logger_instance: Optional[TeeLogger] = None
+log_listener_thread: Optional[threading.Thread] = None
+
+
+# --- Logging Setup Functions (remain the same) ---
+def setup_logging_queue_listener(log_queue: mp.Queue):
+    global log_listener_thread
+
+    def listener_process():
+        listener_logger = logging.getLogger("LogListener")
+        listener_logger.info("Log listener started.")
+        while True:
+            try:
+                record = log_queue.get()
+                if record is None:
+                    break
+                logger_handler = logging.getLogger(record.name)
+                logger_handler.handle(record)
+            except (EOFError, OSError):
+                listener_logger.warning("Log queue closed or broken pipe.")
+                break
+            except Exception as e:
+                print(f"Log listener error: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+        listener_logger.info("Log listener stopped.")
+
+    log_listener_thread = threading.Thread(
+        target=listener_process, daemon=True, name="LogListener"
+    )
+    log_listener_thread.start()
+    return log_listener_thread
 
 
 def setup_logging_and_run_id(args: argparse.Namespace):
-    """Sets up logging (including TeeLogger) and determines the run ID."""
     global tee_logger_instance
     run_id_source = "New"
-
     if args.load_checkpoint:
         try:
             run_id_from_path = os.path.basename(os.path.dirname(args.load_checkpoint))
@@ -3419,10 +3802,8 @@ def setup_logging_and_run_id(args: argparse.Namespace):
         else:
             get_run_id()
             run_id_source = f"New (No previous runs found)"
-
     current_run_id = get_run_id()
     print(f"Run ID: {current_run_id} (Source: {run_id_source})")
-
     original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
         log_file_dir = get_run_log_dir()
@@ -3431,42 +3812,43 @@ def setup_logging_and_run_id(args: argparse.Namespace):
         tee_logger_instance = TeeLogger(log_file_path, sys.stdout)
         sys.stdout = tee_logger_instance
         sys.stderr = tee_logger_instance
-        print(f"Console output will be mirrored to: {log_file_path}")
+        print(f"Main process console output will be mirrored to: {log_file_path}")
     except Exception as e:
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         logger.error(f"Error setting up TeeLogger: {e}", exc_info=True)
-
-    # Configure Python's logging system
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
-    # Set default levels for noisy libraries
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("PIL").setLevel(logging.WARNING)
-    # Set default levels for our workers unless overridden by args.log_level
-    if log_level <= logging.INFO:
-        logging.getLogger("mcts").setLevel(logging.WARNING)  # Keep MCTS quieter
-        logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
-        logging.getLogger("workers.training_worker").setLevel(logging.INFO)
-    # If DEBUG is requested, set workers/MCTS to DEBUG too
-    if log_level == logging.DEBUG:
-        logging.getLogger("mcts").setLevel(logging.DEBUG)
-        logging.getLogger("workers.self_play_worker").setLevel(logging.DEBUG)
-        logging.getLogger("workers.training_worker").setLevel(logging.DEBUG)
-
-    logger.info(f"Logging level set to: {args.log_level.upper()}")
+    logger.info(f"Main process logging level set to: {args.log_level.upper()}")
     logger.info(f"Using Run ID: {current_run_id}")
     if args.load_checkpoint:
         logger.info(f"Attempting to load checkpoint: {args.load_checkpoint}")
-
     return original_stdout, original_stderr
 
 
-def cleanup_logging(original_stdout, original_stderr, exit_code):
-    """Restores standard output/error and closes logger."""
+def cleanup_logging(
+    original_stdout, original_stderr, log_queue: Optional[mp.Queue], exit_code
+):
     print("[Main Finally] Restoring stdout/stderr and closing logger...")
-    logger = logging.getLogger(__name__)
-
+    if log_queue:
+        try:
+            log_queue.put(None)
+            log_queue.close()
+            log_queue.join_thread()
+        except Exception as qe:
+            print(f"Error closing log queue: {qe}", file=original_stderr)
+    if log_listener_thread:
+        try:
+            log_listener_thread.join(timeout=2.0)
+            if log_listener_thread.is_alive():
+                print(
+                    "Warning: Log listener thread did not join cleanly.",
+                    file=original_stderr,
+                )
+        except Exception as le:
+            print(f"Error joining log listener thread: {le}", file=original_stderr)
     if tee_logger_instance:
         try:
             if isinstance(sys.stdout, TeeLogger):
@@ -3480,57 +3862,139 @@ def cleanup_logging(original_stdout, original_stderr, exit_code):
         except Exception as log_close_err:
             original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
             traceback.print_exc(file=original_stderr)
-
     print(f"[Main Finally] Exiting with code {exit_code}.")
     sys.exit(exit_code)
 
 
+# =========================================================================
+# Main Execution Block
+# =========================================================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AlphaZero Trainer")
+    mp.freeze_support()
+    try:
+        mp.set_start_method("spawn", force=True)
+        print("Multiprocessing start method set to 'spawn'.")
+    except RuntimeError:
+        print("Could not set start method to 'spawn', using default.")
+
+    parser = argparse.ArgumentParser(description="AlphaZero Trainer - Multiprocess")
     parser.add_argument(
-        "--load-checkpoint",
-        type=str,
-        default=None,
-        help="Path to a specific checkpoint file (.pth) to load.",
+        "--load-checkpoint", type=str, default=None, help="Path to checkpoint."
     )
     parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level.",
+        help="Logging level.",
     )
     args = parser.parse_args()
 
     original_stdout, original_stderr = setup_logging_and_run_id(args)
 
-    app = None
+    ui_to_logic_queue = mp.Queue()
+    logic_to_ui_queue = mp.Queue(maxsize=10)
+    stop_event = mp.Event()
+    log_queue = mp.Queue()
+    log_listener = setup_logging_queue_listener(log_queue)
+
+    # Set daemon=True for simpler exit handling, rely on stop_event and timeouts
+    ui_process = mp.Process(
+        target=run_ui_process,
+        args=(stop_event, ui_to_logic_queue, logic_to_ui_queue, log_queue),
+        name="UIProcess",
+        daemon=True,
+    )
+    logic_process = mp.Process(
+        target=run_logic_process,
+        args=(
+            stop_event,
+            ui_to_logic_queue,
+            logic_to_ui_queue,
+            args.load_checkpoint,
+            log_queue,
+        ),
+        name="LogicProcess",
+        daemon=True,
+    )
+
     exit_code = 0
     try:
-        app = MainApp(checkpoint_to_load=args.load_checkpoint)
-        app.initialize()
-        app.run_main_loop()
+        logger.info("Starting UI process...")
+        ui_process.start()
+        logger.info("Starting Logic process...")
+        logic_process.start()
 
-    except KeyboardInterrupt:
-        logger.warning("KeyboardInterrupt received. Shutting down gracefully...")
-        if app:
-            app.logic.exit_app()
-        else:
-            pygame.quit()
-        exit_code = 130
+        # --- Wait for Processes ---
+        while True:  # Loop indefinitely until stop_event or error
+            if stop_event.is_set():
+                logger.info("Stop event detected by main process. Exiting wait loop.")
+                break
+            if not logic_process.is_alive():
+                logger.warning("Logic process terminated unexpectedly. Signaling stop.")
+                stop_event.set()
+                exit_code = 1  # Indicate error
+                break
+            if not ui_process.is_alive():
+                logger.warning("UI process terminated unexpectedly. Signaling stop.")
+                stop_event.set()
+                exit_code = 1  # Indicate error
+                break
+            try:
+                # Sleep briefly to prevent busy-waiting
+                time.sleep(0.2)
+            except KeyboardInterrupt:
+                logger.warning(
+                    "Main process received KeyboardInterrupt. Signaling stop..."
+                )
+                stop_event.set()
+                exit_code = 130
+                break  # Exit the waiting loop
 
-    except Exception as e:
-        logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
-        if app:
-            app.logic.exit_app()
-        else:
-            pygame.quit()
+    except Exception as main_err:
+        logger.critical(
+            f"Error in main process coordination: {main_err}", exc_info=True
+        )
+        stop_event.set()
         exit_code = 1
 
     finally:
-        if app:
-            app.shutdown()
-        cleanup_logging(original_stdout, original_stderr, exit_code)
+        logger.info("Main process initiating cleanup...")
+        if not stop_event.is_set():
+            stop_event.set()  # Ensure stop is signaled
+
+        time.sleep(0.5)  # Allow processes to potentially react
+
+        # --- Join Processes with Timeouts ---
+        join_timeout_logic = 10.0  # More time for logic to save
+        join_timeout_ui = 3.0
+
+        logger.info(
+            f"Waiting for Logic process to join (timeout: {join_timeout_logic}s)..."
+        )
+        if logic_process.is_alive():
+            logic_process.join(timeout=join_timeout_logic)
+        if logic_process.is_alive():
+            logger.warning("Logic process did not join cleanly. Terminating.")
+            try:
+                logic_process.terminate()
+                logic_process.join(1.0)
+            except Exception as term_err:
+                logger.error(f"Error terminating Logic process: {term_err}")
+
+        logger.info(f"Waiting for UI process to join (timeout: {join_timeout_ui}s)...")
+        if ui_process.is_alive():
+            ui_process.join(timeout=join_timeout_ui)
+        if ui_process.is_alive():
+            logger.warning("UI process did not join cleanly. Terminating.")
+            try:
+                ui_process.terminate()
+                ui_process.join(1.0)
+            except Exception as term_err:
+                logger.error(f"Error terminating UI process: {term_err}")
+
+        logger.info("Processes joined or terminated.")
+        cleanup_logging(original_stdout, original_stderr, log_queue, exit_code)
 
 
 File: requirements.txt
@@ -3542,16 +4006,164 @@ cloudpickle
 matplotlib
 psutil
 numba>=0.55.0
+ray[default]>=2.0.0 # Added Ray
+
+File: ui_process.py
+# File: ui_process.py
+# Contains the run_ui_process function and necessary UI-related imports
+
+import pygame
+import sys
+import time
+import queue
+import logging
+import logging.handlers
+import multiprocessing as mp
+from typing import Optional, Dict, Any
+
+try:
+    from config import VisConfig, BLACK, RED, WHITE  # Import necessary constants
+    from app_state import AppState
+    from ui.renderer import UIRenderer
+    from ui.input_handler import InputHandler
+    from app_setup import initialize_pygame
+except ImportError as e:
+    print(f"[UI Process Import Error] {e}", file=sys.stderr)
+
+RENDER_DATA_SENTINEL = "RENDER_DATA"
+STOP_SENTINEL = "STOP"
+ERROR_SENTINEL = "ERROR"
+UI_QUEUE_GET_TIMEOUT = 0.01
+
+
+def run_ui_process(
+    stop_event: mp.Event,
+    command_queue: mp.Queue,
+    render_data_queue: mp.Queue,
+    log_queue: Optional[mp.Queue] = None,
+):
+    if log_queue:
+        qh = logging.handlers.QueueHandler(log_queue)
+        root = logging.getLogger()
+        if not any(isinstance(h, logging.handlers.QueueHandler) for h in root.handlers):
+            root.addHandler(qh)
+            root.setLevel(logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.info("UI Process starting...")
+
+    vis_config = VisConfig()
+    screen: Optional[pygame.Surface] = None
+    clock: Optional[pygame.time.Clock] = None
+    renderer: Optional[UIRenderer] = None
+    input_handler: Optional[InputHandler] = None
+    last_render_data: Dict[str, Any] = {}
+    running = True
+
+    try:
+        screen, clock = initialize_pygame(vis_config)
+        renderer = UIRenderer(screen, vis_config)
+        input_handler = InputHandler(screen, renderer, command_queue, stop_event)
+        renderer.set_input_handler(input_handler)
+        logger.info("Pygame and UI components initialized.")
+    except Exception as init_err:
+        logger.critical(f"UI Initialization failed: {init_err}", exc_info=True)
+        stop_event.set()
+        running = False
+
+    while running and not stop_event.is_set():
+        if not clock or not screen or not renderer or not input_handler:
+            logger.error("Critical UI components not initialized. Exiting UI loop.")
+            stop_event.set()
+            break
+
+        # --- Handle Input ---
+        try:
+            input_handler.update_state(
+                last_render_data.get("app_state", AppState.INITIALIZING.value),
+                last_render_data.get("cleanup_confirmation_active", False),
+                last_render_data.get("is_process_running", False),  # Pass worker status
+            )
+            running = input_handler.handle_input()  # This might set stop_event
+            if not running:
+                logger.info("Input handler requested exit.")
+                break
+        except Exception as input_err:
+            logger.error(f"Error handling input: {input_err}", exc_info=True)
+            stop_event.set()
+            running = False
+            break
+
+        # --- Get Render Data ---
+        try:
+            item = render_data_queue.get(timeout=UI_QUEUE_GET_TIMEOUT)
+            if isinstance(item, dict) and RENDER_DATA_SENTINEL in item:
+                last_render_data = item[RENDER_DATA_SENTINEL]
+            elif item == STOP_SENTINEL:
+                logger.info("Received STOP sentinel from logic process.")
+                running = False
+                break
+            elif isinstance(item, dict) and ERROR_SENTINEL in item:
+                logger.error(f"Received ERROR sentinel: {item[ERROR_SENTINEL]}")
+                last_render_data = last_render_data.copy()
+                last_render_data["app_state"] = AppState.ERROR.value
+                last_render_data["status"] = item[ERROR_SENTINEL]
+        except queue.Empty:
+            pass  # No new data
+        except (EOFError, BrokenPipeError):
+            logger.warning("Render data queue connection lost.")
+            running = False
+            stop_event.set()
+        except Exception as queue_err:
+            logger.error(f"Error getting render data: {queue_err}", exc_info=True)
+
+        # --- Render Frame ---
+        if last_render_data:
+            try:
+                renderer.render_all(**last_render_data)
+            except Exception as render_err:
+                logger.error(f"Error rendering frame: {render_err}", exc_info=True)
+                try:  # Fallback render
+                    screen.fill(BLACK)
+                    font = pygame.font.Font(None, 30)
+                    err_surf = font.render("Error during rendering!", True, RED)
+                    screen.blit(
+                        err_surf, err_surf.get_rect(center=screen.get_rect().center)
+                    )
+                    pygame.display.flip()
+                except Exception:
+                    pass
+        else:  # Render waiting screen
+            try:
+                screen.fill(BLACK)
+                font = pygame.font.Font(None, 30)
+                wait_surf = font.render("Waiting for data...", True, WHITE)
+                screen.blit(
+                    wait_surf, wait_surf.get_rect(center=screen.get_rect().center)
+                )
+                pygame.display.flip()
+            except Exception:
+                pass
+
+        clock.tick(vis_config.FPS if vis_config.FPS > 0 else 60)
+
+    logger.info("UI Process shutting down...")
+    pygame.quit()
+    logger.info("UI Process finished.")
+
 
 File: agent\alphazero_net.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional, Any, List  # Added List
-import numpy as np  # Added numpy
+from typing import Dict, Tuple, Optional, Any, List
+import numpy as np
+import ray
+import logging
 
 from config import ModelConfig, EnvConfig
 from utils.types import StateType, ActionType
+
+logger = logging.getLogger(__name__)
 
 
 class ResidualBlock(nn.Module):
@@ -3696,23 +4308,19 @@ class AlphaZeroNet(nn.Module):
 
         return policy_logits, value
 
-    def _prepare_state_batch(self, state_numpy_list: List[StateType]) -> StateType:
-        """Converts a list of numpy state dicts to a batched tensor state dict."""
-        device = next(self.parameters()).device
-        # Initialize structure to hold batched data for each state component
+    def _prepare_state_batch(
+        self, state_numpy_list: List[StateType], device: torch.device
+    ) -> StateType:
+        """Converts a list of numpy state dicts to a batched tensor state dict on the specified device."""
         batched_tensors = {key: [] for key in state_numpy_list[0].keys()}
-
         for state_numpy in state_numpy_list:
             for key, value in state_numpy.items():
                 if key in batched_tensors:
                     batched_tensors[key].append(value)
                 else:
-                    # This shouldn't happen if all state dicts have the same keys
-                    print(
+                    logger.warning(
                         f"Warning: Key {key} not found in initial state dict during batching."
                     )
-
-        # Convert lists of numpy arrays to batched tensors
         final_batched_states = {
             k: torch.from_numpy(np.stack(v)).to(device)
             for k, v in batched_tensors.items()
@@ -3720,53 +4328,84 @@ class AlphaZeroNet(nn.Module):
         return final_batched_states
 
     def predict_batch(
-        self,
-        state_numpy_list: List[
-            StateType
-        ],  # Expects list of numpy arrays from GameState
+        self, state_numpy_list: List[StateType], device: torch.device
     ) -> Tuple[List[Dict[ActionType, float]], List[float]]:
         """
         Performs batched prediction for MCTS.
-        Takes a list of state dictionaries (numpy arrays), converts to a batch tensor,
-        runs inference, applies softmax, and returns lists of policy dicts and scalar values.
         """
         if not state_numpy_list:
             return [], []
-
-        # Prepare the batch of states
-        batched_state_tensors = self._prepare_state_batch(state_numpy_list)
-
+        batched_state_tensors = self._prepare_state_batch(state_numpy_list, device)
         self.eval()
         with torch.no_grad():
             policy_logits_batch, value_batch = self.forward(batched_state_tensors)
-
-        # Process results back into lists
         policy_probs_batch = F.softmax(policy_logits_batch, dim=-1).cpu().numpy()
-        values = value_batch.squeeze(-1).cpu().numpy().tolist()  # Squeeze value output
-
+        values = value_batch.squeeze(-1).cpu().numpy().tolist()
         policy_dicts = []
         for policy_probs in policy_probs_batch:
             policy_dicts.append({i: float(prob) for i, prob in enumerate(policy_probs)})
-
         return policy_dicts, values
 
     def predict(
-        self, state_numpy: StateType  # Expects numpy arrays from GameState
+        self, state_numpy: StateType, device: torch.device
     ) -> Tuple[Dict[ActionType, float], float]:
         """
-        Convenience method for single prediction (e.g., initial root prediction).
-        Uses predict_batch internally.
+        Convenience method for single prediction.
         """
-        policy_list, value_list = self.predict_batch([state_numpy])
+        policy_list, value_list = self.predict_batch([state_numpy], device)
         return policy_list[0], value_list[0]
 
     def get_state_dict(self) -> Dict[str, Any]:
         """Returns the model's state dictionary."""
         return self.state_dict()
 
-    def load_state_dict(self, state_dict: Dict[str, Any]):
+    def load_state_dict_custom(self, state_dict: Dict[str, Any]):
         """Loads the model's state dictionary."""
         super().load_state_dict(state_dict)
+
+
+# --- Ray Actor Wrapper ---
+@ray.remote(num_cpus=0, num_gpus=1 if torch.cuda.is_available() else 0)
+class AgentPredictor:
+    """Ray actor to handle batched predictions using the AlphaZeroNet."""
+
+    def __init__(self, env_config: EnvConfig, model_config: ModelConfig.Network):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = AlphaZeroNet(env_config=env_config, model_config=model_config).to(
+            self.device
+        )
+        self.model.eval()
+        logger.info(f"[AgentPredictor] Initialized on device: {self.device}")
+
+    def predict_batch(
+        self, state_numpy_list: List[StateType]
+    ) -> Tuple[List[Dict[ActionType, float]], List[float]]:
+        """Performs batched prediction using the internal model."""
+        if not state_numpy_list:
+            return [], []
+        return self.model.predict_batch(state_numpy_list, self.device)
+
+    def get_weights(self) -> Dict[str, Any]:
+        """Returns the current model weights."""
+        return self.model.state_dict()
+
+    def set_weights(self, weights: Dict[str, Any]):
+        """Sets the model weights."""
+        self.model.load_state_dict(weights)
+        self.model.eval()
+        logger.info("[AgentPredictor] Weights updated.")
+
+    def get_param_count(self) -> int:
+        """Calculates and returns the number of trainable parameters."""
+        try:
+            return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        except Exception as e:
+            logger.error(f"[AgentPredictor] Error calculating param count: {e}")
+            return 0
+
+    def health_check(self):
+        """Basic health check method for Ray."""
+        return "OK"
 
 
 File: agent\__init__.py
@@ -3869,19 +4508,19 @@ from .constants import (
 class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
-    PUCT_C: float = 1.5
-    NUM_SIMULATIONS: int = 5000
+    PUCT_C: float = 1.25  # Slightly lower exploration emphasis
+    NUM_SIMULATIONS: int = 25  # Significantly reduced simulations per move
     TEMPERATURE_INITIAL: float = 1.0
-    TEMPERATURE_FINAL: float = 0.01
-    TEMPERATURE_ANNEAL_STEPS: int = 30
+    TEMPERATURE_FINAL: float = 0.1  # Anneal faster
+    TEMPERATURE_ANNEAL_STEPS: int = 15  # Anneal over fewer steps
     DIRICHLET_ALPHA: float = 0.3
     DIRICHLET_EPSILON: float = 0.25
-    MAX_SEARCH_DEPTH: int = 100
+    MAX_SEARCH_DEPTH: int = 50  # Reduced max depth
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 4
-    FPS = 0
+    NUM_ENVS_TO_RENDER = 2  # Reduced to match NUM_SELF_PLAY_WORKERS
+    FPS = 30  # Limit FPS for smoother UI during short runs
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00  # Keep at 0 for workers
@@ -3968,20 +4607,20 @@ class TransformerConfig:
 class TrainConfig:
     """Configuration parameters for the Training Worker."""
 
-    CHECKPOINT_SAVE_FREQ = 1000
+    CHECKPOINT_SAVE_FREQ = 200  # Save more frequently for short runs
     LOAD_CHECKPOINT_PATH: Optional[str] = None
-    NUM_SELF_PLAY_WORKERS: int = 8
-    BATCH_SIZE: int = 512
-    LEARNING_RATE: float = 1e-4
+    NUM_SELF_PLAY_WORKERS: int = 2# Reduced workers
+    BATCH_SIZE: int = 64  # Smaller batch size
+    LEARNING_RATE: float = 3e-4  # Slightly higher LR might help faster convergence
     WEIGHT_DECAY: float = 1e-5
-    NUM_TRAINING_STEPS_PER_ITER: int = 100
-    MIN_BUFFER_SIZE_TO_TRAIN: int = 2000
-    BUFFER_CAPACITY: int = 200000
+    NUM_TRAINING_STEPS_PER_ITER: int = 20  # Fewer training steps per iteration
+    MIN_BUFFER_SIZE_TO_TRAIN: int = 200  # Start training sooner
+    BUFFER_CAPACITY: int = 2000  # Smaller buffer
     POLICY_LOSS_WEIGHT: float = 1.0
     VALUE_LOSS_WEIGHT: float = 1.0
     USE_LR_SCHEDULER: bool = True
     SCHEDULER_TYPE: str = "CosineAnnealingLR"
-    SCHEDULER_T_MAX: int = 100000
+    SCHEDULER_T_MAX: int = 5000  # Reduced scheduler cycle for faster testing
     SCHEDULER_ETA_MIN: float = 1e-6
 
 
@@ -3992,24 +4631,24 @@ class ModelConfig:
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [32, 64, 128]
+        CONV_CHANNELS = [16, 32]  # Reduced channels
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
-        SHAPE_FEATURE_MLP_DIMS = [64]
+        SHAPE_FEATURE_MLP_DIMS = [32]  # Reduced MLP dims
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
-        COMBINED_FC_DIMS = [256, 128]
+        COMBINED_FC_DIMS = [64]  # Reduced FC dims
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
         DROPOUT_FC = 0.1
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [100, 500]
-    CONSOLE_LOG_FREQ = 100
-    PLOT_DATA_WINDOW = 10000
+    STATS_AVG_WINDOW: List[int] = [50, 200]  # Smaller windows for faster feedback
+    CONSOLE_LOG_FREQ = 50  # Log more frequently
+    PLOT_DATA_WINDOW = 1000  # Reduced plot window
 
 
 class DemoConfig:
@@ -5687,108 +6326,157 @@ File: mcts\search.py
 # File: mcts/search.py
 import numpy as np
 import time
-import copy  # Keep for potential future use, but avoid for GameState
+import copy
 from typing import Dict, Optional, Tuple, Callable, Any, List
 import logging
-import torch  # Added for batching
-import threading  # Added for stop_event
+import torch
+import threading
+import multiprocessing as mp
+import ray  # Added Ray
 
-from environment.game_state import GameState  # Import GameState directly
+from environment.game_state import GameState
 from utils.types import ActionType, StateType
 from .node import MCTSNode
 from config import MCTSConfig, EnvConfig
 
+# Removed NetworkPredictor type hint, using ActorHandle now
+# from agent.alphazero_net import AgentPredictor # Import Actor type if needed for hinting
 
-# Updated signature for batch prediction
-NetworkPredictor = Callable[
-    [List[StateType]], Tuple[List[Dict[ActionType, float]], List[float]]
-]
 logger = logging.getLogger(__name__)
 
 
 class MCTS:
     """Monte Carlo Tree Search implementation based on AlphaZero principles with batching."""
 
+    MCTS_NN_BATCH_SIZE = 8  # Default internal batch size for NN predictions
+
     def __init__(
         self,
-        network_predictor: NetworkPredictor,  # Predictor now handles batches
+        # network_predictor: NetworkPredictor, # Replaced with actor handle
+        agent_predictor: ray.actor.ActorHandle,  # Actor handle for AgentPredictor
         config: Optional[MCTSConfig] = None,
         env_config: Optional[EnvConfig] = None,
-        batch_size: int = 8,  # Default MCTS batch size
-        stop_event: Optional[threading.Event] = None,  # Add stop_event
+        batch_size: int = MCTS_NN_BATCH_SIZE,
+        stop_event: Optional[mp.Event] = None,
     ):
-        self.network_predictor = network_predictor
+        # self.network_predictor = network_predictor # Removed
+        self.agent_predictor = agent_predictor  # Store actor handle
         self.config = config if config else MCTSConfig()
         self.env_config = env_config if env_config else EnvConfig()
-        self.batch_size = batch_size  # Store batch size
-        self.stop_event = stop_event  # Store stop_event
+        self.batch_size = max(1, batch_size)
+        self.stop_event = stop_event
         self.log_prefix = "[MCTS]"
         logger.info(
-            f"{self.log_prefix} Initialized with NN batch size: {self.batch_size}"
+            f"{self.log_prefix} Initialized with AgentPredictor actor. NN batch size: {self.batch_size}"
         )
 
     def _select_leaf(self, root_node: MCTSNode) -> Tuple[MCTSNode, int]:
-        """Traverses the tree using PUCT until a leaf node is reached. Returns node and depth."""
+        """Selects a leaf node using PUCT criteria, checking stop_event."""
         node = root_node
         depth = 0
         while node.is_expanded and not node.is_terminal:
             if self.stop_event and self.stop_event.is_set():
-                raise InterruptedError("MCTS selection interrupted by stop event.")
+                raise InterruptedError("MCTS selection interrupted.")
+
             if depth >= self.config.MAX_SEARCH_DEPTH:
                 break
             if not node.children:
                 break
-            node = node.select_best_child()
-            depth += 1
+
+            try:
+                node = node.select_best_child()
+                depth += 1
+            except ValueError:
+                logger.warning(
+                    f"{self.log_prefix} Node claims expanded but has no selectable children."
+                )
+                break
+
         return node, depth
 
     def _expand_and_backpropagate_batch(
         self, nodes_to_expand: List[MCTSNode]
     ) -> Tuple[float, int]:
         """
-        Expands a batch of leaf nodes using batched NN prediction and backpropagates results.
+        Expands a batch of leaf nodes using batched NN prediction via Ray actor and backpropagates results.
+        Checks stop_event more frequently.
         Returns (total_nn_prediction_time, nodes_created_count).
         """
         if not nodes_to_expand:
             return 0.0, 0
+
         if self.stop_event and self.stop_event.is_set():
-            raise InterruptedError("MCTS expansion interrupted by stop event.")
+            raise InterruptedError(
+                "MCTS expansion interrupted by stop event (before NN)."
+            )
 
         batch_states = [node.game_state.get_state() for node in nodes_to_expand]
         total_nn_prediction_time = 0.0
         nodes_created_count = 0
+        policy_probs_list = []
+        predicted_values = []
 
         try:
             start_pred_time = time.monotonic()
-            policy_probs_list, predicted_values = self.network_predictor(batch_states)
+            # --- Call the AgentPredictor actor ---
+            prediction_ref = self.agent_predictor.predict_batch.remote(batch_states)
+            policy_probs_list, predicted_values = ray.get(prediction_ref)
+            # --- End Actor Call ---
             total_nn_prediction_time = time.monotonic() - start_pred_time
-            logger.info(
-                f"{self.log_prefix} Batched NN Prediction ({len(batch_states)} states) took {total_nn_prediction_time:.4f}s."
+            logger.debug(
+                f"{self.log_prefix} Batched NN Prediction ({len(batch_states)} states) via Actor took {total_nn_prediction_time:.4f}s."
             )
+        except ray.exceptions.RayActorError as rae:
+            logger.error(
+                f"{self.log_prefix} RayActorError during prediction: {rae}",
+                exc_info=True,
+            )
+            # Backpropagate 0 if NN fails, mark as expanded to avoid re-selection
+            for node in nodes_to_expand:
+                if self.stop_event and self.stop_event.is_set():
+                    break
+                if not node.is_expanded:
+                    node.is_expanded = True
+                    node.backpropagate(0.0)
+            return total_nn_prediction_time, 0
         except Exception as e:
             logger.error(
                 f"{self.log_prefix} Error during batched network prediction: {e}",
                 exc_info=True,
             )
+            # Backpropagate 0 if NN fails, mark as expanded to avoid re-selection
             for node in nodes_to_expand:
+                if self.stop_event and self.stop_event.is_set():
+                    break
                 if not node.is_expanded:
                     node.is_expanded = True
                     node.backpropagate(0.0)
             return total_nn_prediction_time, 0
 
+        if self.stop_event and self.stop_event.is_set():
+            raise InterruptedError(
+                "MCTS expansion interrupted by stop event (after NN)."
+            )
+
         for i, node in enumerate(nodes_to_expand):
             if self.stop_event and self.stop_event.is_set():
-                raise InterruptedError(
-                    "MCTS expansion processing interrupted by stop event."
+                logger.info(
+                    f"{self.log_prefix} Stop event detected during batch expansion processing."
                 )
+                break
 
             if node.is_expanded or node.is_terminal:
                 if node.visit_count == 0:
-                    node.backpropagate(predicted_values[i])
+                    value_to_prop = (
+                        predicted_values[i] if i < len(predicted_values) else 0.0
+                    )
+                    node.backpropagate(value_to_prop)
                 continue
 
-            policy_probs_dict = policy_probs_list[i]
-            predicted_value = predicted_values[i]
+            policy_probs_dict = (
+                policy_probs_list[i] if i < len(policy_probs_list) else {}
+            )
+            predicted_value = predicted_values[i] if i < len(predicted_values) else 0.0
             children_created_count_node = 0
 
             valid_actions = node.game_state.valid_actions()
@@ -5801,13 +6489,18 @@ class MCTS:
             parent_state = node.game_state
             start_expand_time = time.monotonic()
             for action in valid_actions:
+                if self.stop_event and self.stop_event.is_set():
+                    logger.info(
+                        f"{self.log_prefix} Stop event detected during child creation loop for node {id(node)}."
+                    )
+                    if not node.is_expanded:
+                        node.is_expanded = True
+                        node.backpropagate(predicted_value)
+                    break
+
                 try:
-                    # --- Create new state and apply action ---
-                    # This uses the grid's deepcopy method, which is necessary for now.
-                    child_state = GameState()  # Create a fresh GameState
-                    child_state.grid = (
-                        parent_state.grid.deepcopy_grid()
-                    )  # Use grid's deepcopy
+                    child_state = GameState()
+                    child_state.grid = parent_state.grid.deepcopy_grid()
                     child_state.shapes = [
                         s.copy() if s else None for s in parent_state.shapes
                     ]
@@ -5818,12 +6511,7 @@ class MCTS:
                     child_state.pieces_placed_this_episode = (
                         parent_state.pieces_placed_this_episode
                     )
-                    # Apply step to the *new* child_state
                     _, done = child_state.step(action)
-                    # --- End state modification ---
-                    logger.info(
-                        f"{self.log_prefix} Created child state for action {action}. Parent score: {parent_state.game_score}, Child score: {child_state.game_score}, Done: {done}"
-                    )
 
                     prior_prob = policy_probs_dict.get(action, 0.0)
                     child_node = MCTSNode(
@@ -5835,7 +6523,6 @@ class MCTS:
                     )
                     if done:
                         child_node.is_terminal = True
-
                     node.children[action] = child_node
                     children_created_count_node += 1
                 except Exception as child_creation_err:
@@ -5844,16 +6531,31 @@ class MCTS:
                         exc_info=True,
                     )
                     continue
-            expand_duration = time.monotonic() - start_expand_time
-            logger.info(
-                f"{self.log_prefix} Node expansion ({children_created_count_node} children) took {expand_duration:.4f}s."
-            )
 
+            if self.stop_event and self.stop_event.is_set():
+                logger.info(
+                    f"{self.log_prefix} Stop event detected after child creation loop for node {id(node)}."
+                )
+                if not node.is_expanded:
+                    node.is_expanded = True
+                    node.backpropagate(predicted_value)
+                break
+
+            expand_duration = time.monotonic() - start_expand_time
             node.is_expanded = True
             nodes_created_count += children_created_count_node
+
+            if self.stop_event and self.stop_event.is_set():
+                logger.info(
+                    f"{self.log_prefix} Stop event detected before backpropagation for node {id(node)}."
+                )
+                break
             node.backpropagate(predicted_value)
 
         return total_nn_prediction_time, nodes_created_count
+
+    # run_simulations, _add_dirichlet_noise, get_policy_target, choose_action remain largely the same
+    # but they now rely on _expand_and_backpropagate_batch which uses the Ray actor.
 
     def run_simulations(
         self, root_state: GameState, num_simulations: int
@@ -5861,45 +6563,28 @@ class MCTS:
         """
         Runs the MCTS process for a given number of simulations using batching.
         Returns the root node and a dictionary of simulation statistics.
+        Handles InterruptedError from stop_event checks.
         """
-        try:
-            # --- Create a copy of the root state for the search ---
-            search_root_state = GameState()
-            search_root_state.grid = (
-                root_state.grid.deepcopy_grid()
-            )  # Use grid's deepcopy
-            search_root_state.shapes = [
-                s.copy() if s else None for s in root_state.shapes
-            ]
-            search_root_state.game_score = root_state.game_score
-            search_root_state.triangles_cleared_this_episode = (
-                root_state.triangles_cleared_this_episode
-            )
-            search_root_state.pieces_placed_this_episode = (
-                root_state.pieces_placed_this_episode
-            )
-            search_root_state.game_over = root_state.game_over
-            # --- End state copy ---
-        except Exception as e:
-            logger.error(
-                f"{self.log_prefix} Error copying root game state for MCTS: {e}",
-                exc_info=True,
+        if self.stop_event and self.stop_event.is_set():
+            logger.warning(
+                f"{self.log_prefix} Stop event set before starting simulations."
             )
             return MCTSNode(game_state=root_state, config=self.config), {
                 "simulations_run": 0,
                 "mcts_total_duration": 0.0,
                 "total_nn_prediction_time": 0.0,
-                "nodes_created": 0,
+                "nodes_created": 1,
                 "avg_leaf_depth": 0.0,
                 "root_visits": 0,
             }
 
-        root_node = MCTSNode(game_state=search_root_state, config=self.config)
+        root_node = MCTSNode(game_state=root_state, config=self.config)
         sim_start_time = time.monotonic()
         total_nn_prediction_time = 0.0
         nodes_created_this_run = 1
         total_leaf_depth = 0
-        simulations_run = 0
+        simulations_run_attempted = 0
+        simulations_completed_full = 0
 
         if root_node.is_terminal:
             logger.warning(
@@ -5915,21 +6600,26 @@ class MCTS:
             }
 
         try:
-            initial_batch_time, initial_nodes_created = (
-                self._expand_and_backpropagate_batch([root_node])
-            )
-            total_nn_prediction_time += initial_batch_time
-            nodes_created_this_run += initial_nodes_created
-            simulations_run += 1
-
-            if root_node.is_expanded and not root_node.is_terminal:
-                self._add_dirichlet_noise(root_node)
+            if not root_node.is_expanded:
+                if self.stop_event and self.stop_event.is_set():
+                    raise InterruptedError("Stop event before initial root expansion.")
+                initial_batch_time, initial_nodes_created = (
+                    self._expand_and_backpropagate_batch([root_node])
+                )
+                total_nn_prediction_time += initial_batch_time
+                nodes_created_this_run += initial_nodes_created
+                simulations_completed_full += 1
+                if root_node.is_expanded and not root_node.is_terminal:
+                    self._add_dirichlet_noise(root_node)
 
             leaves_to_expand: List[MCTSNode] = []
-            for sim_num in range(simulations_run, num_simulations):
+            simulations_run_attempted = 1
+
+            for sim_num in range(simulations_run_attempted, num_simulations):
+                simulations_run_attempted += 1
                 if self.stop_event and self.stop_event.is_set():
                     logger.info(
-                        f"{self.log_prefix} Stop event detected during simulation {sim_num+1}. Stopping MCTS."
+                        f"{self.log_prefix} Stop event detected before simulation {sim_num+1}. Stopping MCTS."
                     )
                     break
 
@@ -5941,9 +6631,7 @@ class MCTS:
                     value = leaf_node.game_state.get_outcome()
                     leaf_node.backpropagate(value)
                     sim_duration_step = time.monotonic() - sim_start_step
-                    logger.info(
-                        f"{self.log_prefix} Sim {sim_num+1}/{num_simulations} hit terminal node. Backprop: {value:.2f}. Took {sim_duration_step:.5f}s"
-                    )
+                    simulations_completed_full += 1
                     continue
 
                 leaves_to_expand.append(leaf_node)
@@ -5953,23 +6641,38 @@ class MCTS:
                     or sim_num == num_simulations - 1
                 ):
                     if leaves_to_expand:
+                        if self.stop_event and self.stop_event.is_set():
+                            logger.info(
+                                f"{self.log_prefix} Stop event detected before expanding batch."
+                            )
+                            break
+
                         batch_nn_time, batch_nodes_created = (
                             self._expand_and_backpropagate_batch(leaves_to_expand)
                         )
                         total_nn_prediction_time += batch_nn_time
                         nodes_created_this_run += batch_nodes_created
+                        simulations_completed_full += len(leaves_to_expand)
                         leaves_to_expand = []
 
-            if leaves_to_expand:
+            if leaves_to_expand and not (self.stop_event and self.stop_event.is_set()):
+                logger.info(
+                    f"{self.log_prefix} Processing remaining {len(leaves_to_expand)} leaves after loop exit."
+                )
                 batch_nn_time, batch_nodes_created = (
                     self._expand_and_backpropagate_batch(leaves_to_expand)
                 )
                 total_nn_prediction_time += batch_nn_time
                 nodes_created_this_run += batch_nodes_created
+                simulations_completed_full += len(leaves_to_expand)
 
         except InterruptedError as e:
-            logger.warning(f"{self.log_prefix} MCTS run interrupted: {e}")
-            pass
+            logger.warning(f"{self.log_prefix} MCTS run interrupted gracefully: {e}")
+        except Exception as e:
+            logger.error(
+                f"{self.log_prefix} Error during MCTS run_simulations: {e}",
+                exc_info=True,
+            )
 
         sim_duration_total = time.monotonic() - sim_start_time
         effective_sims = max(1, root_node.visit_count)
@@ -5978,7 +6681,7 @@ class MCTS:
         )
 
         logger.info(
-            f"{self.log_prefix} Finished {root_node.visit_count} effective simulations in {sim_duration_total:.4f}s. "
+            f"{self.log_prefix} Finished {root_node.visit_count} effective simulations ({simulations_run_attempted} attempted) in {sim_duration_total:.4f}s. "
             f"Nodes created: {nodes_created_this_run}, "
             f"Total NN time: {total_nn_prediction_time:.4f}s, Avg Depth: {avg_leaf_depth:.1f}"
         )
@@ -5997,16 +6700,17 @@ class MCTS:
         """Adds Dirichlet noise to the prior probabilities of the root node's children."""
         if not node.children or self.config.DIRICHLET_ALPHA <= 0:
             return
-        actions = list(node.children.keys())
-        if not actions:
+        child_actions = [a for a in node.children.keys() if a in node.children]
+        if not child_actions:
             return
-        noise = np.random.dirichlet([self.config.DIRICHLET_ALPHA] * len(actions))
+
+        num_children = len(child_actions)
+        noise = np.random.dirichlet([self.config.DIRICHLET_ALPHA] * num_children)
         eps = self.config.DIRICHLET_EPSILON
-        for i, action in enumerate(actions):
-            child = node.children.get(action)
-            if child:
-                child.prior = (1 - eps) * child.prior + eps * noise[i]
-        logger.info(f"{self.log_prefix} Applied Dirichlet noise to root node priors.")
+        for i, action in enumerate(child_actions):
+            child = node.children[action]
+            child.prior = (1 - eps) * child.prior + eps * noise[i]
+        logger.debug(f"{self.log_prefix} Applied Dirichlet noise to root node priors.")
 
     def get_policy_target(
         self, root_node: MCTSNode, temperature: float
@@ -6014,88 +6718,66 @@ class MCTS:
         """Calculates the improved policy distribution based on visit counts."""
         if not root_node.children:
             return {}
-        total_visits = sum(child.visit_count for child in root_node.children.values())
+
+        existing_children = {a: c for a, c in root_node.children.items() if c}
+        if not existing_children:
+            return {}
+
+        total_visits = sum(child.visit_count for child in existing_children.values())
         if total_visits == 0:
-            num_children = len(root_node.children)
+            num_children = len(existing_children)
+            logger.warning(
+                f"{self.log_prefix} Root node has 0 total visits across children. Returning uniform policy."
+            )
             return (
-                {a: 1.0 / num_children for a in root_node.children}
+                {a: 1.0 / num_children for a in existing_children}
                 if num_children > 0
                 else {}
             )
 
         policy_target: Dict[ActionType, float] = {}
         if temperature == 0:
-            best_action, max_visits = -1, -1
-            for action, child in root_node.children.items():
-                if child.visit_count > max_visits:
-                    max_visits, best_action = child.visit_count, action
-            if best_action != -1:
-                for action in root_node.children:
-                    policy_target[action] = 1.0 if action == best_action else 0.0
-            else:
-                num_children = len(root_node.children)
-                prob = 1.0 / num_children if num_children > 0 else 0.0
-                for action in root_node.children:
-                    policy_target[action] = prob
+            best_action = max(
+                existing_children, key=lambda a: existing_children[a].visit_count
+            )
+            for action in existing_children:
+                policy_target[action] = 1.0 if action == best_action else 0.0
         else:
             total_power, powered_counts = 0.0, {}
-            for action, child in root_node.children.items():
+            max_power_val = np.finfo(np.float64).max / (len(existing_children) + 1)
+
+            for action, child in existing_children.items():
                 visit_count = max(0, child.visit_count)
                 try:
                     powered_count = np.power(
                         np.float64(visit_count), 1.0 / temperature, dtype=np.float64
                     )
-                    if np.isinf(powered_count):
+                    if np.isinf(powered_count) or np.isnan(powered_count):
                         logger.warning(
-                            f"{self.log_prefix} Infinite powered count encountered for action {action} (visits={visit_count}, temp={temperature}). Clamping."
+                            f"{self.log_prefix} Infinite/NaN powered count for action {action}. Clamping."
                         )
-                        powered_count = np.finfo(np.float64).max / len(
-                            root_node.children
-                        )
+                        powered_count = max_power_val
                 except (OverflowError, ValueError):
                     logger.warning(
-                        f"{self.log_prefix} Power calculation overflow/error for action {action} (visits={visit_count}, temp={temperature}). Setting to 0."
+                        f"{self.log_prefix} Power calc overflow/error for action {action}. Setting large value."
                     )
-                    powered_count = 0.0
+                    powered_count = max_power_val
+
                 powered_counts[action] = powered_count
-                if not np.isinf(powered_count):
+                if not np.isinf(powered_count) and not np.isnan(powered_count):
                     total_power += powered_count
 
-            if total_power <= 1e-9 or np.isinf(total_power):
-                if np.isinf(total_power):
-                    inf_actions = [
-                        a
-                        for a, pc in powered_counts.items()
-                        if np.isinf(pc)
-                        or pc > np.finfo(np.float64).max / (len(root_node.children) * 2)
-                    ]
-                    num_inf = len(inf_actions)
-                    prob = 1.0 / num_inf if num_inf > 0 else 0.0
-                    for action in root_node.children:
-                        policy_target[action] = prob if action in inf_actions else 0.0
+            if total_power <= 1e-9 or np.isinf(total_power) or np.isnan(total_power):
+                num_valid_children = len(powered_counts)
+                if num_valid_children > 0:
+                    prob = 1.0 / num_valid_children
+                    for action in existing_children:
+                        policy_target[action] = prob
                     logger.warning(
-                        f"{self.log_prefix} Total power infinite, assigned uniform prob to {num_inf} actions."
+                        f"{self.log_prefix} Total power invalid ({total_power:.2e}), assigned uniform prob {prob:.3f}."
                     )
                 else:
-                    visited_children = [
-                        a for a, c in root_node.children.items() if c.visit_count > 0
-                    ]
-                    num_visited = len(visited_children)
-                    if num_visited > 0:
-                        prob = 1.0 / num_visited
-                        for action in root_node.children:
-                            policy_target[action] = (
-                                prob if action in visited_children else 0.0
-                            )
-                    elif root_node.children:
-                        prob = 1.0 / len(root_node.children)
-                        for action in root_node.children:
-                            policy_target[action] = prob
-                    else:
-                        prob = 0.0
-                    logger.warning(
-                        f"{self.log_prefix} Total power near zero ({total_power}), assigned uniform prob."
-                    )
+                    policy_target = {}
             else:
                 for action, powered_count in powered_counts.items():
                     policy_target[action] = float(powered_count / total_power)
@@ -6177,7 +6859,7 @@ class MCTS:
             return int(chosen_action)
         except ValueError as e:
             logger.error(
-                f"{self.log_prefix} Error during np.random.choice: {e}. Probabilities sum: {np.sum(probabilities)}. Actions: {actions}. Probs: {probabilities}"
+                f"{self.log_prefix} Error during np.random.choice: {e}. Prob sum: {np.sum(probabilities)}. Choosing uniformly."
             )
             return np.random.choice(actions)
 
@@ -6191,18 +6873,12 @@ __all__ = ["MCTSConfig", "MCTSNode", "MCTS"]
 
 
 File: stats\aggregator.py
-# File: stats/aggregator.py
 import time
-from typing import (
-    Deque,
-    Dict,
-    Any,
-    Optional,
-    List,
-    TYPE_CHECKING,
-)
+from typing import Deque, Dict, Any, Optional, List, TYPE_CHECKING
 import threading
 import logging
+import numpy as np
+import ray
 
 from config import StatsConfig
 from .aggregator_storage import AggregatorStorage
@@ -6214,12 +6890,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class StatsAggregator:
+# --- Ray Actor Version ---
+@ray.remote
+class StatsAggregatorActor:
     """
-    Handles aggregation and storage of training statistics using deques.
-    Calculates rolling averages and tracks best values. Does not perform logging.
-    Includes locks for thread safety. Delegates storage and logic to helper classes.
-    Refactored for clarity and AlphaZero focus.
+    Ray Actor version of StatsAggregator. Handles aggregation and storage
+    of training statistics using deques within the actor process.
     """
 
     def __init__(
@@ -6234,18 +6910,12 @@ class StatsAggregator:
             self.avg_windows = [100]
         else:
             self.avg_windows = sorted(list(set(avg_windows)))
-
-        if plot_window <= 0:
-            plot_window = 10000
-        self.plot_window = plot_window
+        self.plot_window = max(1, plot_window)
         self.summary_avg_window = self.avg_windows[0]
-
-        self._lock = threading.Lock()
-        self.storage = AggregatorStorage(plot_window)
+        self.storage = AggregatorStorage(self.plot_window)
         self.logic = AggregatorLogic(self.storage)
-
-        print(
-            f"[StatsAggregator] Initialized. Avg Windows: {self.avg_windows}, Plot Window: {self.plot_window}"
+        logger.info(
+            f"[StatsAggregatorActor] Initialized. Avg Windows: {self.avg_windows}, Plot Window: {self.plot_window}"
         )
 
     def record_episode(
@@ -6256,119 +6926,115 @@ class StatsAggregator:
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,
+        game_state_for_best: Optional[Dict[str, np.ndarray]] = None,
     ) -> Dict[str, Any]:
         """Records episode stats and checks for new bests."""
-        with self._lock:
-            current_step = (
-                global_step
-                if global_step is not None
-                else self.storage.current_global_step
-            )
-            update_info = self.logic.update_episode_stats(
-                episode_outcome,
-                episode_length,
-                episode_num,
-                current_step,
-                game_score,
-                triangles_cleared,
-                game_state_for_best,
-            )
-            return update_info
+        current_step = (
+            global_step if global_step is not None else self.storage.current_global_step
+        )
+        update_info = self.logic.update_episode_stats(
+            episode_outcome,
+            episode_length,
+            episode_num,
+            current_step,
+            game_score,
+            triangles_cleared,
+            game_state_for_best,
+        )
+        return update_info
 
     def record_step(self, step_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Records step data (e.g., NN training step, MCTS step) and checks for new bests.
-        Handles both training worker and self-play worker data.
-        """
-        with self._lock:
-            g_step = step_data.get("global_step")
-            if g_step is not None and g_step > self.storage.current_global_step:
-                self.storage.current_global_step = g_step
-                logger.info(
-                    f"[StatsAggregator] Global step updated to {g_step} from step_data."
-                )
-            elif g_step is None:
-                # Use current step if not provided (e.g., for MCTS stats from self-play)
-                g_step = self.storage.current_global_step
-                logger.info(
-                    f"[StatsAggregator] Using existing global step {g_step} for step_data."
-                )
+        """Records step stats."""
+        g_step = step_data.get("global_step")
+        if g_step is not None and g_step > self.storage.current_global_step:
+            self.storage.current_global_step = g_step
+        elif g_step is None:
+            g_step = self.storage.current_global_step
 
-            # Explicitly pass MCTS stats if present
-            mcts_sim_time = step_data.get("mcts_sim_time")
-            mcts_nn_time = step_data.get("mcts_nn_time")
-            mcts_nodes = step_data.get("mcts_nodes_explored")
-            mcts_depth = step_data.get("mcts_avg_depth")
-
-            update_info = self.logic.update_step_stats(
-                step_data,
-                g_step,
-                mcts_sim_time=mcts_sim_time,
-                mcts_nn_time=mcts_nn_time,
-                mcts_nodes_explored=mcts_nodes,
-                mcts_avg_depth=mcts_depth,
-            )
-            return update_info
+        update_info = self.logic.update_step_stats(
+            step_data,
+            g_step,
+            mcts_sim_time=step_data.get("mcts_sim_time"),
+            mcts_nn_time=step_data.get("mcts_nn_time"),
+            mcts_nodes_explored=step_data.get("mcts_nodes_explored"),
+            mcts_avg_depth=step_data.get("mcts_avg_depth"),
+        )
+        return update_info
 
     def get_summary(self, current_global_step: Optional[int] = None) -> Dict[str, Any]:
         """Calculates and returns the summary dictionary."""
-        with self._lock:
-            if current_global_step is None:
-                current_global_step = self.storage.current_global_step
-            summary = self.logic.calculate_summary(
-                current_global_step, self.summary_avg_window
-            )
-            return summary
+        if current_global_step is None:
+            current_global_step = self.storage.current_global_step
+        summary = self.logic.calculate_summary(
+            current_global_step, self.summary_avg_window
+        )
+        summary["device"] = "Actor"
+        try:
+            from config.core import TrainConfig
 
-    def get_plot_data(self) -> Dict[str, Deque]:
-        """Returns copies of all deques intended for plotting."""
-        with self._lock:
-            return self.storage.get_all_plot_deques()
+            summary["min_buffer_size"] = TrainConfig.MIN_BUFFER_SIZE_TO_TRAIN
+        except ImportError:
+            summary["min_buffer_size"] = 0
+        return summary
+
+    def get_plot_data(self) -> Dict[str, List]:  # Return List for serialization
+        """Returns copies of data deques as lists for plotting."""
+        plot_deques = self.storage.get_all_plot_deques()
+        return {name: list(dq) for name, dq in plot_deques.items()}
 
     def get_best_game_state_data(self) -> Optional[Dict[str, Any]]:
-        """Returns the data needed to render the best game state found."""
-        with self._lock:
-            return (
-                self.storage.best_game_state_data.copy()
-                if self.storage.best_game_state_data
-                else None
-            )
+        """Returns the serializable data needed to render the best game state found."""
+        return self.storage.best_game_state_data
 
     def state_dict(self) -> Dict[str, Any]:
-        """Returns the state for checkpointing."""
-        with self._lock:
-            state = self.storage.state_dict()
-            state["plot_window"] = self.plot_window
-            state["avg_windows"] = self.avg_windows
-            return state
+        """Returns the internal state for saving."""
+        state = self.storage.state_dict()
+        state["plot_window"] = self.plot_window
+        state["avg_windows"] = self.avg_windows
+        return state
 
     def load_state_dict(self, state_dict: Dict[str, Any]):
-        """Loads the state from a checkpoint."""
-        with self._lock:
-            print("[StatsAggregator] Loading state...")
-            self.plot_window = state_dict.get("plot_window", self.plot_window)
-            self.avg_windows = state_dict.get("avg_windows", self.avg_windows)
-            self.summary_avg_window = self.avg_windows[0] if self.avg_windows else 100
-
-            self.storage.load_state_dict(state_dict, self.plot_window)
-
-            print("[StatsAggregator] State loaded.")
-            print(f"  -> Loaded total_episodes: {self.storage.total_episodes}")
-            # print(f"  -> Loaded best_outcome: {self.storage.best_outcome}") # Less relevant now
-            print(f"  -> Loaded best_game_score: {self.storage.best_game_score}")
-            print(
-                f"  -> Loaded start_time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.storage.start_time))}"
+        """Loads the internal state from a dictionary."""
+        logger.info("[StatsAggregatorActor] Loading state...")
+        self.plot_window = state_dict.get("plot_window", self.plot_window)
+        self.avg_windows = state_dict.get("avg_windows", self.avg_windows)
+        self.summary_avg_window = self.avg_windows[0] if self.avg_windows else 100
+        self.storage.load_state_dict(state_dict, self.plot_window)
+        logger.info("[StatsAggregatorActor] State loaded.")
+        logger.info(f"  -> Loaded total_episodes: {self.storage.total_episodes}")
+        logger.info(f"  -> Loaded best_game_score: {self.storage.best_game_score}")
+        logger.info(
+            f"  -> Loaded start_time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.storage.start_time))}"
+        )
+        logger.info(
+            f"  -> Loaded current_global_step: {self.storage.current_global_step}"
+        )
+        if self.storage.best_game_state_data:
+            logger.info(
+                f"  -> Loaded best_game_state_data (Score: {self.storage.best_game_state_data.get('score', 'N/A')})"
             )
-            print(
-                f"  -> Loaded current_global_step: {self.storage.current_global_step}"
-            )
-            if self.storage.best_game_state_data:
-                print(
-                    f"  -> Loaded best_game_state_data (Score: {self.storage.best_game_state_data.get('score', 'N/A')})"
-                )
-            else:
-                print("  -> No best_game_state_data found in loaded state.")
+        else:
+            logger.info("  -> No best_game_state_data found in loaded state.")
+
+    def get_total_episodes(self) -> int:
+        """Returns the total number of episodes recorded."""
+        return self.storage.total_episodes
+
+    def get_current_global_step(self) -> int:
+        """Returns the current global step."""
+        return self.storage.current_global_step
+
+    def set_training_target_step(self, target_step: int):
+        """Sets the training target step."""
+        self.storage.training_target_step = target_step
+
+    def get_training_target_step(self) -> int:
+        """Returns the training target step."""
+        return self.storage.training_target_step
+
+    def health_check(self):
+        """Basic health check method for Ray."""
+        return "OK"
 
 
 File: stats\aggregator_logic.py
@@ -6625,18 +7291,19 @@ from typing import Deque, Dict, Any, List, Optional
 import time
 import numpy as np
 import logging
+import pickle  # Needed for potential complex data in best_game_state_data
 
 logger = logging.getLogger(__name__)
 
 
 class AggregatorStorage:
     """Holds the data structures (deques and scalar values) for StatsAggregator.
-    Refactored for AlphaZero focus. Resource usage removed."""
+    Ensures best_game_state_data is stored as a serializable dictionary.
+    """
 
     def __init__(self, plot_window: int):
         self.plot_window = plot_window
-
-        # --- Deques for Plotting ---
+        # ... (Deque definitions remain the same) ...
         # Training Stats
         self.policy_losses: Deque[float] = deque(maxlen=plot_window)
         self.value_losses: Deque[float] = deque(maxlen=plot_window)
@@ -6654,13 +7321,12 @@ class AggregatorStorage:
         self.mcts_avg_depths: Deque[float] = deque(maxlen=plot_window)
         # System Stats
         self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
-        self.steps_per_second: Deque[float] = deque(
-            maxlen=plot_window
-        )  # Added steps/sec deque
+        self.steps_per_second: Deque[float] = deque(maxlen=plot_window)
         self._last_step_time: Optional[float] = None
         self._last_step_count: Optional[int] = None
 
         # --- Scalar State Variables ---
+        # ... (remain the same) ...
         self.total_episodes: int = 0
         self.total_triangles_cleared: int = 0
         self.current_buffer_size: int = 0
@@ -6670,14 +7336,16 @@ class AggregatorStorage:
         self.training_target_step: int = 0
 
         # --- Intermediate Progress Tracking ---
+        # ... (remain the same) ...
         self.current_self_play_game_number: int = 0
         self.current_self_play_game_steps: int = 0
         self.training_steps_performed: int = 0
 
         # --- Best Value Tracking ---
-        self.best_outcome: float = -float("inf")  # Less relevant now
-        self.previous_best_outcome: float = -float("inf")  # Less relevant now
-        self.best_outcome_step: int = 0  # Less relevant now
+        # ... (remain the same) ...
+        self.best_outcome: float = -float("inf")
+        self.previous_best_outcome: float = -float("inf")
+        self.best_outcome_step: int = 0
         self.best_game_score: float = -float("inf")
         self.previous_best_game_score: float = -float("inf")
         self.best_game_score_step: int = 0
@@ -6687,19 +7355,20 @@ class AggregatorStorage:
         self.best_policy_loss: float = float("inf")
         self.previous_best_policy_loss: float = float("inf")
         self.best_policy_loss_step: int = 0
-        self.best_mcts_sim_time: float = float("inf")  # Best is lowest time
+        self.best_mcts_sim_time: float = float("inf")
         self.previous_best_mcts_sim_time: float = float("inf")
         self.best_mcts_sim_time_step: int = 0
 
         # --- Best Game State Data ---
+        # Now stores the already processed serializable dict
         self.best_game_state_data: Optional[Dict[str, Any]] = None
 
+    # get_deque remains the same
     def get_deque(self, name: str) -> Deque:
-        """Safely gets a deque attribute."""
         return getattr(self, name, deque(maxlen=self.plot_window))
 
+    # get_all_plot_deques remains the same
     def get_all_plot_deques(self) -> Dict[str, Deque]:
-        """Returns copies of all deques intended for plotting."""
         deque_names = [
             "policy_losses",
             "value_losses",
@@ -6722,29 +7391,24 @@ class AggregatorStorage:
             if hasattr(self, name)
         }
 
+    # update_steps_per_second remains the same
     def update_steps_per_second(self, global_step: int):
-        """Calculates and updates the steps per second deque."""
         current_time = time.time()
         if self._last_step_time is not None and self._last_step_count is not None:
             time_diff = current_time - self._last_step_time
             step_diff = global_step - self._last_step_count
-            if (
-                time_diff > 1e-3 and step_diff > 0
-            ):  # Avoid division by zero and stale data
+            if time_diff > 1e-3 and step_diff > 0:
                 sps = step_diff / time_diff
                 self.steps_per_second.append(sps)
-            elif (
-                step_diff <= 0 and time_diff > 1.0
-            ):  # If no steps for a while, record 0
+            elif step_diff <= 0 and time_diff > 1.0:
                 self.steps_per_second.append(0.0)
-
-        # Update last step time/count for the next calculation
         self._last_step_time = current_time
         self._last_step_count = global_step
 
     def state_dict(self) -> Dict[str, Any]:
         """Returns the state of the storage for saving."""
         state = {}
+        # ... (Deque serialization remains the same) ...
         deque_names = [
             "policy_losses",
             "value_losses",
@@ -6767,6 +7431,7 @@ class AggregatorStorage:
                 if deque_instance is not None:
                     state[name] = list(deque_instance)
 
+        # ... (Scalar serialization remains the same) ...
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
@@ -6779,11 +7444,12 @@ class AggregatorStorage:
             "current_self_play_game_steps",
             "training_steps_performed",
             "_last_step_time",
-            "_last_step_count",  # Include for sps calculation resume
+            "_last_step_count",
         ]
         for key in scalar_keys:
             state[key] = getattr(self, key, None if key.startswith("_last") else 0)
 
+        # ... (Best value serialization remains the same) ...
         best_value_keys = [
             "best_outcome",
             "previous_best_outcome",
@@ -6811,31 +7477,28 @@ class AggregatorStorage:
             )
             state[key] = getattr(self, key, default)
 
-        # Serialize best game state data carefully
+        # Serialize best game state data directly (it should already be a dict)
+        # We might need pickle for numpy arrays within the dict
         if self.best_game_state_data:
             try:
-                # Convert GameState object to a serializable format (e.g., its state dict)
-                serializable_data = {
-                    "score": self.best_game_state_data.get("score"),
-                    "step": self.best_game_state_data.get("step"),
-                    # Add other relevant scalar info if needed
-                }
-                # Save the game state's internal state (which should be serializable)
-                game_state_obj = self.best_game_state_data.get("game_state")
-                if game_state_obj and hasattr(game_state_obj, "get_state"):
-                    serializable_data["game_state_dict"] = game_state_obj.get_state()
-
-                state["best_game_state_data"] = serializable_data
+                # Ensure numpy arrays are handled by pickle if torch save fails
+                state["best_game_state_data_pkl"] = pickle.dumps(
+                    self.best_game_state_data
+                )
             except Exception as e:
-                logger.error(f"Error serializing best_game_state_data: {e}")
-                state["best_game_state_data"] = None
+                logger.error(f"Could not pickle best_game_state_data: {e}")
+                state["best_game_state_data_pkl"] = None
         else:
-            state["best_game_state_data"] = None
+            state["best_game_state_data_pkl"] = None
+
+        # Deprecated direct storage in torch checkpoint:
+        # state["best_game_state_data"] = self.best_game_state_data
 
         return state
 
     def load_state_dict(self, state_dict: Dict[str, Any], plot_window: int):
         """Loads the state from a dictionary."""
+        # ... (Deque loading remains the same) ...
         self.plot_window = plot_window
         deque_names = [
             "policy_losses",
@@ -6858,13 +7521,13 @@ class AggregatorStorage:
             if isinstance(data, (list, tuple)):
                 setattr(self, key, deque(data, maxlen=self.plot_window))
             else:
-                # Initialize empty deque if data is missing or invalid
                 setattr(self, key, deque(maxlen=self.plot_window))
                 if data is not None:
                     logger.warning(
-                        f"Invalid data type for deque '{key}' in loaded state: {type(data)}. Initializing empty deque."
+                        f"Invalid data type for deque '{key}' in loaded state: {type(data)}. Init empty."
                     )
 
+        # ... (Scalar loading remains the same) ...
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
@@ -6877,7 +7540,7 @@ class AggregatorStorage:
             "current_self_play_game_steps",
             "training_steps_performed",
             "_last_step_time",
-            "_last_step_count",  # Restore for sps calculation
+            "_last_step_count",
         ]
         defaults = {
             "start_time": time.time(),
@@ -6896,6 +7559,7 @@ class AggregatorStorage:
         for key in scalar_keys:
             setattr(self, key, state_dict.get(key, defaults.get(key)))
 
+        # ... (Best value loading remains the same) ...
         best_value_keys = [
             "best_outcome",
             "previous_best_outcome",
@@ -6933,34 +7597,47 @@ class AggregatorStorage:
         for key in best_value_keys:
             setattr(self, key, state_dict.get(key, best_defaults.get(key)))
 
-        # Deserialize best game state data (requires GameState class)
-        loaded_best_data = state_dict.get("best_game_state_data")
-        if loaded_best_data and isinstance(loaded_best_data, dict):
+        # Deserialize best game state data using pickle
+        best_game_data_pkl = state_dict.get("best_game_state_data_pkl")
+        if best_game_data_pkl:
             try:
-                from environment.game_state import GameState  # Local import
-
-                temp_game_state = GameState()
-                # We only saved the state dict, not the object itself
-                # Reconstructing the exact state might be complex or impossible
-                # Store the basic info (score, step) and maybe the state dict for inspection
-                self.best_game_state_data = {
-                    "score": loaded_best_data.get("score"),
-                    "step": loaded_best_data.get("step"),
-                    "game_state_dict": loaded_best_data.get(
-                        "game_state_dict"
-                    ),  # Store the dict
-                    # Cannot easily reconstruct the full GameState object here
-                }
-            except ImportError:
-                logger.error(
-                    "Could not import GameState during best_game_state_data deserialization."
-                )
-                self.best_game_state_data = None
+                self.best_game_state_data = pickle.loads(best_game_data_pkl)
+                if not isinstance(self.best_game_state_data, dict):
+                    logger.warning(
+                        "Loaded best_game_state_data is not a dict, resetting."
+                    )
+                    self.best_game_state_data = None
+                else:
+                    # Basic validation
+                    if (
+                        "score" not in self.best_game_state_data
+                        or "step" not in self.best_game_state_data
+                        or "game_state_dict" not in self.best_game_state_data
+                    ):
+                        logger.warning(
+                            "Loaded best_game_state_data dict missing keys, resetting."
+                        )
+                        self.best_game_state_data = None
             except Exception as e:
-                logger.error(f"Error deserializing best_game_state_data: {e}")
+                logger.error(f"Error unpickling best_game_state_data: {e}")
                 self.best_game_state_data = None
         else:
-            self.best_game_state_data = None
+            # Fallback to old direct storage method if pkl missing
+            loaded_best_data = state_dict.get("best_game_state_data")
+            if isinstance(loaded_best_data, dict):
+                self.best_game_state_data = loaded_best_data
+                # Basic validation
+                if (
+                    "score" not in self.best_game_state_data
+                    or "step" not in self.best_game_state_data
+                    or "game_state_dict" not in self.best_game_state_data
+                ):
+                    logger.warning(
+                        "Loaded legacy best_game_state_data dict missing keys, resetting."
+                    )
+                    self.best_game_state_data = None
+            else:
+                self.best_game_state_data = None
 
         # Ensure critical attributes exist after loading
         for attr, default_factory in [
@@ -6985,39 +7662,51 @@ import numpy as np
 import torch
 import threading
 import logging
+import ray # Added Ray
 
-from .stats_recorder import StatsRecorderBase
-from .aggregator import StatsAggregator
+# from .stats_recorder import StatsRecorderBase # Keep Base class import
+from .aggregator import StatsAggregatorActor # Import Actor for type hint
 from config import StatsConfig, TrainConfig
-from utils.helpers import format_eta  # Import helper
+from utils.helpers import format_eta
 
 if TYPE_CHECKING:
     from environment.game_state import GameState
+    StatsAggregatorHandle = ray.actor.ActorHandle # Type hint for handle
+
+# Import base class correctly
+from .stats_recorder import StatsRecorderBase
 
 logger = logging.getLogger(__name__)
 
 
 class SimpleStatsRecorder(StatsRecorderBase):
-    """Logs aggregated statistics to the console periodically."""
+    """Logs aggregated statistics fetched from StatsAggregatorActor to the console periodically."""
 
     def __init__(
         self,
-        aggregator: StatsAggregator,
+        aggregator: "StatsAggregatorHandle", # Expect Actor Handle
         console_log_interval: int = StatsConfig.CONSOLE_LOG_FREQ,
         train_config: Optional[TrainConfig] = None,
     ):
-        self.aggregator = aggregator
+        self.aggregator_handle = aggregator # Store actor handle
         self.console_log_interval = (
             max(1, console_log_interval) if console_log_interval > 0 else -1
         )
         self.train_config = train_config if train_config else TrainConfig()
         self.last_log_time: float = time.time()
-        self.summary_avg_window = self.aggregator.summary_avg_window
+        # Get summary window size from config, actor doesn't store it directly this way
+        self.summary_avg_window = StatsConfig.STATS_AVG_WINDOW[0] if StatsConfig.STATS_AVG_WINDOW else 100
         self.updates_since_last_log = 0
-        self._lock = threading.Lock()
+        self._lock = threading.Lock() # Lock for updates_since_last_log counter
         logger.info(
             f"[SimpleStatsRecorder] Initialized. Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} updates/episodes. Avg Window: {self.summary_avg_window}"
         )
+        # Store last known best values locally to detect changes
+        self._last_best_score = -float('inf')
+        self._last_best_vloss = float('inf')
+        self._last_best_ploss = float('inf')
+        self._last_best_mcts_time = float('inf')
+
 
     def _log_new_best(
         self,
@@ -7025,132 +7714,83 @@ class SimpleStatsRecorder(StatsRecorderBase):
         current_best: float,
         previous_best: float,
         step: int,
-        is_loss: bool,  # True if lower is better
+        is_loss: bool,
         is_time: bool = False,
     ):
         """Logs a new best value achieved."""
-        # Check if the current value is actually an improvement
+        # This logic remains the same, uses passed values
         improvement_made = False
-        if is_loss:  # Lower is better (losses, times)
-            if np.isfinite(current_best) and current_best < previous_best:
-                improvement_made = True
-        else:  # Higher is better (scores)
-            if np.isfinite(current_best) and current_best > previous_best:
-                improvement_made = True
+        if is_loss:
+            if np.isfinite(current_best) and current_best < previous_best: improvement_made = True
+        else:
+            if np.isfinite(current_best) and current_best > previous_best: improvement_made = True
+        if not improvement_made: return
 
-        if not improvement_made:
-            return  # Don't log if it's not better than the previous best
-
-        # Format the values
         if is_time:
             format_str = "{:.3f}s"
-            prev_str = (
-                format_str.format(previous_best)
-                if np.isfinite(previous_best) and previous_best != float("inf")
-                else "N/A"
-            )
+            prev_str = format_str.format(previous_best) if np.isfinite(previous_best) and previous_best != float("inf") else "N/A"
             current_str = format_str.format(current_best)
             prefix = "⏱️"
-        elif is_loss:  # Includes losses
+        elif is_loss:
             format_str = "{:.4f}"
-            prev_str = (
-                format_str.format(previous_best)
-                if np.isfinite(previous_best) and previous_best != float("inf")
-                else "N/A"
-            )
+            prev_str = format_str.format(previous_best) if np.isfinite(previous_best) and previous_best != float("inf") else "N/A"
             current_str = format_str.format(current_best)
             prefix = "📉"
-        else:  # Score
+        else:
             format_str = "{:.0f}"
-            prev_str = (
-                format_str.format(previous_best)
-                if np.isfinite(previous_best) and previous_best != -float("inf")
-                else "N/A"
-            )
+            prev_str = format_str.format(previous_best) if np.isfinite(previous_best) and previous_best != -float("inf") else "N/A"
             current_str = format_str.format(current_best)
             prefix = "🎮"
 
         step_info = f"at Step ~{step/1e6:.1f}M" if step > 0 else "at Start"
-        logger.info(
-            f"--- {prefix} New Best {metric_name}: {current_str} {step_info} (Prev: {prev_str}) ---"
-        )
+        logger.info(f"--- {prefix} New Best {metric_name}: {current_str} {step_info} (Prev: {prev_str}) ---")
 
     def record_episode(
         self,
-        episode_outcome: float,
+        episode_outcome: float, # These args are now less relevant as data comes from aggregator
         episode_length: int,
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,
+        game_state_for_best: Optional["GameState"] = None, # This arg is also less relevant
     ):
-        """Records episode stats and prints new bests to console."""
-        update_info = self.aggregator.record_episode(
-            episode_outcome,
-            episode_length,
-            episode_num,
-            global_step,
-            game_score,
-            triangles_cleared,
-            game_state_for_best,
-        )
-        current_step = (
-            global_step
-            if global_step is not None
-            else self.aggregator.storage.current_global_step
-        )
-
-        # Check for new best game score
-        if update_info.get("new_best_game"):
-            self._log_new_best(
-                "Game Score",
-                self.aggregator.storage.best_game_score,
-                self.aggregator.storage.previous_best_game_score,
-                current_step,
-                is_loss=False,  # Higher score is better
-            )
+        """Checks for new bests by fetching summary from aggregator."""
+        # This method is now primarily a trigger based on episode completion
+        # The actual recording happens via remote calls from workers
+        # We just need to check if the interval requires logging a summary
+        current_step = global_step # Use passed step if available
+        if current_step is None:
+             # Fetch step from aggregator if not passed (blocking)
+             try:
+                  step_ref = self.aggregator_handle.get_current_global_step.remote()
+                  current_step = ray.get(step_ref)
+             except Exception as e:
+                  logger.error(f"Error fetching global step from aggregator: {e}")
+                  current_step = 0 # Fallback
 
         self._check_and_log_summary(current_step)
 
-    def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats and triggers console logging if interval met."""
-        update_info = self.aggregator.record_step(step_data)
-        g_step = step_data.get(
-            "global_step", self.aggregator.storage.current_global_step
-        )
 
-        # Check for new best losses and MCTS time
-        if update_info.get("new_best_value_loss"):
-            self._log_new_best(
-                "V.Loss",
-                self.aggregator.storage.best_value_loss,
-                self.aggregator.storage.previous_best_value_loss,
-                g_step,
-                is_loss=True,  # Lower loss is better
-            )
-        if update_info.get("new_best_policy_loss"):
-            self._log_new_best(
-                "P.Loss",
-                self.aggregator.storage.best_policy_loss,
-                self.aggregator.storage.previous_best_policy_loss,
-                g_step,
-                is_loss=True,  # Lower loss is better
-            )
-        if update_info.get("new_best_mcts_sim_time"):
-            self._log_new_best(
-                "MCTS Sim Time",
-                self.aggregator.storage.best_mcts_sim_time,
-                self.aggregator.storage.previous_best_mcts_sim_time,
-                g_step,
-                is_loss=True,  # Lower time is better
-                is_time=True,
-            )
+    def record_step(self, step_data: Dict[str, Any]):
+        """Checks for new bests by fetching summary from aggregator."""
+        # This method is now primarily a trigger based on step completion
+        # The actual recording happens via remote calls from workers
+        g_step = step_data.get("global_step")
+        if g_step is None:
+             # Fetch step from aggregator if not passed (blocking)
+             try:
+                  step_ref = self.aggregator_handle.get_current_global_step.remote()
+                  g_step = ray.get(step_ref)
+             except Exception as e:
+                  logger.error(f"Error fetching global step from aggregator: {e}")
+                  g_step = 0 # Fallback
 
         self._check_and_log_summary(g_step)
 
+
     def _check_and_log_summary(self, global_step: int):
-        """Checks if the logging interval is met and logs summary."""
+        """Checks if the logging interval is met and logs summary by fetching from actor."""
         log_now = False
         with self._lock:
             self.updates_since_last_log += 1
@@ -7161,61 +7801,90 @@ class SimpleStatsRecorder(StatsRecorderBase):
                 log_now = True
                 self.updates_since_last_log = 0
         if log_now:
-            self.log_summary(global_step)
+            self.log_summary(global_step) # Fetch data and log
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        """Gets the summary dictionary from the aggregator."""
-        return self.aggregator.get_summary(current_global_step)
+        """Gets the summary dictionary from the aggregator actor (blocking)."""
+        if not self.aggregator_handle: return {}
+        try:
+            summary_ref = self.aggregator_handle.get_summary.remote(current_global_step)
+            summary = ray.get(summary_ref)
+            return summary
+        except Exception as e:
+            logger.error(f"Error getting summary from StatsAggregatorActor: {e}")
+            return {"error": str(e)}
 
     def get_plot_data(self) -> Dict[str, Deque]:
-        """Gets the plot data deques from the aggregator."""
-        return self.aggregator.get_plot_data()
+        """Gets the plot data deques from the aggregator actor (blocking)."""
+        # Note: Returns lists, not deques, due to serialization
+        if not self.aggregator_handle: return {}
+        try:
+            plot_data_ref = self.aggregator_handle.get_plot_data.remote()
+            plot_data_list_dict = ray.get(plot_data_ref)
+            # Convert lists back to deques locally if needed by UI plotter
+            # For now, return the dict of lists as received
+            return plot_data_list_dict
+        except Exception as e:
+            logger.error(f"Error getting plot data from StatsAggregatorActor: {e}")
+            return {"error": str(e)}
 
     def log_summary(self, global_step: int):
-        """Logs the current summary statistics to the console."""
+        """Logs the current summary statistics fetched from the aggregator actor."""
         summary = self.get_summary(global_step)
-        runtime_hrs = (time.time() - self.aggregator.storage.start_time) / 3600
-        best_score = (
-            f"{summary['best_game_score']:.0f}"
-            if summary["best_game_score"] > -float("inf")
-            else "N/A"
-        )
-        avg_win = summary.get("summary_avg_window_size", "?")
+        if not summary or "error" in summary:
+             logger.error(f"Could not log summary, failed to fetch data: {summary.get('error', 'Unknown error')}")
+             return
+
+        # --- Check for New Bests ---
+        # Compare fetched best values with locally stored last known bests
+        new_best_score = summary.get("best_game_score", -float('inf'))
+        new_best_vloss = summary.get("best_value_loss", float('inf'))
+        new_best_ploss = summary.get("best_policy_loss", float('inf'))
+        new_best_mcts_time = summary.get("best_mcts_sim_time", float('inf'))
+
+        if new_best_score > self._last_best_score:
+             self._log_new_best("Game Score", new_best_score, self._last_best_score, summary.get("best_game_score_step", 0), is_loss=False)
+             self._last_best_score = new_best_score
+        if new_best_vloss < self._last_best_vloss:
+             self._log_new_best("V.Loss", new_best_vloss, self._last_best_vloss, summary.get("best_value_loss_step", 0), is_loss=True)
+             self._last_best_vloss = new_best_vloss
+        if new_best_ploss < self._last_best_ploss:
+             self._log_new_best("P.Loss", new_best_ploss, self._last_best_ploss, summary.get("best_policy_loss_step", 0), is_loss=True)
+             self._last_best_ploss = new_best_ploss
+        if new_best_mcts_time < self._last_best_mcts_time:
+             self._log_new_best("MCTS Sim Time", new_best_mcts_time, self._last_best_mcts_time, summary.get("best_mcts_sim_time_step", 0), is_loss=True, is_time=True)
+             self._last_best_mcts_time = new_best_mcts_time
+        # --- End New Best Check ---
+
+
+        runtime_hrs = (time.time() - summary.get("start_time", time.time())) / 3600
+        best_score_str = f"{new_best_score:.0f}" if new_best_score > -float("inf") else "N/A"
+        avg_win = summary.get("summary_avg_window_size", self.summary_avg_window)
         buf_size = summary.get("buffer_size", 0)
-        min_buf = self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
+        min_buf = summary.get("min_buffer_size", self.train_config.MIN_BUFFER_SIZE_TO_TRAIN)
         phase = "Buffering" if buf_size < min_buf and global_step == 0 else "Training"
-        steps_sec = summary.get(
-            "steps_per_second_avg", 0.0
-        )  # Use averaged value for summary
+        steps_sec = summary.get("steps_per_second_avg", 0.0)
 
         current_game = summary.get("current_self_play_game_number", 0)
         current_game_step = summary.get("current_self_play_game_steps", 0)
-        game_prog_str = (
-            f"Game: {current_game}({current_game_step})" if current_game > 0 else ""
-        )
+        game_prog_str = f"Game: {current_game}({current_game_step})" if current_game > 0 else ""
 
-        # --- Build Log String ---
         log_items = [
             f"[{runtime_hrs:.1f}h|{phase}]",
             f"Step: {global_step/1e6:<6.2f}M ({steps_sec:.1f}/s)",
-            f"Ep: {summary['total_episodes']:<7,}".replace(",", "_"),
+            f"Ep: {summary.get('total_episodes', 0):<7,}".replace(",", "_"),
             f"Buf: {buf_size:,}/{min_buf:,}".replace(",", "_"),
-            f"Score(Avg{avg_win}): {summary['avg_game_score_window']:<6.0f} (Best: {best_score})",
+            f"Score(Avg{avg_win}): {summary.get('avg_game_score_window', 0.0):<6.0f} (Best: {best_score_str})",
         ]
 
-        # Training specific stats
         if global_step > 0 or phase == "Training":
-            log_items.extend(
-                [
-                    f"VLoss(Avg{avg_win}): {summary['value_loss']:.4f}",
-                    f"PLoss(Avg{avg_win}): {summary['policy_loss']:.4f}",
-                    f"LR: {summary['current_lr']:.1e}",
-                ]
-            )
-        else:  # Buffering phase
-            log_items.append("Loss: N/A")
+            log_items.extend([
+                f"VLoss(Avg{avg_win}): {summary.get('value_loss', 0.0):.4f}",
+                f"PLoss(Avg{avg_win}): {summary.get('policy_loss', 0.0):.4f}",
+                f"LR: {summary.get('current_lr', 0.0):.1e}",
+            ])
+        else: log_items.append("Loss: N/A")
 
-        # MCTS specific stats (show averages)
         mcts_sim_time_avg = summary.get("mcts_simulation_time_avg", 0.0)
         mcts_nn_time_avg = summary.get("mcts_nn_prediction_time_avg", 0.0)
         mcts_nodes_avg = summary.get("mcts_nodes_explored_avg", 0.0)
@@ -7223,12 +7892,11 @@ class SimpleStatsRecorder(StatsRecorderBase):
             mcts_str = f"MCTS(Avg{avg_win}): SimT={mcts_sim_time_avg*1000:.1f}ms | NNT={mcts_nn_time_avg*1000:.1f}ms | Nodes={mcts_nodes_avg:.0f}"
             log_items.append(mcts_str)
 
-        if game_prog_str:
-            log_items.append(game_prog_str)  # Append game progress last
+        if game_prog_str: log_items.append(game_prog_str)
 
-        # Calculate ETA if training target is set
-        if self.aggregator.storage.training_target_step > 0 and steps_sec > 0:
-            steps_remaining = self.aggregator.storage.training_target_step - global_step
+        training_target_step = summary.get("training_target_step", 0)
+        if training_target_step > 0 and steps_sec > 0:
+            steps_remaining = training_target_step - global_step
             if steps_remaining > 0:
                 eta_seconds = steps_remaining / steps_sec
                 eta_str = format_eta(eta_seconds)
@@ -7238,34 +7906,24 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time = time.time()
 
     # --- No-op methods for other recording types ---
-    def record_histogram(
-        self,
-        tag: str,
-        values: Union[np.ndarray, torch.Tensor, List[float]],
-        global_step: int,
-    ):
-        pass
-
-    def record_image(
-        self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
-    ):
-        pass
-
-    def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
-        pass
-
-    def record_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[Any] = None
-    ):
-        pass
+    def record_histogram(self, tag: str, values: Union[np.ndarray, torch.Tensor, List[float]], global_step: int): pass
+    def record_image(self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int): pass
+    def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]): pass
+    def record_graph(self, model: torch.nn.Module, input_to_model: Optional[Any] = None): pass
 
     def close(self, is_cleanup: bool = False):
         # Ensure final summary is logged if interval logging is enabled
         if self.console_log_interval > 0 and self.updates_since_last_log > 0:
             logger.info("[SimpleStatsRecorder] Logging final summary before closing...")
-            self.log_summary(self.aggregator.storage.current_global_step)
+            # Fetch final step count before logging
+            final_step = 0
+            if self.aggregator_handle:
+                 try:
+                      step_ref = self.aggregator_handle.get_current_global_step.remote()
+                      final_step = ray.get(step_ref)
+                 except Exception: pass # Ignore error on close
+            self.log_summary(final_step)
         logger.info(f"[SimpleStatsRecorder] Closed (is_cleanup={is_cleanup}).")
-
 
 File: stats\stats_recorder.py
 import time
@@ -7361,13 +8019,16 @@ class StatsRecorderBase(ABC):
 
 File: stats\__init__.py
 from .stats_recorder import StatsRecorderBase
-from .aggregator import StatsAggregator
+
+# from .aggregator import StatsAggregator # Original class name removed/renamed
+from .aggregator import StatsAggregatorActor  # Import the Actor class
 from .simple_stats_recorder import SimpleStatsRecorder
 
 
 __all__ = [
     "StatsRecorderBase",
-    "StatsAggregator",
+    # "StatsAggregator", # Remove old export
+    "StatsAggregatorActor",  # Export the Actor class
     "SimpleStatsRecorder",
 ]
 
@@ -7379,97 +8040,79 @@ import torch.optim as optim
 import traceback
 import re
 import time
-from typing import Optional, Tuple, Any, Dict
+from typing import Optional, Tuple, Any, Dict, TYPE_CHECKING
 import pickle
+import ray
+import logging # Added logging
 
-from stats.aggregator import StatsAggregator
+# StatsAggregator is now an Actor Handle
 from agent.alphazero_net import AlphaZeroNet
-
-# Import scheduler base class for type hinting
 from torch.optim.lr_scheduler import _LRScheduler
 
+if TYPE_CHECKING:
+    # from stats.aggregator import StatsAggregatorActor # Import Actor for type hint
+    StatsAggregatorHandle = ray.actor.ActorHandle
 
-# --- Checkpoint Finding Logic ---
+logger = logging.getLogger(__name__) # Added logger
+
+# --- Checkpoint Finding Logic (remains the same) ---
 def find_latest_run_and_checkpoint(
     base_dir: str,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Finds the latest run directory and the latest checkpoint within it."""
     latest_run_id, latest_run_mtime = None, 0
-    if not os.path.isdir(base_dir):
-        return None, None
+    if not os.path.isdir(base_dir): return None, None
     try:
         for item in os.listdir(base_dir):
             path = os.path.join(base_dir, item)
             if os.path.isdir(path) and item.startswith("run_"):
                 try:
                     mtime = os.path.getmtime(path)
-                    if mtime > latest_run_mtime:
-                        latest_run_mtime, latest_run_id = mtime, item
-                except OSError:
-                    continue
-    except OSError as e:
-        print(f"[CheckpointFinder] Error listing {base_dir}: {e}")
-        return None, None
-
-    if latest_run_id is None:
-        print(f"[CheckpointFinder] No runs found in {base_dir}.")
-        return None, None
+                    if mtime > latest_run_mtime: latest_run_mtime, latest_run_id = mtime, item
+                except OSError: continue
+    except OSError as e: print(f"[CheckpointFinder] Error listing {base_dir}: {e}"); return None, None
+    if latest_run_id is None: print(f"[CheckpointFinder] No runs found in {base_dir}."); return None, None
     latest_run_dir = os.path.join(base_dir, latest_run_id)
     print(f"[CheckpointFinder] Latest run directory: {latest_run_dir}")
     latest_checkpoint = find_latest_checkpoint_in_dir(latest_run_dir)
-    if latest_checkpoint:
-        print(
-            f"[CheckpointFinder] Found checkpoint: {os.path.basename(latest_checkpoint)}"
-        )
-    else:
-        print(f"[CheckpointFinder] No valid checkpoints found in {latest_run_dir}")
+    if latest_checkpoint: print(f"[CheckpointFinder] Found checkpoint: {os.path.basename(latest_checkpoint)}")
+    else: print(f"[CheckpointFinder] No valid checkpoints found in {latest_run_dir}")
     return latest_run_id, latest_checkpoint
-
 
 def find_latest_checkpoint_in_dir(ckpt_dir: str) -> Optional[str]:
     """Finds the latest checkpoint file in a specific directory."""
-    if not os.path.isdir(ckpt_dir):
-        return None
+    if not os.path.isdir(ckpt_dir): return None
     checkpoints, final_ckpt = [], None
     step_pattern = re.compile(r"step_(\d+)_alphazero_nn\.pth")
     final_name = "FINAL_alphazero_nn.pth"
     try:
         for fname in os.listdir(ckpt_dir):
             fpath = os.path.join(ckpt_dir, fname)
-            if not os.path.isfile(fpath):
-                continue
-            if fname == final_name:
-                final_ckpt = fpath
+            if not os.path.isfile(fpath): continue
+            if fname == final_name: final_ckpt = fpath
             else:
                 match = step_pattern.match(fname)
-                checkpoints.append((int(match.group(1)), fpath)) if match else None
-    except OSError as e:
-        print(f"[CheckpointFinder] Error listing {ckpt_dir}: {e}")
-        return None
-
+                if match: checkpoints.append((int(match.group(1)), fpath))
+    except OSError as e: print(f"[CheckpointFinder] Error listing {ckpt_dir}: {e}"); return None
     if final_ckpt:
         try:
             final_mtime = os.path.getmtime(final_ckpt)
-            if not any(os.path.getmtime(cp) > final_mtime for _, cp in checkpoints):
-                return final_ckpt
-        except OSError:
-            pass
-    if not checkpoints:
-        return final_ckpt
+            if not any(os.path.getmtime(cp) > final_mtime for _, cp in checkpoints): return final_ckpt
+        except OSError: pass
+    if not checkpoints: return final_ckpt
     checkpoints.sort(key=lambda x: x[0], reverse=True)
     return checkpoints[0][1]
 
-
 # --- Checkpoint Manager Class ---
 class CheckpointManager:
-    """Handles loading and saving of agent, optimizer, scheduler, and stats states."""
+    """Handles loading and saving of agent, optimizer, scheduler, and stats states (interacts with StatsAggregatorActor)."""
 
     def __init__(
         self,
         agent: Optional[AlphaZeroNet],
         optimizer: Optional[optim.Optimizer],
-        scheduler: Optional[_LRScheduler],  # Add scheduler
-        stats_aggregator: Optional[StatsAggregator],
+        scheduler: Optional[_LRScheduler],
+        stats_aggregator: "StatsAggregatorHandle", # Actor Handle
         base_checkpoint_dir: str,
         run_checkpoint_dir: str,
         load_checkpoint_path_config: Optional[str],
@@ -7477,7 +8120,7 @@ class CheckpointManager:
     ):
         self.agent = agent
         self.optimizer = optimizer
-        self.scheduler = scheduler  # Store scheduler
+        self.scheduler = scheduler
         self.stats_aggregator = stats_aggregator
         self.base_checkpoint_dir = base_checkpoint_dir
         self.run_checkpoint_dir = run_checkpoint_dir
@@ -7489,9 +8132,7 @@ class CheckpointManager:
             self._determine_checkpoint_to_load(load_checkpoint_path_config)
         )
         if self.stats_aggregator:
-            self.stats_aggregator.storage.training_target_step = (
-                self.training_target_step
-            )
+            self.stats_aggregator.set_training_target_step.remote(self.training_target_step)
 
     def _determine_checkpoint_to_load(
         self, config_path: Optional[str]
@@ -7501,42 +8142,17 @@ class CheckpointManager:
             print(f"[CheckpointManager] Using explicit checkpoint path: {config_path}")
             if os.path.isfile(config_path):
                 run_id = None
-                try:
-                    run_id = (
-                        os.path.basename(os.path.dirname(config_path))
-                        if os.path.basename(os.path.dirname(config_path)).startswith(
-                            "run_"
-                        )
-                        else None
-                    )
-                except Exception:
-                    pass
-                print(
-                    f"[CheckpointManager] Extracted run_id '{run_id}' from path."
-                    if run_id
-                    else "[CheckpointManager] Could not determine run_id from path."
-                )
+                try: run_id = os.path.basename(os.path.dirname(config_path)) if os.path.basename(os.path.dirname(config_path)).startswith("run_") else None
+                except Exception: pass
+                print(f"[CheckpointManager] Extracted run_id '{run_id}' from path." if run_id else "[CheckpointManager] Could not determine run_id from path.")
                 return run_id, config_path
-            else:
-                print(
-                    f"[CheckpointManager] WARNING: Explicit path not found: {config_path}. Starting fresh."
-                )
-                return None, None
+            else: print(f"[CheckpointManager] WARNING: Explicit path not found: {config_path}. Starting fresh."); return None, None
         else:
-            print(
-                f"[CheckpointManager] Searching for latest run in: {self.base_checkpoint_dir}"
-            )
+            print(f"[CheckpointManager] Searching for latest run in: {self.base_checkpoint_dir}")
             run_id, ckpt_path = find_latest_run_and_checkpoint(self.base_checkpoint_dir)
-            if run_id and ckpt_path:
-                print(
-                    f"[CheckpointManager] Found latest run '{run_id}' with checkpoint."
-                )
-            elif run_id:
-                print(
-                    f"[CheckpointManager] Found latest run '{run_id}' but no checkpoint. Starting fresh."
-                )
-            else:
-                print(f"[CheckpointManager] No previous runs found. Starting fresh.")
+            if run_id and ckpt_path: print(f"[CheckpointManager] Found latest run '{run_id}' with checkpoint.")
+            elif run_id: print(f"[CheckpointManager] Found latest run '{run_id}' but no checkpoint. Starting fresh.")
+            else: print(f"[CheckpointManager] No previous runs found. Starting fresh.")
             return run_id, ckpt_path
 
     def get_run_id_to_load_from(self) -> Optional[str]:
@@ -7546,192 +8162,125 @@ class CheckpointManager:
         return self.checkpoint_path_to_load
 
     def load_checkpoint(self):
-        """Loads agent, optimizer, scheduler, and stats aggregator state."""
-        if not self.checkpoint_path_to_load or not os.path.isfile(
-            self.checkpoint_path_to_load
-        ):
-            print(
-                f"[CheckpointManager] Checkpoint not found or not specified: {self.checkpoint_path_to_load}. Skipping load."
-            )
-            self._reset_all_states()
+        """Loads agent, optimizer, scheduler state locally and stats state into the StatsAggregatorActor."""
+        if not self.checkpoint_path_to_load or not os.path.isfile(self.checkpoint_path_to_load):
+            print(f"[CheckpointManager] Checkpoint not found or not specified: {self.checkpoint_path_to_load}. Skipping load.")
+            self._reset_local_states()
             return
         print(f"[CheckpointManager] Loading checkpoint: {self.checkpoint_path_to_load}")
         try:
-            checkpoint = torch.load(
-                self.checkpoint_path_to_load,
-                map_location=self.device,
-                weights_only=False,  # Set to False to load optimizer/scheduler states
-            )
+            checkpoint = torch.load(self.checkpoint_path_to_load, map_location=self.device, weights_only=False)
             agent_ok = self._load_agent_state(checkpoint)
             opt_ok = self._load_optimizer_state(checkpoint)
-            sched_ok = self._load_scheduler_state(checkpoint)  # Load scheduler
-            stats_ok, loaded_target = self._load_stats_state(checkpoint)
+            sched_ok = self._load_scheduler_state(checkpoint)
+            stats_ok, loaded_target = self._load_stats_state_actor(checkpoint) # Load into actor
             self.global_step = checkpoint.get("global_step", 0)
             print(f"  -> Loaded Global Step: {self.global_step}")
-            if stats_ok:
-                self.episode_count = self.stats_aggregator.storage.total_episodes
+
+            if stats_ok and self.stats_aggregator:
+                try:
+                    ep_count_ref = self.stats_aggregator.get_total_episodes.remote()
+                    self.episode_count = ray.get(ep_count_ref)
+                except Exception as e:
+                    print(f"  -> ERROR getting episode count from StatsAggregatorActor: {e}")
+                    self.episode_count = checkpoint.get("episode_count", 0)
             else:
                 self.episode_count = checkpoint.get("episode_count", 0)
-            print(
-                f"  -> Resuming from Step: {self.global_step}, Ep: {self.episode_count}"
-            )
-            self.training_target_step = (
-                loaded_target
-                if loaded_target is not None
-                else checkpoint.get("training_target_step", 0)
-            )
+
+            print(f"  -> Resuming from Step: {self.global_step}, Ep: {self.episode_count}")
+            self.training_target_step = loaded_target if loaded_target is not None else checkpoint.get("training_target_step", 0)
             if self.stats_aggregator:
-                self.stats_aggregator.storage.training_target_step = (
-                    self.training_target_step
-                )
+                self.stats_aggregator.set_training_target_step.remote(self.training_target_step)
+
             print("[CheckpointManager] Checkpoint loading finished.")
-            if not agent_ok:
-                print("[CheckpointManager] Agent load was unsuccessful.")
-            if not opt_ok:
-                print("[CheckpointManager] Optimizer load was unsuccessful.")
-            if not sched_ok:
-                print("[CheckpointManager] Scheduler load was unsuccessful.")
-            if not stats_ok:
-                print("[CheckpointManager] Stats load was unsuccessful.")
+            if not agent_ok: print("[CheckpointManager] Agent load was unsuccessful.")
+            if not opt_ok: print("[CheckpointManager] Optimizer load was unsuccessful.")
+            if not sched_ok: print("[CheckpointManager] Scheduler load was unsuccessful.")
+            if not stats_ok: print("[CheckpointManager] Stats load was unsuccessful.")
+
         except (pickle.UnpicklingError, KeyError, Exception) as e:
             print(f"  -> ERROR loading checkpoint ('{e}'). State reset.")
             traceback.print_exc()
-            self._reset_all_states()
-        print(
-            f"[CheckpointManager] Final Training Target Step set to: {self.training_target_step}"
-        )
+            self._reset_local_states()
+        print(f"[CheckpointManager] Final Training Target Step set to: {self.training_target_step}")
 
     def _load_agent_state(self, checkpoint: Dict[str, Any]) -> bool:
-        """Loads the agent state dictionary."""
-        if "agent_state_dict" not in checkpoint:
-            print("  -> WARNING: 'agent_state_dict' missing.")
-            return False
-        if not self.agent:
-            print("  -> WARNING: Agent not initialized.")
-            return False
+        """Loads the agent state dictionary into the local agent."""
+        if "agent_state_dict" not in checkpoint: print("  -> WARNING: 'agent_state_dict' missing."); return False
+        if not self.agent: print("  -> WARNING: Local Agent not initialized."); return False
         try:
             self.agent.load_state_dict(checkpoint["agent_state_dict"])
-            print("  -> Agent state loaded.")
+            print("  -> Local Agent state loaded.")
             return True
-        except Exception as e:
-            print(f"  -> ERROR loading Agent state: {e}.")
-            return False
+        except Exception as e: print(f"  -> ERROR loading Local Agent state: {e}."); return False
 
     def _load_optimizer_state(self, checkpoint: Dict[str, Any]) -> bool:
-        """Loads the optimizer state dictionary."""
-        if "optimizer_state_dict" not in checkpoint:
-            print("  -> WARNING: 'optimizer_state_dict' missing.")
-            return False
-        if not self.optimizer:
-            print("  -> WARNING: Optimizer not initialized.")
-            return False
+        """Loads the optimizer state dictionary into the local optimizer."""
+        if "optimizer_state_dict" not in checkpoint: print("  -> WARNING: 'optimizer_state_dict' missing."); return False
+        if not self.optimizer: print("  -> WARNING: Optimizer not initialized."); return False
         try:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            # Move optimizer state to the correct device
             for state in self.optimizer.state.values():
                 for k, v in state.items():
-                    if isinstance(v, torch.Tensor):
-                        state[k] = v.to(self.device)
+                    if isinstance(v, torch.Tensor): state[k] = v.to(self.device)
             print("  -> Optimizer state loaded.")
             return True
-        except Exception as e:
-            print(f"  -> ERROR loading Optimizer state: {e}.")
-            return False
+        except Exception as e: print(f"  -> ERROR loading Optimizer state: {e}."); return False
 
     def _load_scheduler_state(self, checkpoint: Dict[str, Any]) -> bool:
-        """Loads the scheduler state dictionary."""
-        if "scheduler_state_dict" not in checkpoint:
-            # This is not necessarily a warning if scheduler wasn't used before
-            print("  -> INFO: 'scheduler_state_dict' missing (may be expected).")
-            return False
-        if not self.scheduler:
-            print(
-                "  -> INFO: Scheduler not initialized for current run, skipping load."
-            )
-            return False
+        """Loads the scheduler state dictionary into the local scheduler."""
+        if "scheduler_state_dict" not in checkpoint: print("  -> INFO: 'scheduler_state_dict' missing (may be expected)."); return False
+        if not self.scheduler: print("  -> INFO: Scheduler not initialized for current run, skipping load."); return False
         try:
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             print("  -> Scheduler state loaded.")
             return True
-        except Exception as e:
-            print(f"  -> ERROR loading Scheduler state: {e}.")
-            return False
+        except Exception as e: print(f"  -> ERROR loading Scheduler state: {e}."); return False
 
-    def _load_stats_state(
-        self, checkpoint: Dict[str, Any]
-    ) -> Tuple[bool, Optional[int]]:
-        """Loads the stats aggregator state."""
+    def _load_stats_state_actor(self, checkpoint: Dict[str, Any]) -> Tuple[bool, Optional[int]]:
+        """Loads the stats aggregator state into the StatsAggregatorActor."""
         loaded_target = None
         if "stats_aggregator_state_dict" not in checkpoint:
             print("  -> WARNING: 'stats_aggregator_state_dict' missing.")
             return False, loaded_target
         if not self.stats_aggregator:
-            print("  -> WARNING: Stats Aggregator not initialized.")
+            print("  -> WARNING: Stats Aggregator Actor handle not available.")
             return False, loaded_target
         try:
-            self.stats_aggregator.load_state_dict(
-                checkpoint["stats_aggregator_state_dict"]
-            )
-            loaded_target = getattr(
-                self.stats_aggregator.storage, "training_target_step", None
-            )
-            start_time = self.stats_aggregator.storage.start_time
-            print("  -> Stats Aggregator state loaded.")
-            if loaded_target is not None:
-                print(f"  -> Loaded Training Target Step from Stats: {loaded_target}")
-            print(
-                f"  -> Loaded Run Start Time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(start_time))}"
-            )
+            stats_state_dict = checkpoint["stats_aggregator_state_dict"]
+            load_ref = self.stats_aggregator.load_state_dict.remote(stats_state_dict)
+            ray.get(load_ref) # Wait for the actor to load the state
+            print("  -> Stats Aggregator Actor state loaded.")
+            # Get target step from actor after loading using the new getter method
+            target_ref = self.stats_aggregator.get_training_target_step.remote()
+            loaded_target = ray.get(target_ref)
+            if loaded_target is not None: print(f"  -> Loaded Training Target Step from Stats Actor: {loaded_target}")
             return True, loaded_target
         except Exception as e:
-            print(f"  -> ERROR loading Stats Aggregator state: {e}.")
-            self._reset_aggregator_state()
+            print(f"  -> ERROR loading Stats Aggregator Actor state: {e}.")
             return False, loaded_target
 
-    def _reset_aggregator_state(self):
-        """Resets only the stats aggregator state."""
-        if self.stats_aggregator:
-            self.stats_aggregator.__init__(
-                avg_windows=self.stats_aggregator.avg_windows,
-                plot_window=self.stats_aggregator.plot_window,
-            )
-            self.stats_aggregator.storage.training_target_step = (
-                self.training_target_step
-            )
-            self.stats_aggregator.storage.total_episodes = 0
-
-    def _reset_all_states(self):
-        """Resets all managed states on critical load failure."""
-        print("[CheckpointManager] Resetting all managed states due to load failure.")
+    def _reset_local_states(self):
+        """Resets only the local agent/optimizer/scheduler states."""
+        print("[CheckpointManager] Resetting local states due to load failure.")
         self.global_step = 0
         self.episode_count = 0
         self.training_target_step = 0
         if self.optimizer:
-            # Reset optimizer state
             self.optimizer.state = {}
-            # Re-initialize scheduler if it exists, as its state depends on optimizer
             if self.scheduler:
-                # Assuming CosineAnnealingLR, re-init with same params
-                # This might need adjustment if using other schedulers
-                try:
-                    self.scheduler = type(self.scheduler)(
-                        self.optimizer, **self.scheduler.state_dict()
-                    )
-                    print("  -> Scheduler re-initialized after optimizer reset.")
-                except Exception as e:
-                    print(f"  -> WARNING: Failed to re-initialize scheduler: {e}")
-                    self.scheduler = None  # Fallback
+                try: self.scheduler = type(self.scheduler)(self.optimizer, **self.scheduler.state_dict())
+                except Exception as e: print(f"  -> WARNING: Failed to re-initialize scheduler: {e}"); self.scheduler = None
             print("  -> Optimizer state reset.")
-        self._reset_aggregator_state()
 
     def save_checkpoint(
         self,
         global_step: int,
-        episode_count: int,
+        episode_count: int, # This is now less reliable, fetch from actor
         training_target_step: int,
         is_final: bool = False,
     ):
-        """Saves agent, optimizer, scheduler, and stats aggregator state."""
+        """Saves local agent/optimizer/scheduler state and fetches/saves state from StatsAggregatorActor."""
         prefix = "FINAL" if is_final else f"step_{global_step}"
         save_dir = self.run_checkpoint_dir
         os.makedirs(save_dir, exist_ok=True)
@@ -7742,27 +8291,33 @@ class CheckpointManager:
         try:
             agent_sd = self.agent.state_dict() if self.agent else {}
             opt_sd = self.optimizer.state_dict() if self.optimizer else {}
-            sched_sd = (
-                self.scheduler.state_dict() if self.scheduler else {}
-            )  # Get scheduler state
+            sched_sd = self.scheduler.state_dict() if self.scheduler else {}
+
             stats_sd = {}
-            agg_ep_count = episode_count
-            agg_target_step = training_target_step
+            agg_ep_count = 0 # Default if fetch fails
+            agg_target_step = training_target_step # Use passed value as fallback
             if self.stats_aggregator:
-                self.stats_aggregator.storage.training_target_step = (
-                    training_target_step
-                )
-                stats_sd = self.stats_aggregator.state_dict()
-                agg_ep_count = self.stats_aggregator.storage.total_episodes
-                agg_target_step = self.stats_aggregator.storage.training_target_step
+                try:
+                    # Set target step before getting state (fire-and-forget)
+                    self.stats_aggregator.set_training_target_step.remote(training_target_step)
+                    # Get state dict, episode count, and target step from actor
+                    state_ref = self.stats_aggregator.state_dict.remote()
+                    ep_count_ref = self.stats_aggregator.get_total_episodes.remote()
+                    target_ref = self.stats_aggregator.get_training_target_step.remote() # Use getter
+                    # Fetch concurrently
+                    stats_sd, agg_ep_count, agg_target_step = ray.get([state_ref, ep_count_ref, target_ref])
+                    logger.info(f"Fetched state from StatsAggregatorActor for saving (Ep: {agg_ep_count}, Target: {agg_target_step}).")
+                except Exception as e:
+                    print(f"  -> WARNING: Failed to get state from StatsAggregatorActor: {e}. Saving potentially incomplete stats.")
+                    stats_sd = {}
 
             checkpoint_data = {
                 "global_step": global_step,
-                "episode_count": agg_ep_count,
-                "training_target_step": agg_target_step,
+                "episode_count": agg_ep_count, # Use value from actor
+                "training_target_step": agg_target_step, # Use value from actor
                 "agent_state_dict": agent_sd,
                 "optimizer_state_dict": opt_sd,
-                "scheduler_state_dict": sched_sd,  # Save scheduler state
+                "scheduler_state_dict": sched_sd,
                 "stats_aggregator_state_dict": stats_sd,
             }
             torch.save(checkpoint_data, temp_path)
@@ -7772,15 +8327,12 @@ class CheckpointManager:
             print(f"  -> ERROR saving checkpoint: {e}")
             traceback.print_exc()
             if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
+                try: os.remove(temp_path)
+                except OSError: pass
 
     def get_initial_state(self) -> Tuple[int, int]:
         """Returns the initial global step and episode count after potential loading."""
         return self.global_step, self.episode_count
-
 
 File: training\training_utils.py
 import pygame
@@ -7835,11 +8387,12 @@ File: ui\demo_renderer.py
 import pygame
 import math
 import traceback
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any, Optional
 
 from config import VisConfig, EnvConfig, DemoConfig, RED
-from environment.game_state import GameState
-from .panels.game_area import GameAreaRenderer  # Keep for grid rendering logic
+
+# from environment.game_state import GameState # No longer use GameState directly
+from .panels.game_area import GameAreaRenderer  # Keep for rendering logic if needed
 from .demo_components.grid_renderer import DemoGridRenderer
 from .demo_components.preview_renderer import DemoPreviewRenderer
 from .demo_components.hud_renderer import DemoHudRenderer
@@ -7847,8 +8400,7 @@ from .demo_components.hud_renderer import DemoHudRenderer
 
 class DemoRenderer:
     """
-    Handles rendering specifically for the interactive Demo/Debug Mode.
-    Delegates rendering tasks to sub-components.
+    Handles rendering for Demo/Debug Mode based on data received from logic process.
     """
 
     def __init__(
@@ -7856,14 +8408,15 @@ class DemoRenderer:
         screen: pygame.Surface,
         vis_config: VisConfig,
         demo_config: DemoConfig,
-        game_area_renderer: GameAreaRenderer,  # Pass GameAreaRenderer for shared logic/fonts
+        game_area_renderer: GameAreaRenderer,
     ):
         self.screen = screen
         self.vis_config = vis_config
         self.demo_config = demo_config
-        self.game_area_renderer = game_area_renderer  # Keep reference
+        # GameAreaRenderer might not be needed if all logic is self-contained
+        self.game_area_renderer = game_area_renderer
 
-        # Initialize sub-renderers
+        # Initialize sub-renderers (pass screen, configs)
         self.grid_renderer = DemoGridRenderer(
             screen, vis_config, demo_config, game_area_renderer
         )
@@ -7877,14 +8430,35 @@ class DemoRenderer:
         self.shape_preview_rects: Dict[int, pygame.Rect] = {}
 
     def render(
-        self, demo_env: GameState, env_config: EnvConfig, is_debug: bool = False
+        self,
+        demo_env_data: Dict[str, Any],  # Now accepts a data dictionary
+        env_config: Optional[Dict[str, Any]] = None,  # Env config values as dict
+        is_debug: bool = False,
     ):
-        """Renders the entire demo/debug mode screen."""
-        if not demo_env:
-            print("Error: DemoRenderer called with demo_env=None")
+        """Renders the entire demo/debug mode screen using provided data."""
+        if not demo_env_data or not env_config:
+            print("Error: DemoRenderer called with missing data or env_config")
+            # Optionally render an error message
             return
 
-        bg_color = self.hud_renderer.determine_background_color(demo_env)
+        # Extract necessary info from demo_env_data
+        # This replaces accessing demo_env object attributes
+        is_over = demo_env_data.get("demo_env_is_over", False)
+        score = demo_env_data.get("demo_env_score", 0)
+        state_dict = demo_env_data.get("demo_env_state")  # The StateType dict
+        dragged_shape_idx = demo_env_data.get("demo_env_dragged_shape_idx")
+        snapped_pos = demo_env_data.get("demo_env_snapped_pos")
+        selected_shape_idx = demo_env_data.get("demo_env_selected_shape_idx", -1)
+        # Get shape data (assuming it's part of the state_dict or stats)
+        available_shapes_data = []
+        if (
+            state_dict and "shapes" in state_dict
+        ):  # Placeholder: Need actual shape info passed
+            pass  # Need to reconstruct shape info for previews if not passed separately
+
+        # Determine background color based on state flags (passed in demo_env_data)
+        # bg_color = self.hud_renderer.determine_background_color(demo_env_data) # Adapt this method
+        bg_color = self.demo_config.BACKGROUND_COLOR  # Simplified for now
         self.screen.fill(bg_color)
 
         screen_width, screen_height = self.screen.get_size()
@@ -7892,13 +8466,19 @@ class DemoRenderer:
         hud_height = 60
         help_height = 30
 
+        # Calculate game area using env_config dict
         game_rect, clipped_game_rect = self.grid_renderer.calculate_game_area_rect(
             screen_width, screen_height, padding, hud_height, help_height, env_config
         )
 
         if clipped_game_rect.width > 10 and clipped_game_rect.height > 10:
+            # Pass necessary data down to grid renderer
             self.grid_renderer.render_game_area(
-                demo_env, env_config, clipped_game_rect, bg_color, is_debug
+                demo_env_data,  # Pass the data dict
+                env_config,
+                clipped_game_rect,
+                bg_color,
+                is_debug,
             )
         else:
             self.hud_renderer.render_too_small_message(
@@ -7906,147 +8486,100 @@ class DemoRenderer:
             )
 
         if not is_debug:
+            # Pass necessary data down to preview renderer
             self.shape_preview_rects = self.preview_renderer.render_shape_previews_area(
-                demo_env, screen_width, clipped_game_rect, padding
+                demo_env_data,  # Pass the data dict
+                screen_width,
+                clipped_game_rect,
+                padding,
             )
         else:
             self.shape_preview_rects.clear()
 
+        # Pass necessary data down to HUD renderer
         self.hud_renderer.render_hud(
-            demo_env, screen_width, game_rect.bottom + 10, is_debug
+            demo_env_data,  # Pass the data dict
+            screen_width,
+            game_rect.bottom + 10,
+            is_debug,
         )
         self.hud_renderer.render_help_text(screen_width, screen_height, is_debug)
 
-    # Expose calculation methods if needed by InputHandler
-    def _calculate_game_area_rect(self, *args, **kwargs):
-        return self.grid_renderer.calculate_game_area_rect(*args, **kwargs)
-
-    def _calculate_demo_triangle_size(self, *args, **kwargs):
-        return self.grid_renderer.calculate_demo_triangle_size(*args, **kwargs)
-
-    def _calculate_grid_offset(self, *args, **kwargs):
-        return self.grid_renderer.calculate_grid_offset(*args, **kwargs)
+    # Expose calculation methods if needed by InputHandler (unlikely now)
+    # ...
 
     def get_shape_preview_rects(self) -> Dict[int, pygame.Rect]:
         """Returns the dictionary of screen-relative shape preview rects."""
-        # Get rects from the preview renderer
         return self.preview_renderer.get_shape_preview_rects()
 
 
 File: ui\input_handler.py
 # File: ui/input_handler.py
-# File: ui/input_handler.py
 import pygame
-from typing import Tuple, Callable, Dict, TYPE_CHECKING, Optional
-
-# Type Aliases for Callbacks
-HandleDemoMouseMotionCallback = Callable[[Tuple[int, int]], None]
-HandleDemoMouseButtonDownCallback = Callable[[pygame.event.Event], None]
-RequestCleanupCallback = Callable[[], None]
-CancelCleanupCallback = Callable[[], None]
-ConfirmCleanupCallback = Callable[[], None]
-ExitAppCallback = Callable[[], bool]
-StartDemoModeCallback = Callable[[], None]
-ExitDemoModeCallback = Callable[[], None]
-StartDebugModeCallback = Callable[[], None]
-ExitDebugModeCallback = Callable[[], None]
-HandleDebugInputCallback = Callable[[pygame.event.Event], None]
-# MCTS Vis Callbacks Removed
-# StartMCTSVisualizationCallback = Callable[[], None]
-# ExitMCTSVisualizationCallback = Callable[[], None]
-# HandleMCTSPanCallback = Callable[[int, int], None]
-# HandleMCTSZoomCallback = Callable[[float, Tuple[int, int]], None]
-# Combined Worker Control Callbacks
-StartRunCallback = Callable[[], None]
-StopRunCallback = Callable[[], None]
-
+import multiprocessing as mp
+from typing import Tuple, Dict, TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from .renderer import UIRenderer
     from app_state import AppState
-    from main_pygame import MainApp
+
+COMMAND_SENTINEL = "COMMAND"
+STOP_SENTINEL = "STOP"
+PAYLOAD_KEY = "payload"  # Use this key for data
 
 
 class InputHandler:
-    """Handles Pygame events and triggers callbacks based on application state."""
+    """Handles Pygame events and sends commands to the Logic process via a queue."""
 
     def __init__(
         self,
         screen: pygame.Surface,
         renderer: "UIRenderer",
-        # Basic Callbacks
-        request_cleanup_cb: RequestCleanupCallback,
-        cancel_cleanup_cb: CancelCleanupCallback,
-        confirm_cleanup_cb: ConfirmCleanupCallback,
-        exit_app_cb: ExitAppCallback,
-        # Demo Mode Callbacks
-        start_demo_mode_cb: StartDemoModeCallback,
-        exit_demo_mode_cb: ExitDemoModeCallback,
-        handle_demo_mouse_motion_cb: HandleDemoMouseMotionCallback,
-        handle_demo_mouse_button_down_cb: HandleDemoMouseButtonDownCallback,
-        # Debug Mode Callbacks
-        start_debug_mode_cb: StartDebugModeCallback,
-        exit_debug_mode_cb: ExitDebugModeCallback,
-        handle_debug_input_cb: HandleDebugInputCallback,
-        # MCTS Vis Callbacks Removed
-        # start_mcts_visualization_cb: StartMCTSVisualizationCallback,
-        # exit_mcts_visualization_cb: ExitMCTSVisualizationCallback,
-        # handle_mcts_pan_cb: HandleMCTSPanCallback,
-        # handle_mcts_zoom_cb: HandleMCTSZoomCallback,
-        # Combined Worker Control Callbacks
-        start_run_cb: StartRunCallback,
-        stop_run_cb: StopRunCallback,
+        command_queue: mp.Queue,
+        stop_event: mp.Event,
     ):
         self.screen = screen
         self.renderer = renderer
-        # Store Callbacks
-        self.request_cleanup_cb = request_cleanup_cb
-        self.cancel_cleanup_cb = cancel_cleanup_cb
-        self.confirm_cleanup_cb = confirm_cleanup_cb
-        self.exit_app_cb = exit_app_cb
-        self.start_demo_mode_cb = start_demo_mode_cb
-        self.exit_demo_mode_cb = exit_demo_mode_cb
-        self.handle_demo_mouse_motion_cb = handle_demo_mouse_motion_cb
-        self.handle_demo_mouse_button_down_cb = handle_demo_mouse_button_down_cb
-        self.start_debug_mode_cb = start_debug_mode_cb
-        self.exit_debug_mode_cb = exit_debug_mode_cb
-        self.handle_debug_input_cb = handle_debug_input_cb
-        # MCTS Vis Callbacks Removed
-        # self.start_mcts_visualization_cb = start_mcts_visualization_cb
-        # self.exit_mcts_visualization_cb = exit_mcts_visualization_cb
-        # self.handle_mcts_pan_cb = handle_mcts_pan_cb
-        # self.handle_mcts_zoom_cb = handle_mcts_zoom_cb
-        self.start_run_cb = start_run_cb
-        self.stop_run_cb = stop_run_cb
+        self.command_queue = command_queue
+        self.stop_event = stop_event
+        self.app_state_str = "Initializing"
+        self.cleanup_confirmation_active = False
+        self.is_process_running_cache = False  # Cache running state
 
-        self.shape_preview_rects: Dict[int, pygame.Rect] = {}
-
-        # Button rects
         self.run_stop_btn_rect = pygame.Rect(0, 0, 0, 0)
         self.cleanup_btn_rect = pygame.Rect(0, 0, 0, 0)
         self.demo_btn_rect = pygame.Rect(0, 0, 0, 0)
         self.debug_btn_rect = pygame.Rect(0, 0, 0, 0)
-        # self.mcts_vis_btn_rect = pygame.Rect(0, 0, 0, 0) # MCTS Vis removed
         self.confirm_yes_rect = pygame.Rect(0, 0, 0, 0)
         self.confirm_no_rect = pygame.Rect(0, 0, 0, 0)
+        self.shape_preview_rects: Dict[int, pygame.Rect] = {}
+
+        self._button_renderer = getattr(
+            renderer.left_panel, "button_status_renderer", None
+        )
         self._update_button_rects()
 
-        # MCTS Vis state removed
-        # self.is_panning_mcts = False
-        # self.last_pan_pos: Optional[Tuple[int, int]] = None
-        self.app_ref: Optional["MainApp"] = None
+    def _update_ui_screen_references(self, new_screen: pygame.Surface):
+        self.screen = new_screen
+        components_to_update = [
+            self.renderer,
+            getattr(self.renderer, "left_panel", None),
+            getattr(self.renderer, "game_area", None),
+            getattr(self.renderer, "overlays", None),
+            getattr(self.renderer, "demo_renderer", None),
+        ]
+        for component in components_to_update:
+            if component and hasattr(component, "screen"):
+                component.screen = new_screen
 
     def _update_button_rects(self):
-        """Calculates button rects based on initial layout assumptions."""
         button_height = 40
         button_y_pos = 10
         run_stop_button_width = 150
         cleanup_button_width = 160
         demo_button_width = 120
         debug_button_width = 120
-        # mcts_vis_button_width = 140 # MCTS Vis removed
         button_spacing = 10
-
         current_x = button_spacing
         self.run_stop_btn_rect = pygame.Rect(
             current_x, button_y_pos, run_stop_button_width, button_height
@@ -8069,23 +8602,17 @@ class InputHandler:
         self.confirm_yes_rect.center = (sw // 2 - 60, sh // 2 + 50)
         self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)
 
-    def handle_input(
-        self, app_state_str: str, cleanup_confirmation_active: bool
-    ) -> bool:
-        """Processes Pygame events. Returns True to continue running, False to exit."""
-        from app_state import AppState
-
-        try:
-            mouse_pos = pygame.mouse.get_pos()
-        except pygame.error:
-            mouse_pos = (0, 0)
-
-        sw, sh = self.screen.get_size()
-        self.confirm_yes_rect.center = (sw // 2 - 60, sh // 2 + 50)
-        self.confirm_no_rect.center = (sw // 2 + 60, sh // 2 + 50)
-
+    def update_state(
+        self,
+        app_state_str: str,
+        cleanup_confirmation_active: bool,
+        is_process_running: bool = False,
+    ):
+        self.app_state_str = app_state_str
+        self.cleanup_confirmation_active = cleanup_confirmation_active
+        self.is_process_running_cache = is_process_running  # Update cache
         if (
-            app_state_str == AppState.PLAYING.value
+            self.app_state_str == "Playing"
             and self.renderer
             and self.renderer.demo_renderer
         ):
@@ -8095,17 +8622,38 @@ class InputHandler:
         else:
             self.shape_preview_rects.clear()
 
+    def _send_command(self, command: str, payload: Optional[Dict] = None):
+        cmd_dict = {COMMAND_SENTINEL: command}
+        if payload:
+            cmd_dict[PAYLOAD_KEY] = payload
+        try:
+            self.command_queue.put(cmd_dict)
+        except Exception as e:
+            print(f"Error sending command '{command}' to queue: {e}")
+
+    def handle_input(self) -> bool:
+        from app_state import AppState
+
+        try:
+            mouse_pos = pygame.mouse.get_pos()
+        except pygame.error:
+            mouse_pos = (0, 0)
+
+        self._update_button_rects()
+
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
-                return self.exit_app_cb()
+                self.stop_event.set()
+                self._send_command(STOP_SENTINEL)
+                return False
 
             if event.type == pygame.VIDEORESIZE:
                 try:
                     new_w, new_h = max(320, event.w), max(240, event.h)
-                    self.screen = pygame.display.set_mode(
+                    new_screen = pygame.display.set_mode(
                         (new_w, new_h), pygame.RESIZABLE
                     )
-                    self._update_ui_screen_references(self.screen)
+                    self._update_ui_screen_references(new_screen)
                     self._update_button_rects()
                     if hasattr(self.renderer, "force_redraw"):
                         self.renderer.force_redraw()
@@ -8114,89 +8662,100 @@ class InputHandler:
                     print(f"Error resizing window: {e}")
                 continue
 
-            if cleanup_confirmation_active:
+            if self.cleanup_confirmation_active:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    self.cancel_cleanup_cb()
+                    self._send_command("cancel_cleanup")
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     if self.confirm_yes_rect.collidepoint(mouse_pos):
-                        self.confirm_cleanup_cb()
+                        self._send_command("confirm_cleanup")
                     elif self.confirm_no_rect.collidepoint(mouse_pos):
-                        self.cancel_cleanup_cb()
+                        self._send_command("cancel_cleanup")
                 continue
 
             current_app_state = (
-                AppState(app_state_str)
-                if app_state_str in AppState._value2member_map_
+                AppState(self.app_state_str)
+                if self.app_state_str in AppState._value2member_map_
                 else AppState.UNKNOWN
             )
 
             if current_app_state == AppState.PLAYING:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    self.exit_demo_mode_cb()
+                    self._send_command("exit_demo_mode")
                 elif event.type == pygame.MOUSEMOTION:
-                    self.handle_demo_mouse_motion_cb(event.pos)
-                elif event.type == pygame.MOUSEBUTTONDOWN:
-                    self.handle_demo_mouse_button_down_cb(event)
+                    grid_coords = None  # TODO: Implement UI-side mapping
+                    self._send_command(
+                        "demo_mouse_motion", payload={"pos": grid_coords}
+                    )
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    clicked_preview = None
+                    for idx, rect in self.shape_preview_rects.items():
+                        if rect.collidepoint(event.pos):
+                            clicked_preview = idx
+                            break
+                    if clicked_preview is not None:
+                        self._send_command(
+                            "demo_mouse_button_down",
+                            payload={"type": "preview", "index": clicked_preview},
+                        )
+                    else:
+                        grid_coords = None  # TODO: Implement UI-side mapping
+                        if grid_coords:
+                            self._send_command(
+                                "demo_mouse_button_down",
+                                payload={"type": "grid", "grid_coords": grid_coords},
+                            )
+                        else:
+                            self._send_command(
+                                "demo_mouse_button_down", payload={"type": "outside"}
+                            )
 
             elif current_app_state == AppState.DEBUG:
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_ESCAPE:
-                        self.exit_debug_mode_cb()
-                    else:
-                        self.handle_debug_input_cb(event)
-                elif event.type == pygame.MOUSEBUTTONDOWN:
-                    self.handle_debug_input_cb(event)
+                        self._send_command("exit_debug_mode")
+                    elif event.key == pygame.K_r:
+                        self._send_command("debug_input", payload={"type": "reset"})
+                elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                    grid_coords = None  # TODO: Implement UI-side mapping
+                    if grid_coords:
+                        self._send_command(
+                            "debug_input",
+                            payload={
+                                "type": "toggle_triangle",
+                                "grid_coords": grid_coords,
+                            },
+                        )
 
             elif current_app_state == AppState.MAIN_MENU:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    return self.exit_app_cb()
+                    self.stop_event.set()
+                    self._send_command(STOP_SENTINEL)
+                    return False
                 if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     is_running = (
-                        self.app_ref.worker_manager.is_any_worker_running()
-                        if self.app_ref
-                        else False
-                    )
+                        self.is_process_running_cache
+                    )  # Use cached value from render data
 
                     if self.run_stop_btn_rect.collidepoint(mouse_pos):
+                        cmd = "stop_run" if is_running else "start_run"
                         if is_running:
-                            self.stop_run_cb()
-                        else:
-                            self.start_run_cb()
-                    elif not is_running:  # Only allow other buttons if not running
+                            self.stop_event.set()  # Set stop event immediately on UI action
+                        self._send_command(cmd)
+                    elif not is_running:
                         if self.cleanup_btn_rect.collidepoint(mouse_pos):
-                            self.request_cleanup_cb()
+                            self._send_command("request_cleanup")
                         elif self.demo_btn_rect.collidepoint(mouse_pos):
-                            self.start_demo_mode_cb()
+                            self._send_command("start_demo_mode")
                         elif self.debug_btn_rect.collidepoint(mouse_pos):
-                            self.start_debug_mode_cb()
+                            self._send_command("start_debug_mode")
 
             elif current_app_state == AppState.ERROR:
                 if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                    return self.exit_app_cb()
+                    self.stop_event.set()
+                    self._send_command(STOP_SENTINEL)
+                    return False
 
         return True
-
-    def _update_ui_screen_references(self, new_screen: pygame.Surface):
-        """Updates the screen reference in the renderer and its sub-components."""
-        components_to_update = [
-            self.renderer,
-            getattr(self.renderer, "left_panel", None),
-            getattr(self.renderer, "game_area", None),
-            getattr(self.renderer, "overlays", None),
-            getattr(self.renderer, "demo_renderer", None),
-            getattr(
-                getattr(self.renderer, "demo_renderer", None), "grid_renderer", None
-            ),
-            getattr(
-                getattr(self.renderer, "demo_renderer", None), "preview_renderer", None
-            ),
-            getattr(
-                getattr(self.renderer, "demo_renderer", None), "hud_renderer", None
-            ),
-        ]
-        for component in components_to_update:
-            if component and hasattr(component, "screen"):
-                component.screen = new_screen
 
 
 File: ui\overlays.py
@@ -9205,7 +9764,8 @@ from typing import List, Dict, Any, Optional, Tuple, Deque
 import logging
 
 from config import VisConfig, EnvConfig, DemoConfig
-from environment.game_state import GameState
+
+# from environment.game_state import GameState # No longer needed directly
 from .panels import LeftPanelRenderer, GameAreaRenderer
 from .overlays import OverlayRenderer
 from .plotter import Plotter
@@ -9217,41 +9777,49 @@ logger = logging.getLogger(__name__)
 
 
 class UIRenderer:
-    """Orchestrates rendering of all UI components."""
+    """Orchestrates rendering of all UI components based on data received from the logic process."""
 
     def __init__(self, screen: pygame.Surface, vis_config: VisConfig):
         self.screen = screen
         self.vis_config = vis_config
+        # Plotter is specific to the UI process
         self.plotter = Plotter()
+        # Sub-renderers are initialized here
         self.left_panel = LeftPanelRenderer(screen, vis_config, self.plotter)
         self.game_area = GameAreaRenderer(screen, vis_config)
         self.overlays = OverlayRenderer(screen, vis_config)
         self.demo_config = DemoConfig()
+        # DemoRenderer needs access to GameAreaRenderer's fonts/methods if shared
         self.demo_renderer = DemoRenderer(
             screen, vis_config, self.demo_config, self.game_area
         )
-        self.last_plot_update_time = 0
+        self.input_handler_ref: Optional[InputHandler] = None
 
     def set_input_handler(self, input_handler: InputHandler):
-        """Sets the InputHandler reference after it's initialized."""
+        """Sets the InputHandler reference for components that need it (e.g., buttons)."""
+        self.input_handler_ref = input_handler
         self.left_panel.input_handler = input_handler
+        # Pass references down if needed
         if hasattr(self.left_panel, "button_status_renderer"):
             self.left_panel.button_status_renderer.input_handler_ref = input_handler
-            # Pass the app reference if the button renderer needs it
-            if hasattr(self.left_panel.button_status_renderer, "app_ref"):
-                self.left_panel.button_status_renderer.app_ref = input_handler.app_ref
+            # Pass app_ref if needed (though app_ref is less relevant now)
+            # self.left_panel.button_status_renderer.app_ref = input_handler.app_ref
 
     def force_redraw(self):
         """Forces components like the plotter to redraw on the next frame."""
         self.plotter.last_plot_update_time = 0
+        # Clear caches that might depend on screen size or old data
         self.game_area.best_state_surface_cache = None
         self.game_area.placeholder_surface_cache = None
+        # Maybe force re-calc of button rects? (Handled by input handler resize)
         logger.info("[Renderer] Forced redraw triggered.")
 
-    def render_all(self, **kwargs):
-        """Renders UI based on the application state."""
+    def render_all(self, **render_data: Dict[str, Any]):
+        """
+        Renders UI based on the application state dictionary received from the logic process.
+        """
         try:
-            app_state_str = kwargs.get("app_state", AppState.UNKNOWN.value)
+            app_state_str = render_data.get("app_state", AppState.UNKNOWN.value)
             current_app_state = (
                 AppState(app_state_str)
                 if app_state_str in AppState._value2member_map_
@@ -9260,42 +9828,38 @@ class UIRenderer:
 
             # --- Main Rendering Logic ---
             if current_app_state == AppState.MAIN_MENU:
-                self._render_main_menu(**kwargs)
+                self._render_main_menu(**render_data)
             elif current_app_state == AppState.PLAYING:
-                self._render_demo_mode(
-                    kwargs.get("demo_env"), kwargs.get("env_config"), is_debug=False
-                )
+                self._render_demo_mode(is_debug=False, **render_data)
             elif current_app_state == AppState.DEBUG:
-                self._render_demo_mode(
-                    kwargs.get("demo_env"), kwargs.get("env_config"), is_debug=True
-                )
+                self._render_demo_mode(is_debug=True, **render_data)
             elif current_app_state == AppState.INITIALIZING:
+                # Use status from render_data
                 self._render_initializing_screen(
-                    kwargs.get("status", "Initializing...")
+                    render_data.get("status", "Initializing...")
                 )
             elif current_app_state == AppState.ERROR:
-                self._render_error_screen(kwargs.get("status", "Unknown Error"))
+                self._render_error_screen(render_data.get("status", "Unknown Error"))
             else:  # Handle other potential states or default view
                 self._render_simple_message(f"State: {app_state_str}", VisConfig.WHITE)
 
             # Render overlays on top (e.g., cleanup confirmation)
             if (
-                kwargs.get("cleanup_confirmation_active")
+                render_data.get("cleanup_confirmation_active")
                 and current_app_state != AppState.ERROR
             ):
                 self.overlays.render_cleanup_confirmation()
-            elif not kwargs.get("cleanup_confirmation_active"):
+            elif not render_data.get("cleanup_confirmation_active"):
                 # Render temporary status messages (like 'Cleanup complete')
                 self.overlays.render_status_message(
-                    kwargs.get("cleanup_message", ""),
-                    kwargs.get("last_cleanup_message_time", 0.0),
+                    render_data.get("cleanup_message", ""),
+                    render_data.get("last_cleanup_message_time", 0.0),
                 )
 
             pygame.display.flip()  # Flip the display once after all rendering
 
         except pygame.error as e:
-            logger.error(f"Pygame rendering error in render_all: {e}")
-            # Attempt to render a minimal error message directly
+            logger.error(f"Pygame rendering error in render_all: {e}", exc_info=True)
             try:
                 self._render_simple_message("Pygame Render Error!", VisConfig.RED)
                 pygame.display.flip()
@@ -9311,86 +9875,93 @@ class UIRenderer:
             except Exception:
                 pass
 
-    def _render_main_menu(self, **kwargs):
+    def _render_main_menu(self, **render_data: Dict[str, Any]):
         """Renders the main dashboard view with live worker envs."""
         self.screen.fill(VisConfig.BLACK)
         current_width, current_height = self.screen.get_size()
         lp_width, ga_width = self._calculate_panel_widths(current_width)
 
-        # --- Render Left Panel (Stats, Controls, Plots) ---
+        # --- Render Left Panel ---
+        # Pass only the necessary data from render_data
         self.left_panel.render(
             panel_width=lp_width,
-            is_process_running=kwargs.get("is_process_running", False),
-            status=kwargs.get("status", ""),
-            stats_summary=kwargs.get("stats_summary", {}),
-            plot_data=kwargs.get("plot_data", {}),
-            app_state=kwargs.get("app_state", ""),
-            update_progress_details=kwargs.get("update_progress_details", {}),
-            agent_param_count=kwargs.get("agent_param_count", 0),
-            worker_counts=kwargs.get("worker_counts", {}),
+            is_process_running=render_data.get("is_process_running", False),
+            status=render_data.get("status", ""),
+            stats_summary=render_data.get("stats_summary", {}),
+            plot_data=render_data.get("plot_data", {}),
+            app_state=render_data.get("app_state", ""),
+            update_progress_details={},  # Maybe remove if not used
+            agent_param_count=render_data.get("agent_param_count", 0),
+            worker_counts=render_data.get("worker_counts", {}),
         )
 
-        # --- Render Game Area Panel (Live Worker Envs) ---
+        # --- Render Game Area Panel ---
         if ga_width > 0:
-            # Pass the worker_render_data list directly
+            # Recreate minimalist EnvConfig for rendering if needed
+            # Or pass necessary values directly
+            # env_config_render = EnvConfig() # Avoid creating full config if possible
+            env_config_render_dict = {
+                "ROWS": render_data.get("env_config_rows", 8),
+                "COLS": render_data.get("env_config_cols", 15),
+                # Add other needed EnvConfig values if GameAreaRenderer uses them
+            }
             self.game_area.render(
                 panel_width=ga_width,
                 panel_x_offset=lp_width,
-                worker_render_data=kwargs.get(
-                    "worker_render_data", []
-                ),  # List[Optional[Dict]]
-                num_envs=kwargs.get("num_envs", 0),  # Total number of SP workers
-                env_config=kwargs.get("env_config"),
-                best_game_state_data=kwargs.get(
-                    "best_game_state_data"
-                ),  # Pass best game state data
+                worker_render_data=render_data.get("worker_render_data", []),
+                num_envs=render_data.get("num_envs", 0),
+                env_config=env_config_render_dict,  # Pass dict or minimalist object
+                best_game_state_data=render_data.get("best_game_state_data"),
             )
 
     def _calculate_panel_widths(self, current_width: int) -> Tuple[int, int]:
         """Calculates the widths for the left and game area panels."""
-        # Ensure ratio is within reasonable bounds
         left_panel_ratio = max(0.2, min(0.8, self.vis_config.LEFT_PANEL_RATIO))
         lp_width = int(current_width * left_panel_ratio)
         ga_width = current_width - lp_width
-
-        # Ensure left panel has a minimum width for readability, unless screen is tiny
-        min_lp_width = 400  # Minimum width for left panel elements
+        min_lp_width = 400
         if lp_width < min_lp_width and current_width > min_lp_width:
             lp_width = min_lp_width
-            ga_width = max(0, current_width - lp_width)  # Adjust game area width
-        elif (
-            current_width <= min_lp_width
-        ):  # If screen too small, give all to left panel
+            ga_width = max(0, current_width - lp_width)
+        elif current_width <= min_lp_width:
             lp_width = current_width
             ga_width = 0
-
         return lp_width, ga_width
 
-    def _render_demo_mode(
-        self,
-        demo_env: Optional[GameState],
-        env_config: Optional[EnvConfig],
-        is_debug: bool,
-    ):
-        """Renders the demo or debug mode using the DemoRenderer."""
-        if demo_env and env_config and self.demo_renderer:
-            self.demo_renderer.render(demo_env, env_config, is_debug=is_debug)
+    def _render_demo_mode(self, is_debug: bool, **render_data: Dict[str, Any]):
+        """Renders the demo or debug mode using data from the queue."""
+        if not self.demo_renderer:
+            self._render_simple_message("Demo Renderer Missing!", VisConfig.RED)
+            return
+
+        # Reconstruct a temporary GameState or pass data directly
+        # Passing data directly avoids creating GameState in UI process
+        # Requires DemoRenderer to accept data dictionary instead of GameState object
+        demo_env_state = render_data.get("demo_env_state")
+        if demo_env_state:
+            # DemoRenderer needs to be adapted to use this data
+            self.demo_renderer.render(
+                demo_env_data=render_data,  # Pass the relevant subset
+                env_config=None,  # Pass necessary config values instead
+                is_debug=is_debug,
+            )
         else:
             mode = "Debug" if is_debug else "Demo"
-            self._render_simple_message(
-                f"{mode} Env Error or Renderer Missing!", VisConfig.RED
-            )
+            self._render_simple_message(f"{mode} Env Data Missing!", VisConfig.RED)
 
     def _render_initializing_screen(self, status_message: str = "Initializing..."):
         """Renders a simple initializing message."""
         self._render_simple_message(status_message, VisConfig.WHITE)
 
     def _render_error_screen(self, status_message: str):
-        """Renders the error screen with more detail."""
+        """Renders the error screen."""
         try:
-            self.screen.fill((40, 0, 0))  # Dark red background
+            self.screen.fill((40, 0, 0))
             font_title = pygame.font.SysFont(None, 70)
             font_msg = pygame.font.SysFont(None, 30)
+            if not font_title or not font_msg:
+                font_title = pygame.font.Font(None, 70)
+                font_msg = pygame.font.Font(None, 30)
 
             title_surf = font_title.render("APPLICATION ERROR", True, VisConfig.RED)
             msg_surf = font_msg.render(
@@ -9400,7 +9971,6 @@ class UIRenderer:
                 "Press ESC or close window to exit.", True, VisConfig.WHITE
             )
 
-            # Position elements
             title_rect = title_surf.get_rect(
                 center=(self.screen.get_width() // 2, self.screen.get_height() // 3)
             )
@@ -9417,17 +9987,15 @@ class UIRenderer:
 
         except Exception as e:
             logger.error(f"Error rendering error screen itself: {e}")
-            # Fallback to simple message if error screen fails
             self._render_simple_message(f"Error State: {status_message}", VisConfig.RED)
 
     def _render_simple_message(self, message: str, color: Tuple[int, int, int]):
         """Renders a simple centered message."""
         try:
             self.screen.fill(VisConfig.BLACK)
-            font = pygame.font.SysFont(None, 50)  # Use a default system font
-            if not font:  # Fallback if SysFont fails
+            font = pygame.font.SysFont(None, 50)
+            if not font:
                 font = pygame.font.Font(None, 50)
-
             text_surf = font.render(message, True, color)
             text_rect = text_surf.get_rect(center=self.screen.get_rect().center)
             self.screen.blit(text_surf, text_rect)
@@ -10714,6 +11282,7 @@ class TreeLayout:
 
 
 File: ui\panels\game_area.py
+# File: ui/panels/game_area.py
 import pygame
 import math
 import traceback
@@ -10740,20 +11309,23 @@ from config import (
     GAME_OVER_FLASH_COLOR,
     DARK_GRAY,
 )
-from environment.game_state import GameState, StateType
-from environment.shape import Shape
-from environment.triangle import Triangle
+
+# GameState not needed directly, use dicts
+# from environment.game_state import GameState, StateType
+from environment.shape import Shape  # Still useful for rendering shapes
+from environment.triangle import Triangle  # Still useful for rendering triangles
 
 logger = logging.getLogger(__name__)
 
 
 class GameAreaRenderer:
-    """Renders the right panel: Shows live self-play worker environments and best game state."""
+    """Renders the right panel based on data received from the logic process."""
 
     def __init__(self, screen: pygame.Surface, vis_config: VisConfig):
         self.screen = screen
         self.vis_config = vis_config
         self.fonts = self._init_fonts()
+        # Caches remain UI-side
         self.best_state_surface_cache: Optional[pygame.Surface] = None
         self.last_best_state_size: Tuple[int, int] = (0, 0)
         self.last_best_state_score: Optional[int] = None
@@ -10764,6 +11336,7 @@ class GameAreaRenderer:
 
     def _init_fonts(self):
         """Initializes fonts used in the game area."""
+        # ... (font init remains the same)
         fonts = {}
         font_configs = {
             "env_score": 16,
@@ -10785,7 +11358,7 @@ class GameAreaRenderer:
                 except Exception as e:
                     logger.error(f"ERROR: Font '{key}' failed to load: {e}")
                     fonts[key] = None
-        # Fallbacks
+        # Fallbacks (ensure keys exist)
         if fonts.get("ui") is None:
             fonts["ui"] = pygame.font.Font(None, 24)
         if fonts.get("placeholder") is None:
@@ -10808,10 +11381,10 @@ class GameAreaRenderer:
         self,
         panel_width: int,
         panel_x_offset: int,
-        worker_render_data: List[Optional[Dict[str, Any]]],
+        worker_render_data: List[Optional[Dict[str, Any]]],  # Receives list of dicts
         num_envs: int,
-        env_config: Optional[EnvConfig],
-        best_game_state_data: Optional[Dict[str, Any]],
+        env_config: Dict[str, Any],  # Receives config values as dict
+        best_game_state_data: Optional[Dict[str, Any]],  # Receives dict
     ):
         """Renders the grid of live self-play worker environments and best game found."""
         current_height = self.screen.get_height()
@@ -10868,6 +11441,7 @@ class GameAreaRenderer:
 
     def _render_placeholder(self, area_rect: pygame.Rect, message: str):
         """Renders a simple placeholder message."""
+        # ... (remains the same)
         pygame.draw.rect(self.screen, (60, 60, 70), area_rect, 1)
         font = self.fonts.get("placeholder")
         if font:
@@ -10878,6 +11452,7 @@ class GameAreaRenderer:
         self, available_rect: pygame.Rect, num_items: int
     ) -> Tuple[int, int, int, int]:
         """Calculates layout for multiple small environment grids."""
+        # ... (remains the same)
         if available_rect.width <= 0 or available_rect.height <= 0 or num_items <= 0:
             return 0, 0, 0, 0
         aspect = available_rect.width / max(1, available_rect.height)
@@ -10900,7 +11475,7 @@ class GameAreaRenderer:
     def _render_env_grid(
         self,
         worker_render_data: List[Optional[Dict[str, Any]]],
-        env_config: EnvConfig,
+        env_config: Dict[str, Any],  # Use dict
         grid_area_rect: pygame.Rect,
         cols: int,
         rows: int,
@@ -10908,6 +11483,7 @@ class GameAreaRenderer:
         cell_h_total: int,
     ):
         """Renders the grid of small environment previews."""
+        # ... (loop structure remains the same)
         env_idx = 0
         sp = self.vis_config.ENV_SPACING
         info_h, shapes_h = 12, 22
@@ -10936,9 +11512,14 @@ class GameAreaRenderer:
                     cell_surf = self.screen.subsurface(clip_rect_total)
                     cell_surf.fill(VisConfig.DARK_GRAY)
 
-                    if render_data and render_data.get("state_dict"):
-                        env_state_dict: StateType = render_data["state_dict"]
-                        env_stats: Dict[str, Any] = render_data.get("stats", {})
+                    # Check if render_data and state_dict exist
+                    if (
+                        render_data
+                        and isinstance(render_data, dict)
+                        and render_data.get("state_dict")
+                    ):
+                        env_state_dict = render_data["state_dict"]
+                        env_stats = render_data.get("stats", {})
 
                         # Render Grid
                         if grid_rect_local.height > 0:
@@ -10952,20 +11533,37 @@ class GameAreaRenderer:
                                 grid_surf = cell_surf.subsurface(
                                     clipped_grid_rect_local
                                 )
-                                occupancy_grid = env_state_dict.get("grid")[0]
-                                orientation_grid = env_state_dict.get("grid")[1]
-                                death_mask = env_state_dict.get(
-                                    "death_mask",
-                                    np.zeros_like(occupancy_grid, dtype=bool),
-                                )
-                                self._render_single_env_grid_from_arrays(
-                                    grid_surf,
-                                    occupancy_grid,
-                                    orientation_grid,
-                                    death_mask,
-                                    env_config,
-                                    env_stats,  # Pass full stats dict
-                                )
+                                # Check if state_dict has grid data
+                                if (
+                                    isinstance(env_state_dict, dict)
+                                    and "grid" in env_state_dict
+                                ):
+                                    grid_array = env_state_dict["grid"]
+                                    if (
+                                        isinstance(grid_array, np.ndarray)
+                                        and grid_array.ndim == 3
+                                        and grid_array.shape[0] >= 2
+                                    ):
+                                        occupancy_grid = grid_array[0]
+                                        orientation_grid = grid_array[1]
+                                        death_mask = env_state_dict.get(
+                                            "death_mask",
+                                            np.zeros_like(occupancy_grid, dtype=bool),
+                                        )
+                                        self._render_single_env_grid_from_arrays(
+                                            grid_surf,
+                                            occupancy_grid,
+                                            orientation_grid,
+                                            death_mask,
+                                            env_config,
+                                            env_stats,
+                                        )
+                                    else:
+                                        self._render_placeholder(
+                                            grid_surf, "Invalid Grid Data"
+                                        )
+                                else:
+                                    self._render_placeholder(grid_surf, "No Grid Data")
 
                         # Render Shapes
                         if shapes_rect_local.height > 0:
@@ -11000,6 +11598,7 @@ class GameAreaRenderer:
                                 )
                                 self._render_env_info(info_surf, env_idx, env_stats)
                     else:  # Placeholder rendering
+                        # ... (placeholder rendering remains the same)
                         pygame.draw.rect(cell_surf, (20, 20, 20), cell_surf.get_rect())
                         pygame.draw.rect(
                             cell_surf, (60, 60, 60), cell_surf.get_rect(), 1
@@ -11040,18 +11639,19 @@ class GameAreaRenderer:
         occupancy_grid: np.ndarray,
         orientation_grid: np.ndarray,
         death_mask: np.ndarray,
-        env_config: EnvConfig,
-        stats: Dict[str, Any],  # Accept full stats dict
+        env_config: Dict[str, Any],
+        stats: Dict[str, Any],
     ):
         """Renders the grid portion using occupancy, orientation, and death arrays."""
+        # ... (grid rendering logic remains mostly the same, use env_config dict)
         cw, ch = surf.get_width(), surf.get_height()
         bg = VisConfig.GRAY
         surf.fill(bg)
-
         try:
             pad = self.vis_config.ENV_GRID_PADDING
             dw, dh = max(1, cw - 2 * pad), max(1, ch - 2 * pad)
-            gr, gcw_eff = env_config.ROWS, env_config.COLS * 0.75 + 0.25
+            gr, gc = env_config.get("ROWS", 8), env_config.get("COLS", 15)
+            gcw_eff = gc * 0.75 + 0.25
             if gr <= 0 or gcw_eff <= 0:
                 return
 
@@ -11070,40 +11670,36 @@ class GameAreaRenderer:
                         0 <= r < death_mask.shape[0] and 0 <= c < death_mask.shape[1]
                     ):
                         continue
-
                     is_death = death_mask[r, c] > 0.5
                     is_occupied = occupancy_grid[r, c] > 0.5
                     expected_is_up = (r + c) % 2 == 0
-
                     temp_tri = Triangle(r, c, expected_is_up)
                     try:
                         pts = temp_tri.get_points(
                             ox=ox, oy=oy, cw=int(tcw), ch=int(tch)
                         )
                         color = VisConfig.LIGHTG
-
                         if is_death:
                             color = BLACK
                         elif is_occupied:
                             color = VisConfig.WHITE
-
                         pygame.draw.polygon(surf, color, pts)
                         if not is_death:
                             pygame.draw.polygon(surf, VisConfig.DARK_GRAY, pts, 1)
-                    except Exception as tri_err:
-                        pass
+                    except Exception:
+                        pass  # Ignore triangle errors
         except Exception as grid_err:
             logger.error(f"Error rendering grid from arrays: {grid_err}")
             pygame.draw.rect(surf, RED, surf.get_rect(), 2)
 
-        # Score Overlay - Use game_score from stats dict
+        # Score Overlay
         try:
             score_font = self.fonts.get("env_score")
-            score = stats.get("game_score", "?")  # Get score from the passed stats
+            score = stats.get("game_score", "?")
             if score_font:
                 score_surf = score_font.render(
                     f"Score: {score}", True, WHITE, (0, 0, 0, 180)
-                )  # Changed label
+                )
                 surf.blit(score_surf, (2, 2))
         except Exception as e:
             logger.error(f"Error rendering score overlay: {e}")
@@ -11114,29 +11710,29 @@ class GameAreaRenderer:
             self._render_overlay_text(surf, "ERROR", RED)
         elif "Finished" in status:
             self._render_overlay_text(surf, "DONE", BLUE)
+        elif "Stopped" in status:
+            self._render_overlay_text(surf, "STOPPED", YELLOW)
 
     def _render_env_shapes_from_data(
         self,
         surf: pygame.Surface,
         available_shapes_data: List[Optional[Dict[str, Any]]],
-        env_config: EnvConfig,
+        env_config: Dict[str, Any],
     ):
         """Renders the available shapes using triangle list and color data."""
+        # ... (shape rendering logic remains mostly the same, use env_config dict)
         sw, sh = surf.get_width(), surf.get_height()
         if sw <= 0 or sh <= 0:
             return
-
-        num_slots = env_config.NUM_SHAPE_SLOTS
+        num_slots = env_config.get("NUM_SHAPE_SLOTS", 3)
         pad = 2
         total_pad_w = (num_slots + 1) * pad
         avail_w = sw - total_pad_w
         if avail_w <= 0:
             return
-
-        w_per = avail_w / num_slots
+        w_per = avail_w / num_slots if num_slots > 0 else avail_w
         h_lim = sh - 2 * pad
         dim = max(5, int(min(w_per, h_lim)))
-
         start_x = pad + (sw - (num_slots * dim + (num_slots - 1) * pad)) / 2
         start_y = pad + (sh - dim) / 2
         curr_x = start_x
@@ -11148,11 +11744,10 @@ class GameAreaRenderer:
             rect = pygame.Rect(int(curr_x), int(start_y), dim, dim)
             if rect.right > sw - pad:
                 break
-
             pygame.draw.rect(surf, (50, 50, 50), rect, border_radius=2)
-
             if shape_data and isinstance(shape_data, dict):
                 try:
+                    # Reconstruct temporary Shape object for rendering
                     temp_shape = Shape()
                     temp_shape.triangles = shape_data.get("triangles", [])
                     temp_shape.color = shape_data.get("color", WHITE)
@@ -11163,37 +11758,30 @@ class GameAreaRenderer:
             else:
                 pygame.draw.line(surf, GRAY, rect.topleft, rect.bottomright, 1)
                 pygame.draw.line(surf, GRAY, rect.topright, rect.bottomleft, 1)
-
             curr_x += dim + pad
 
     def _render_single_shape_in_preview_box(
-        self,
-        surf: pygame.Surface,
-        shape_obj: Shape,
-        preview_rect: pygame.Rect,
+        self, surf: pygame.Surface, shape_obj: Shape, preview_rect: pygame.Rect
     ):
         """Renders a single shape scaled to fit within its preview box."""
+        # ... (remains the same)
         try:
             inner_padding = 2
             clipped_preview_rect = preview_rect.clip(surf.get_rect())
             if clipped_preview_rect.width <= 0 or clipped_preview_rect.height <= 0:
                 return
             shape_surf = surf.subsurface(clipped_preview_rect)
-
             render_area_w = clipped_preview_rect.width - 2 * inner_padding
             render_area_h = clipped_preview_rect.height - 2 * inner_padding
             if render_area_w <= 0 or render_area_h <= 0:
                 return
-
             temp_shape_surf = pygame.Surface(
                 (render_area_w, render_area_h), pygame.SRCALPHA
             )
             temp_shape_surf.fill((0, 0, 0, 0))
-
             self._render_single_shape(
                 temp_shape_surf, shape_obj, min(render_area_w, render_area_h)
             )
-
             shape_surf.blit(temp_shape_surf, (inner_padding, inner_padding))
         except ValueError as sub_err:
             logger.error(f"Error creating subsurface for shape preview: {sub_err}")
@@ -11206,15 +11794,14 @@ class GameAreaRenderer:
         self, surf: pygame.Surface, worker_idx: int, stats: Dict[str, Any]
     ):
         """Renders worker ID and current game step with descriptive labels."""
+        # ... (remains the same)
         font = self.fonts.get("env_info")
         if not font:
             return
         game_step = stats.get("game_steps", "?")
-        # Use more descriptive labels
         info_text = f"Worker: {worker_idx} | Step: {game_step}"
         try:
             text_surf = font.render(info_text, True, LIGHTG)
-            # Center the text horizontally within the info area
             text_rect = text_surf.get_rect(centerx=surf.get_width() // 2, top=0)
             surf.blit(text_surf, text_rect)
         except Exception as e:
@@ -11224,6 +11811,7 @@ class GameAreaRenderer:
         self, surf: pygame.Surface, text: str, color: Tuple[int, int, int]
     ):
         """Renders overlay text, scaling font if needed."""
+        # ... (remains the same)
         try:
             font = self.fonts.get("env_overlay")
             if not font:
@@ -11248,22 +11836,20 @@ class GameAreaRenderer:
 
     def _render_single_shape(self, surf: pygame.Surface, shape: Shape, target_dim: int):
         """Renders a single shape scaled to fit within the target surface."""
+        # ... (remains the same)
         if not shape or not shape.triangles or target_dim <= 0:
             return
         min_r, min_c, max_r, max_c = shape.bbox()
         shape_h_cells = max(1, max_r - min_r + 1)
         shape_w_cells_eff = max(1, (max_c - min_c + 1) * 0.75 + 0.25)
-
         surf_w, surf_h = surf.get_size()
         scale_h = surf_h / shape_h_cells if shape_h_cells > 0 else surf_h
         scale_w = surf_w / shape_w_cells_eff if shape_w_cells_eff > 0 else surf_w
         scale = max(1, min(scale_h, scale_w))
-
         total_w_pixels = shape_w_cells_eff * scale
         total_h_pixels = shape_h_cells * scale
         ox = (surf_w - total_w_pixels) / 2 - min_c * (scale * 0.75)
         oy = (surf_h - total_h_pixels) / 2 - min_r * scale
-
         for dr, dc, is_up in shape.triangles:
             temp_tri = Triangle(0, 0, is_up)
             try:
@@ -11277,13 +11863,14 @@ class GameAreaRenderer:
                 ]
                 pygame.draw.polygon(surf, shape.color, pts)
                 pygame.draw.polygon(surf, BLACK, pts, 1)
-            except Exception as e:
+            except Exception:
                 pass
 
     def _render_too_small_message(
         self, area_rect: pygame.Rect, cell_w: int, cell_h: int
     ):
         """Renders a message if the env cells are too small."""
+        # ... (remains the same)
         font = self.fonts.get("ui")
         if font:
             surf = font.render(f"Envs Too Small ({cell_w}x{cell_h})", True, GRAY)
@@ -11293,6 +11880,7 @@ class GameAreaRenderer:
         self, ga_rect: pygame.Rect, num_rendered: int, num_total: int
     ):
         """Renders text indicating not all envs are shown."""
+        # ... (remains the same)
         font = self.fonts.get("ui")
         if font:
             surf = font.render(
@@ -11306,16 +11894,14 @@ class GameAreaRenderer:
         self,
         area_rect: pygame.Rect,
         best_game_data: Optional[Dict[str, Any]],
-        env_config: Optional[EnvConfig],
+        env_config: Dict[str, Any],
     ):
         """Renders the best game state found so far."""
+        # ... (remains mostly the same, uses dicts)
         pygame.draw.rect(self.screen, (20, 40, 20), area_rect)
         pygame.draw.rect(self.screen, GREEN, area_rect, 1)
 
         if not best_game_data or not env_config:
-            logger.info(
-                "[GameAreaRenderer] Best game data missing or not a dictionary. Rendering placeholder."
-            )
             self._render_placeholder(area_rect, "No Best Game Yet")
             return
 
@@ -11360,19 +11946,31 @@ class GameAreaRenderer:
             self.screen.blit(step_surf, step_rect)
 
         if grid_area_rect.width > 10 and grid_area_rect.height > 10:
-            game_state_dict = best_game_data.get("game_state_dict")
+            game_state_dict = best_game_data.get(
+                "game_state_dict"
+            )  # Get the state dict
             if game_state_dict and isinstance(game_state_dict, dict):
                 try:
                     if "grid" in game_state_dict:
                         grid_state_array = game_state_dict["grid"]
-                        death_mask = game_state_dict.get(
-                            "death_mask", np.zeros_like(grid_state_array[0], dtype=bool)
-                        )
+                        death_mask = game_state_dict.get("death_mask", None)
                         if (
                             isinstance(grid_state_array, np.ndarray)
                             and grid_state_array.ndim == 3
                             and grid_state_array.shape[0] >= 2
                         ):
+                            # Create death mask if missing
+                            if (
+                                death_mask is None
+                                or death_mask.shape != grid_state_array[0].shape
+                            ):
+                                death_mask = np.zeros_like(
+                                    grid_state_array[0], dtype=bool
+                                )
+                                logger.warning(
+                                    "Best game state missing valid death_mask, using default."
+                                )
+
                             self._render_grid_from_array(
                                 grid_area_rect,
                                 grid_state_array[0],
@@ -11382,7 +11980,7 @@ class GameAreaRenderer:
                             )
                         else:
                             logger.warning(
-                                f"Best game state 'grid' data invalid shape: {grid_state_array.shape if isinstance(grid_state_array, np.ndarray) else type(grid_state_array)}"
+                                f"Best game state 'grid' data invalid shape/type: {grid_state_array.shape if isinstance(grid_state_array, np.ndarray) else type(grid_state_array)}"
                             )
                             self._render_placeholder(
                                 grid_area_rect, "Grid Data Invalid"
@@ -11394,9 +11992,6 @@ class GameAreaRenderer:
                     logger.error(f"Error rendering best game grid: {e}", exc_info=True)
                     self._render_placeholder(grid_area_rect, "Grid Render Error")
             else:
-                logger.info(
-                    "[GameAreaRenderer] Best game state data dict missing or invalid. Rendering placeholder."
-                )
                 self._render_placeholder(grid_area_rect, "State Missing")
 
     def _render_grid_from_array(
@@ -11405,38 +12000,32 @@ class GameAreaRenderer:
         occupancy_grid: np.ndarray,
         orientation_grid: np.ndarray,
         death_mask: np.ndarray,
-        env_config: EnvConfig,
+        env_config: Dict[str, Any],
     ):
         """Simplified grid rendering directly from occupancy, orientation, and death arrays."""
+        # ... (remains the same, uses env_config dict)
         try:
             clipped_area_rect = area_rect.clip(self.screen.get_rect())
             if clipped_area_rect.width <= 0 or clipped_area_rect.height <= 0:
                 return
             grid_surf = self.screen.subsurface(clipped_area_rect)
             grid_surf.fill(VisConfig.GRAY)
-
             rows, cols = occupancy_grid.shape
             if rows == 0 or cols == 0:
                 return
-
             pad = 1
             dw, dh = max(1, clipped_area_rect.width - 2 * pad), max(
                 1, clipped_area_rect.height - 2 * pad
             )
-            gcw_eff = env_config.COLS * 0.75 + 0.25
-            if env_config.ROWS <= 0 or gcw_eff <= 0:
+            gc, gr = env_config.get("COLS", 15), env_config.get("ROWS", 8)
+            gcw_eff = gc * 0.75 + 0.25
+            if gr <= 0 or gcw_eff <= 0:
                 return
-
-            scale = (
-                min(dw / gcw_eff, dh / env_config.ROWS)
-                if env_config.ROWS > 0 and gcw_eff > 0
-                else 0
-            )
+            scale = min(dw / gcw_eff, dh / gr) if gr > 0 and gcw_eff > 0 else 0
             if scale <= 0:
                 return
-
             tcw, tch = max(1, scale), max(1, scale)
-            fpw, fph = gcw_eff * scale, env_config.ROWS * scale
+            fpw, fph = gcw_eff * scale, gr * scale
             ox, oy = pad + (dw - fpw) / 2, pad + (dh - fph) / 2
 
             for r in range(rows):
@@ -11445,23 +12034,19 @@ class GameAreaRenderer:
                         0 <= r < death_mask.shape[0] and 0 <= c < death_mask.shape[1]
                     ):
                         continue
-
                     is_death = death_mask[r, c] > 0.5
                     is_occupied = occupancy_grid[r, c] > 0.5
                     expected_is_up = (r + c) % 2 == 0
-
                     temp_tri = Triangle(r, c, expected_is_up)
                     try:
                         pts = temp_tri.get_points(
                             ox=ox, oy=oy, cw=int(tcw), ch=int(tch)
                         )
                         color = VisConfig.LIGHTG
-
                         if is_death:
                             color = BLACK
                         elif is_occupied:
                             color = WHITE
-
                         pygame.draw.polygon(grid_surf, color, pts)
                         if not is_death:
                             pygame.draw.polygon(grid_surf, VisConfig.DARK_GRAY, pts, 1)
@@ -11478,14 +12063,13 @@ class GameAreaRenderer:
 
 
 File: ui\panels\left_panel.py
-# File: ui/panels/left_panel.py
 import pygame
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List
 import logging
 
 from config import VisConfig
 from ui.plotter import Plotter
-from ui.input_handler import InputHandler
+from ui.input_handler import InputHandler  # Keep for type hint if needed
 from .left_panel_components import (
     ButtonStatusRenderer,
     InfoTextRenderer,
@@ -11498,14 +12082,14 @@ logger = logging.getLogger(__name__)
 
 
 class LeftPanelRenderer:
-    """Orchestrates rendering of the left panel using sub-components."""
+    """Orchestrates rendering of the left panel using sub-components based on provided data."""
 
     def __init__(self, screen: pygame.Surface, vis_config: VisConfig, plotter: Plotter):
         self.screen = screen
         self.vis_config = vis_config
         self.plotter = plotter
         self.fonts = self._init_fonts()
-        self.input_handler: Optional[InputHandler] = None
+        self.input_handler: Optional[InputHandler] = None  # Reference set by UIRenderer
 
         # Initialize components
         self.button_status_renderer = ButtonStatusRenderer(self.screen, self.fonts)
@@ -11517,18 +12101,19 @@ class LeftPanelRenderer:
 
     def _init_fonts(self):
         """Initializes fonts used in the left panel."""
+        # ... (font init remains the same)
         fonts = {}
         font_configs = {
             "ui": 24,
             "status": 28,
             "detail": 16,
-            "resource": 16,  # Kept for now, might remove later
+            "resource": 16,
             "notification_label": 16,
             "notification": 18,
             "plot_placeholder": 20,
             "plot_title_values": 8,
-            "mcts_stats_label": 18,  # New font for MCTS labels
-            "mcts_stats_value": 18,  # New font for MCTS values
+            "mcts_stats_label": 18,
+            "mcts_stats_value": 18,
         }
         for key, size in font_configs.items():
             try:
@@ -11539,7 +12124,7 @@ class LeftPanelRenderer:
                 except Exception as e:
                     logger.error(f"ERROR: Font '{key}' failed: {e}")
                     fonts[key] = None
-        # Ensure essential fonts have fallbacks
+        # Fallbacks
         if fonts.get("ui") is None:
             fonts["ui"] = pygame.font.Font(None, 24)
         if fonts.get("status") is None:
@@ -11552,6 +12137,7 @@ class LeftPanelRenderer:
 
     def _get_background_color(self, status: str) -> Tuple[int, int, int]:
         """Determines background color based on status."""
+        # ... (background color logic remains the same)
         status_color_map = {
             "Ready": (30, 30, 30),
             "Confirm Cleanup": (50, 20, 20),
@@ -11565,46 +12151,43 @@ class LeftPanelRenderer:
         base_status = status.split(" (")[0] if "(" in status else status
         return status_color_map.get(base_status, (30, 30, 30))
 
-    def render(self, panel_width: int, **kwargs):
-        """Renders the entire left panel within the given width."""
+    def render(self, panel_width: int, **render_data: Dict[str, Any]):
+        """Renders the entire left panel based on the provided render_data dictionary."""
         current_height = self.screen.get_height()
         lp_rect = pygame.Rect(0, 0, panel_width, current_height)
-        status = kwargs.get("status", "")
+        status = render_data.get("status", "")
         bg_color = self._get_background_color(status)
         pygame.draw.rect(self.screen, bg_color, lp_rect)
 
         current_y = 10
-        # Define render order and estimated heights
-        # InfoTextRenderer now includes MCTS stats, might need more height
+        # Define render order and estimated heights, pass data down
         render_order: List[Tuple[callable, int, Dict[str, Any]]] = [
             (
                 self.button_status_renderer.render,
                 60,
                 {
-                    "app_state": kwargs.get("app_state", ""),
-                    "is_process_running": kwargs.get("is_process_running", False),
-                    "status": status,
-                    "stats_summary": kwargs.get("stats_summary", {}),
-                    "update_progress_details": kwargs.get(
-                        "update_progress_details", {}
-                    ),
+                    k: render_data.get(k)
+                    for k in [
+                        "app_state",
+                        "is_process_running",
+                        "status",
+                        "stats_summary",
+                        "update_progress_details",
+                    ]
                 },
             ),
             (
                 self.info_text_renderer.render,
                 120,
-                {  # Increased height estimate
-                    "stats_summary": kwargs.get("stats_summary", {}),
-                    "agent_param_count": kwargs.get("agent_param_count", 0),
-                    "worker_counts": kwargs.get("worker_counts", {}),
+                {
+                    k: render_data.get(k)
+                    for k in ["stats_summary", "agent_param_count", "worker_counts"]
                 },
             ),
             (
                 self.notification_renderer.render,
                 70,
-                {  # Reduced height estimate
-                    "stats_summary": kwargs.get("stats_summary", {}),
-                },
+                {k: render_data.get(k) for k in ["stats_summary"]},
             ),
         ]
 
@@ -11613,7 +12196,6 @@ class LeftPanelRenderer:
             try:
                 # Pass specific arguments required by each component
                 if render_func == self.notification_renderer.render:
-                    # Notification renderer takes rect directly
                     notification_rect = pygame.Rect(
                         10, current_y + 5, panel_width - 20, fallback_height
                     )
@@ -11636,16 +12218,14 @@ class LeftPanelRenderer:
                     f"Error rendering component {render_func.__name__}: {e}",
                     exc_info=True,
                 )
-                # Draw error box for the failed component
                 error_rect = pygame.Rect(
                     10, current_y + 5, panel_width - 20, fallback_height
                 )
                 pygame.draw.rect(self.screen, VisConfig.RED, error_rect, 1)
-                current_y += fallback_height + 5  # Fallback increment
+                current_y += fallback_height + 5
 
         # --- Render Plots Area ---
-        app_state_str = kwargs.get("app_state", AppState.UNKNOWN.value)
-        # Render plots only when in the main menu
+        app_state_str = render_data.get("app_state", AppState.UNKNOWN.value)
         should_render_plots = app_state_str == AppState.MAIN_MENU.value
 
         plot_y_start = current_y + 5
@@ -11654,7 +12234,7 @@ class LeftPanelRenderer:
                 y_start=plot_y_start,
                 panel_width=panel_width,
                 screen_height=current_height,
-                plot_data=kwargs.get("plot_data", {}),
+                plot_data=render_data.get("plot_data", {}),
                 status=status,
                 render_enabled=should_render_plots,
             )
@@ -11692,20 +12272,21 @@ from config import (
     GREEN,
     DARK_GREEN,
     BLUE,
-    GRAY,  # Added GRAY
+    GRAY,
 )
-from config.core import (
-    TrainConfig,
-)
+
+# TrainConfig might not be needed if min_buffer is passed in render_data
+# from config.core import TrainConfig
 from utils.helpers import format_eta
 from ui.input_handler import InputHandler
 
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    # from main_pygame import MainApp # Avoid direct import
+    pass
 
 
 class ButtonStatusRenderer:
-    """Renders the top buttons and compact status block, including buffering progress."""
+    """Renders the top buttons and compact status block based on provided data."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
@@ -11715,9 +12296,10 @@ class ButtonStatusRenderer:
         self.progress_font = fonts.get("detail", pygame.font.Font(None, 14))
         self.ui_font = fonts.get("ui", pygame.font.Font(None, 24))
         self.input_handler_ref: Optional[InputHandler] = None
-        self.app_ref: Optional["MainApp"] = None
-        self.train_config = TrainConfig()
+        # self.app_ref: Optional["MainApp"] = None # Less relevant now
+        # self.train_config = TrainConfig() # Get min_buffer from render_data
 
+    # _draw_button remains the same
     def _draw_button(
         self,
         rect: pygame.Rect,
@@ -11727,25 +12309,21 @@ class ButtonStatusRenderer:
         is_active: bool = False,
         enabled: bool = True,
     ):
-        """Helper to draw a single button."""
         final_color = base_color
         if not enabled:
-            final_color = tuple(
-                max(30, c // 2) for c in base_color[:3]
-            )  # Darken disabled
-            final_color = GRAY  # Use consistent gray for disabled
+            final_color = GRAY
         elif is_active and active_color:
             final_color = active_color
-
         pygame.draw.rect(self.screen, final_color, rect, border_radius=5)
         text_color = WHITE if enabled else (150, 150, 150)
         if self.ui_font:
             label_surface = self.ui_font.render(text, True, text_color)
             self.screen.blit(label_surface, label_surface.get_rect(center=rect.center))
-        else:
+        else:  # Fallback
             pygame.draw.line(self.screen, RED, rect.topleft, rect.bottomright, 2)
             pygame.draw.line(self.screen, RED, rect.topright, rect.bottomleft, 2)
 
+    # _render_progress_bar remains the same
     def _render_progress_bar(
         self,
         y_pos: int,
@@ -11754,23 +12332,17 @@ class ButtonStatusRenderer:
         target_value: int,
         label: str,
     ) -> int:
-        """Renders a progress bar."""
         if not self.progress_font:
             return y_pos
-
         bar_height = 18
         bar_width = panel_width * 0.8
         bar_x = (panel_width - bar_width) / 2
         bar_rect = pygame.Rect(bar_x, y_pos, bar_width, bar_height)
-
         progress = 0.0
         if target_value > 0:
             progress = min(1.0, max(0.0, current_value / target_value))
-
-        bg_color = (50, 50, 50)
-        border_color = LIGHTG
+        bg_color, border_color = (50, 50, 50), LIGHTG
         pygame.draw.rect(self.screen, bg_color, bar_rect, border_radius=3)
-
         fill_width = int(bar_width * progress)
         fill_rect = pygame.Rect(bar_x, y_pos, fill_width, bar_height)
         fill_color = BLUE
@@ -11783,16 +12355,14 @@ class ButtonStatusRenderer:
             border_top_right_radius=3 if progress >= 1.0 else 0,
             border_bottom_right_radius=3 if progress >= 1.0 else 0,
         )
-
         pygame.draw.rect(self.screen, border_color, bar_rect, 1, border_radius=3)
-
         progress_text = f"{label}: {current_value:,}/{target_value:,}".replace(",", "_")
         text_surf = self.progress_font.render(progress_text, True, WHITE)
         text_rect = text_surf.get_rect(center=bar_rect.center)
         self.screen.blit(text_surf, text_rect)
-
         return int(bar_rect.bottom)
 
+    # _render_compact_status remains the same
     def _render_compact_status(
         self,
         y_start: int,
@@ -11800,12 +12370,11 @@ class ButtonStatusRenderer:
         status: str,
         stats_summary: Dict[str, Any],
         is_running: bool,
+        min_buffer: int,
     ) -> int:
-        """Renders the compact status block, including buffering progress if applicable."""
         x_margin, current_y = 10, y_start
         line_height_status = self.status_font.get_linesize()
         line_height_detail = self.detail_font.get_linesize()
-
         # 1. Render Status Text
         status_text = f"Status: {status}"
         status_color = YELLOW
@@ -11825,7 +12394,6 @@ class ButtonStatusRenderer:
             status_color = (200, 150, 50)
         elif "Running AlphaZero" in status:
             status_color = GREEN
-
         try:
             status_surface = self.status_font.render(status_text, True, status_color)
             status_rect = status_surface.get_rect(topleft=(x_margin, current_y))
@@ -11834,15 +12402,11 @@ class ButtonStatusRenderer:
         except Exception as e:
             print(f"Error rendering status text: {e}")
             current_y += 20
-
-        # 2. Render Global Step and Episodes OR Buffering Progress
+        # 2. Render Global Step/Eps OR Buffering Progress
         global_step = stats_summary.get("global_step", 0)
         total_episodes = stats_summary.get("total_episodes", 0)
         buffer_size = stats_summary.get("buffer_size", 0)
-        min_buffer = self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
-
         is_buffering = is_running and global_step == 0 and buffer_size < min_buffer
-
         if not is_buffering:
             global_step_str = f"{global_step:,}".replace(",", "_")
             eps_str = f"{total_episodes:,}".replace(",", "_")
@@ -11864,14 +12428,9 @@ class ButtonStatusRenderer:
         else:
             current_y += 2
             next_y_after_bar = self._render_progress_bar(
-                current_y,
-                panel_width,
-                buffer_size,
-                min_buffer,
-                "Buffering",
+                current_y, panel_width, buffer_size, min_buffer, "Buffering"
             )
             current_y = next_y_after_bar + 5
-
         return int(current_y)
 
     def render(
@@ -11882,41 +12441,37 @@ class ButtonStatusRenderer:
         is_process_running: bool,
         status: str,
         stats_summary: Dict[str, Any],
-        update_progress_details: Dict[str, Any],
+        update_progress_details: Dict[
+            str, Any
+        ],  # Keep if used by progress bar logic later
     ) -> int:
-        """Renders buttons and status. Returns next_y."""
-        from app_state import AppState
+        """Renders buttons and status based on provided data. Returns next_y."""
+        from app_state import AppState  # Local import
 
         next_y = y_start
+        is_running = is_process_running  # Use the passed flag
 
+        # Get button rects from the input handler (which should have up-to-date rects)
         run_stop_btn_rect = (
             self.input_handler_ref.run_stop_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(10, y_start, 150, 40)  # Fallback rect
+            else pygame.Rect(10, y_start, 150, 40)
         )
         cleanup_btn_rect = (
             self.input_handler_ref.cleanup_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(
-                run_stop_btn_rect.right + 10, y_start, 160, 40
-            )  # Fallback rect
+            else pygame.Rect(run_stop_btn_rect.right + 10, y_start, 160, 40)
         )
         demo_btn_rect = (
             self.input_handler_ref.demo_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(
-                cleanup_btn_rect.right + 10, y_start, 120, 40
-            )  # Fallback rect
+            else pygame.Rect(cleanup_btn_rect.right + 10, y_start, 120, 40)
         )
         debug_btn_rect = (
             self.input_handler_ref.debug_btn_rect
             if self.input_handler_ref
-            else pygame.Rect(
-                demo_btn_rect.right + 10, y_start, 120, 40
-            )  # Fallback rect
+            else pygame.Rect(demo_btn_rect.right + 10, y_start, 120, 40)
         )
-
-        is_running = is_process_running  # Use the passed flag
 
         # Render Buttons
         run_stop_text = "Stop Run" if is_running else "Run AlphaZero"
@@ -11957,8 +12512,11 @@ class ButtonStatusRenderer:
 
         # Render Status Block
         status_block_y = next_y
+        min_buffer = stats_summary.get(
+            "min_buffer_size", 1000
+        )  # Get min buffer from summary if available
         next_y = self._render_compact_status(
-            status_block_y, panel_width, status, stats_summary, is_running
+            status_block_y, panel_width, status, stats_summary, is_running, min_buffer
         )
 
         return int(next_y)
@@ -11972,26 +12530,28 @@ from typing import Dict, Any, Tuple
 import logging
 
 from config import WHITE, LIGHTG, GRAY, YELLOW, GREEN
-import config.general as config_general
+
+# Don't import config.general directly in UI process
+# import config.general as config_general
 
 logger = logging.getLogger(__name__)
 
 
 class InfoTextRenderer:
-    """Renders essential non-plotted information text."""
+    """Renders essential non-plotted information text based on provided data."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
         self.fonts = fonts
         self.ui_font = fonts.get("ui", pygame.font.Font(None, 24))
         self.detail_font = fonts.get("detail", pygame.font.Font(None, 16))
-        self.stats_summary_cache: Dict[str, Any] = {}
+        # stats_summary_cache is not needed as data is passed in each frame
 
     def _get_network_description(self) -> str:
         """Builds a description string based on network components."""
-        # Potentially add more detail here later if needed based on ModelConfig
-        return "AlphaZero Neural Network"
+        return "AlphaZero Neural Network"  # Keep simple for now
 
+    # _render_key_value_line remains the same
     def _render_key_value_line(
         self,
         y_pos: int,
@@ -12003,20 +12563,16 @@ class InfoTextRenderer:
         key_color=LIGHTG,
         value_color=WHITE,
     ) -> int:
-        """Helper to render a single key-value line and return its bottom y."""
         x_pos_key = 10
         x_pos_val_offset = 5
         try:
             key_surf = key_font.render(f"{key}:", True, key_color)
             key_rect = key_surf.get_rect(topleft=(x_pos_key, y_pos))
             self.screen.blit(key_surf, key_rect)
-
             value_surf = value_font.render(f"{value}", True, value_color)
             value_rect = value_surf.get_rect(
                 topleft=(key_rect.right + x_pos_val_offset, y_pos)
             )
-
-            # Clip value text if it exceeds panel width
             clip_width = max(0, panel_width - value_rect.left - 10)
             blit_area = (
                 pygame.Rect(0, 0, clip_width, value_rect.height)
@@ -12024,12 +12580,9 @@ class InfoTextRenderer:
                 else None
             )
             self.screen.blit(value_surf, value_rect, area=blit_area)
-
-            # Return the bottom-most y position of the rendered elements
             return max(key_rect.bottom, value_rect.bottom)
         except Exception as e:
             logger.error(f"Error rendering info line '{key}': {e}")
-            # Fallback: increment y by line height if rendering fails
             return y_pos + key_font.get_linesize()
 
     def render(
@@ -12040,19 +12593,17 @@ class InfoTextRenderer:
         agent_param_count: int,
         worker_counts: Dict[str, int],
     ) -> int:
-        """Renders the info text block. Returns next_y."""
-        self.stats_summary_cache = stats_summary
-
+        """Renders the info text block based on provided data. Returns next_y."""
         if not self.ui_font or not self.detail_font:
             logger.warning("Missing fonts for InfoTextRenderer.")
             return y_start
 
         current_y = y_start
 
-        # --- General Info ---
-        device_type_str = (
-            config_general.DEVICE.type.upper() if config_general.DEVICE else "CPU"
-        )
+        # --- General Info (Extract from stats_summary or passed args) ---
+        device_type_str = stats_summary.get(
+            "device", "N/A"
+        )  # Expect device in summary now
         network_desc = self._get_network_description()
         param_str = (
             f"{agent_param_count / 1e6:.2f} M" if agent_param_count > 0 else "N/A"
@@ -12066,10 +12617,7 @@ class InfoTextRenderer:
         sp_workers = worker_counts.get("SelfPlay", 0)
         tr_workers = worker_counts.get("Training", 0)
         worker_str = f"SP: {sp_workers}, TR: {tr_workers}"
-        # Use the instantaneous steps/sec calculated in summary
-        steps_sec = stats_summary.get(
-            "steps_per_second_avg", 0.0
-        )  # Use average for display
+        steps_sec = stats_summary.get("steps_per_second_avg", 0.0)
         steps_sec_str = f"{steps_sec:.1f}"
 
         general_info_lines = [
@@ -12078,11 +12626,11 @@ class InfoTextRenderer:
             ("Params", param_str),
             ("Workers", worker_str),
             ("Run Started", start_time_str),
-            ("Steps/Sec (Avg)", steps_sec_str),  # Display current steps/sec
+            ("Steps/Sec (Avg)", steps_sec_str),
         ]
 
         # Render lines using the helper function
-        line_spacing = 2  # Pixels between lines
+        line_spacing = 2
         for key, value_str in general_info_lines:
             current_y = (
                 self._render_key_value_line(
@@ -12091,7 +12639,6 @@ class InfoTextRenderer:
                 + line_spacing
             )
 
-        # Add a small buffer at the end before the next component
         return int(current_y) + 5
 
 
@@ -12105,7 +12652,7 @@ import numpy as np
 
 
 class NotificationRenderer:
-    """Renders the notification area (Simplified)."""
+    """Renders the notification area based on provided data."""
 
     def __init__(self, screen: pygame.Surface, fonts: Dict[str, pygame.font.Font]):
         self.screen = screen
@@ -12116,7 +12663,7 @@ class NotificationRenderer:
     def render(
         self, area_rect: pygame.Rect, stats_summary: Dict[str, Any]
     ) -> Dict[str, pygame.Rect]:
-        """Renders the simplified notification content (e.g., total episodes)."""
+        """Renders the simplified notification content (e.g., total episodes) based on provided data."""
         stat_rects: Dict[str, pygame.Rect] = {}
         pygame.draw.rect(self.screen, (45, 45, 45), area_rect, border_radius=3)
         pygame.draw.rect(self.screen, LIGHTG, area_rect, 1, border_radius=3)
@@ -12129,22 +12676,41 @@ class NotificationRenderer:
         line_height = self.value_font.get_linesize() + 2
         y = area_rect.top + padding
 
-        # Display Total Episodes
+        # --- Display Total Episodes ---
         total_episodes = stats_summary.get("total_episodes", 0)
         label_surf = self.label_font.render("Total Episodes:", True, LIGHTG)
         value_surf = self.value_font.render(
             f"{total_episodes:,}".replace(",", "_"), True, WHITE
         )
-
         label_rect = label_surf.get_rect(topleft=(area_rect.left + padding, y))
         value_rect = value_surf.get_rect(topleft=(label_rect.right + 4, y))
-
         self.screen.blit(label_surf, label_rect)
         self.screen.blit(value_surf, value_rect)
-
         stat_rects["Total Episodes Info"] = label_rect.union(value_rect)
+        y += line_height
 
-        # Best value rendering removed
+        # --- Display Best Game Score ---
+        best_score = stats_summary.get("best_game_score", -float("inf"))
+        best_score_step = stats_summary.get("best_game_score_step", 0)
+        best_score_str = "N/A"
+        if best_score > -float("inf"):
+            best_score_str = f"{best_score:.0f} (at step {best_score_step:,})".replace(
+                ",", "_"
+            )
+
+        label_surf_bs = self.label_font.render("Best Score:", True, LIGHTG)
+        value_surf_bs = self.value_font.render(
+            best_score_str, True, GREEN if best_score > -float("inf") else WHITE
+        )
+
+        label_rect_bs = label_surf_bs.get_rect(topleft=(area_rect.left + padding, y))
+        value_rect_bs = value_surf_bs.get_rect(topleft=(label_rect_bs.right + 4, y))
+        self.screen.blit(label_surf_bs, label_rect_bs)
+        self.screen.blit(value_surf_bs, value_rect_bs)
+        stat_rects["Best Score Info"] = label_rect_bs.union(value_rect_bs)
+        # y += line_height # Add if more lines needed
+
+        # Best value rendering removed for simplification, can be added back similarly
 
         return stat_rects
 
@@ -12171,7 +12737,7 @@ logger = logging.getLogger(__name__)
 
 
 class PlotAreaRenderer:
-    """Renders the plot area using a Plotter instance."""
+    """Renders the plot area using a Plotter instance based on provided data."""
 
     def __init__(
         self,
@@ -12193,15 +12759,15 @@ class PlotAreaRenderer:
         screen_height: int,
         plot_data: Dict[str, Deque],
         status: str,
-        render_enabled: bool = True,  # Add the new argument with a default
+        render_enabled: bool = True,
     ):
         """Renders the plot area, conditionally based on render_enabled."""
+        # ... (Logic remains the same, it already uses passed-in data)
         plot_area_y_start = y_start
         plot_area_height = screen_height - plot_area_y_start - 10
         plot_area_width = panel_width - 20
 
         if plot_area_width <= 50 or plot_area_height <= 50:
-            # Optionally render a "too small" message if needed
             return
 
         plot_area_rect = pygame.Rect(
@@ -12209,20 +12775,16 @@ class PlotAreaRenderer:
         )
 
         if not render_enabled:
-            # Render placeholder if plots are explicitly disabled
             self._render_placeholder(plot_area_rect, "Plots Disabled")
             return
 
-        # Attempt to get/create the plot surface only if enabled
         plot_surface = self.plotter.get_cached_or_updated_plot(
             plot_data, plot_area_width, plot_area_height
         )
 
-        # Render the plot or a placeholder if data is missing/error
         if plot_surface:
             self.screen.blit(plot_surface, plot_area_rect.topleft)
         else:
-            # Draw border and placeholder text
             placeholder_text = "Waiting for plot data..."
             if status == "Error":
                 placeholder_text = "Plotting disabled due to error."
@@ -12232,11 +12794,11 @@ class PlotAreaRenderer:
 
     def _render_placeholder(self, plot_area_rect: pygame.Rect, message: str):
         """Renders a placeholder message within the plot area."""
+        # ... (remains the same)
         pygame.draw.rect(self.screen, (40, 40, 40), plot_area_rect, 1)
         if self.placeholder_font:
             placeholder_surf = self.placeholder_font.render(message, True, GRAY)
             placeholder_rect = placeholder_surf.get_rect(center=plot_area_rect.center)
-            # Clip rendering to the plot area
             blit_pos = (
                 max(plot_area_rect.left, placeholder_rect.left),
                 max(plot_area_rect.top, placeholder_rect.top),
@@ -12247,18 +12809,12 @@ class PlotAreaRenderer:
             )
             if blit_area.width > 0 and blit_area.height > 0:
                 self.screen.blit(placeholder_surf, blit_pos, area=blit_area)
-        else:  # Fallback cross if font failed
+        else:  # Fallback cross
             pygame.draw.line(
-                self.screen,
-                GRAY,
-                plot_area_rect.topleft,
-                plot_area_rect.bottomright,
+                self.screen, GRAY, plot_area_rect.topleft, plot_area_rect.bottomright
             )
             pygame.draw.line(
-                self.screen,
-                GRAY,
-                plot_area_rect.topright,
-                plot_area_rect.bottomleft,
+                self.screen, GRAY, plot_area_rect.topright, plot_area_rect.bottomleft
             )
 
 
@@ -12581,16 +13137,21 @@ import copy
 from typing import TYPE_CHECKING, List, Tuple, Dict, Any, Optional
 import logging
 import numpy as np
+import multiprocessing as mp
+import ray
+import asyncio
 
 from environment.game_state import GameState, StateType
-from environment.shape import Shape  # Import Shape
+from environment.shape import Shape
 from mcts import MCTS
 from config import EnvConfig, MCTSConfig, TrainConfig
 from utils.types import ActionType
 
 if TYPE_CHECKING:
-    from agent.alphazero_net import AlphaZeroNet
-    from stats.aggregator import StatsAggregator
+    from ray.util.queue import Queue as RayQueue
+
+    AgentPredictorHandle = ray.actor.ActorHandle
+    StatsAggregatorHandle = ray.actor.ActorHandle
 
 ExperienceTuple = Tuple[StateType, Dict[ActionType, float], int]
 ProcessedExperienceBatch = List[Tuple[StateType, Dict[ActionType, float], float]]
@@ -12598,46 +13159,37 @@ ProcessedExperienceBatch = List[Tuple[StateType, Dict[ActionType, float], float]
 logger = logging.getLogger(__name__)
 
 
-class SelfPlayWorker(threading.Thread):
-    """Plays games using MCTS to generate training data."""
+@ray.remote(num_cpus=1)
+class SelfPlayWorker:
+    """Plays games using MCTS to generate training data (Ray Actor)."""
 
     INTERMEDIATE_STATS_INTERVAL_SEC = 5.0
-    MCTS_NN_BATCH_SIZE = 32
 
     def __init__(
         self,
         worker_id: int,
-        agent: "AlphaZeroNet",
-        mcts: MCTS,
-        experience_queue: queue.Queue,
-        stats_aggregator: "StatsAggregator",
-        stop_event: threading.Event,
-        env_config: EnvConfig,
+        agent_predictor: "AgentPredictorHandle",
         mcts_config: MCTSConfig,
-        device: torch.device,
+        env_config: EnvConfig,
+        experience_queue: "RayQueue",
+        stats_aggregator: "StatsAggregatorHandle",
         max_game_steps: Optional[int] = None,
     ):
-        super().__init__(daemon=True, name=f"SelfPlayWorker-{worker_id}")
         self.worker_id = worker_id
-        self.agent = agent
+        self.agent_predictor = agent_predictor
+        self.env_config = env_config
+        self.mcts_config = mcts_config
         self.mcts = MCTS(
-            network_predictor=self.agent.predict_batch,
-            config=mcts_config,
-            env_config=env_config,
-            batch_size=self.MCTS_NN_BATCH_SIZE,
-            stop_event=stop_event,
+            agent_predictor=self.agent_predictor,
+            config=self.mcts_config,
+            env_config=self.env_config,
         )
         self.experience_queue = experience_queue
         self.stats_aggregator = stats_aggregator
-        self.stop_event = stop_event
-        self.env_config = env_config
-        self.mcts_config = mcts_config
-        self.device = device
         self.max_game_steps = max_game_steps if max_game_steps else float("inf")
         self.log_prefix = f"[SelfPlayWorker-{self.worker_id}]"
         self.last_intermediate_stats_time = 0.0
 
-        self._current_game_state_lock = threading.Lock()
         self._current_render_state_dict: Optional[StateType] = None
         self._last_stats: Dict[str, Any] = {
             "status": "Initialized",
@@ -12647,79 +13199,71 @@ class SelfPlayWorker(threading.Thread):
             "mcts_nn_time": 0.0,
             "mcts_nodes_explored": 0,
             "mcts_avg_depth": 0.0,
-            "available_shapes_data": [],  # Add field for shape render data
+            "available_shapes_data": [],
         }
-        logger.info(
-            f"{self.log_prefix} Initialized with MCTS Batch Size: {self.MCTS_NN_BATCH_SIZE}"
-        )
+        self._stop_requested = False
+        logger.info(f"{self.log_prefix} Initialized as Ray Actor.")
 
-    def get_init_args(self) -> Dict[str, Any]:
-        """Returns arguments needed to re-initialize the thread."""
-        return {
-            "worker_id": self.worker_id,
-            "agent": self.agent,
-            "mcts": self.mcts,
-            "experience_queue": self.experience_queue,
-            "stats_aggregator": self.stats_aggregator,
-            "stop_event": self.stop_event,
-            "env_config": self.env_config,
-            "mcts_config": self.mcts_config,
-            "device": self.device,
-            "max_game_steps": (
-                self.max_game_steps if self.max_game_steps != float("inf") else None
-            ),
-        }
+    async def get_current_render_data(self) -> Optional[Dict[str, Any]]:
+        """Returns a serializable dictionary for rendering (async)."""
+        if self._current_render_state_dict:
+            return {
+                "state_dict": self._current_render_state_dict,
+                "stats": self._last_stats.copy(),
+            }
+        else:
+            return {"state_dict": None, "stats": self._last_stats.copy()}
 
-    def get_current_render_data(self) -> Dict[str, Any]:
-        """Returns a dictionary containing state dict reference and last stats (thread-safe)."""
-        with self._current_game_state_lock:
-            state_dict_ref = self._current_render_state_dict
-            stats_copy = self._last_stats.copy()
-        return {"state_dict": state_dict_ref, "stats": stats_copy}
-
-    def _update_render_state(self, game_state: GameState, stats: Dict[str, Any]):
-        """Updates the state dictionary reference and stats exposed for rendering (thread-safe)."""
-        with self._current_game_state_lock:
+    def _update_render_state(
+        self, game_state: Optional[GameState], stats: Dict[str, Any]
+    ):
+        """Updates the state dictionary and stats exposed for rendering."""
+        if game_state:
             try:
                 self._current_render_state_dict = game_state.get_state()
+                available_shapes_data = []
+                for shape_obj in game_state.shapes:
+                    if shape_obj:
+                        available_shapes_data.append(
+                            {"triangles": shape_obj.triangles, "color": shape_obj.color}
+                        )
+                    else:
+                        available_shapes_data.append(None)
             except Exception as e:
                 logger.error(f"{self.log_prefix} Error getting game state dict: {e}")
                 self._current_render_state_dict = None
-
-            # Extract serializable shape data for rendering
+                available_shapes_data = []
+        else:
+            self._current_render_state_dict = None
             available_shapes_data = []
-            for shape_obj in game_state.shapes:
-                if shape_obj:
-                    available_shapes_data.append(
-                        {"triangles": shape_obj.triangles, "color": shape_obj.color}
-                    )
-                else:
-                    available_shapes_data.append(None)
 
-            ui_stats = {
-                "status": stats.get(
-                    "status", self._last_stats.get("status", "Unknown")
-                ),
-                "game_steps": stats.get(
-                    "game_steps", self._last_stats.get("game_steps", 0)
-                ),
-                "game_score": game_state.game_score,  # Explicitly include current game score
-                "mcts_sim_time": stats.get(
-                    "mcts_total_duration", self._last_stats.get("mcts_sim_time", 0.0)
-                ),
-                "mcts_nn_time": stats.get(
-                    "total_nn_prediction_time",
-                    self._last_stats.get("mcts_nn_time", 0.0),
-                ),
-                "mcts_nodes_explored": stats.get(
-                    "nodes_created", self._last_stats.get("mcts_nodes_explored", 0)
-                ),
-                "mcts_avg_depth": stats.get(
-                    "avg_leaf_depth", self._last_stats.get("mcts_avg_depth", 0.0)
-                ),
-                "available_shapes_data": available_shapes_data,
-            }
-            self._last_stats.update(ui_stats)
+        current_game_score = (
+            game_state.game_score
+            if game_state
+            else self._last_stats.get("game_score", 0)
+        )
+
+        ui_stats = {
+            "status": stats.get("status", self._last_stats.get("status", "Unknown")),
+            "game_steps": stats.get(
+                "game_steps", self._last_stats.get("game_steps", 0)
+            ),
+            "game_score": current_game_score,
+            "mcts_sim_time": stats.get(
+                "mcts_total_duration", self._last_stats.get("mcts_sim_time", 0.0)
+            ),
+            "mcts_nn_time": stats.get(
+                "total_nn_prediction_time", self._last_stats.get("mcts_nn_time", 0.0)
+            ),
+            "mcts_nodes_explored": stats.get(
+                "nodes_created", self._last_stats.get("mcts_nodes_explored", 0)
+            ),
+            "mcts_avg_depth": stats.get(
+                "avg_leaf_depth", self._last_stats.get("mcts_avg_depth", 0.0)
+            ),
+            "available_shapes_data": available_shapes_data,
+        }
+        self._last_stats.update(ui_stats)
 
     def _get_temperature(self, game_step: int) -> float:
         """Calculates the MCTS temperature based on the game step."""
@@ -12731,9 +13275,10 @@ class SelfPlayWorker(threading.Thread):
             )
         return self.mcts_config.TEMPERATURE_FINAL
 
-    def _play_one_game(self) -> Optional[ProcessedExperienceBatch]:
-        """Plays a single game and returns the processed experience."""
-        current_game_num = self.stats_aggregator.storage.total_episodes + 1
+    async def _play_one_game(self) -> Optional[ProcessedExperienceBatch]:
+        """Plays a single game and returns the processed experience (async)."""
+        current_game_num_ref = self.stats_aggregator.get_total_episodes.remote()
+        current_game_num = await current_game_num_ref + 1
         logger.info(f"{self.log_prefix} Starting game {current_game_num}")
         start_time = time.monotonic()
         game_data: List[ExperienceTuple] = []
@@ -12741,23 +13286,26 @@ class SelfPlayWorker(threading.Thread):
         current_state_features = game.reset()
         game_steps = 0
         self.last_intermediate_stats_time = time.monotonic()
-
         self._update_render_state(game, {"status": "Starting", "game_steps": 0})
 
+        # Initial Stats Update (Async)
+        # Call qsize() directly, it returns an ObjectRef
+        qsize_ref = self.experience_queue.qsize()
+        buffer_size = await qsize_ref  # Await the ObjectRef
         recording_step = {
             "current_self_play_game_number": current_game_num,
             "current_self_play_game_steps": 0,
-            "buffer_size": self.experience_queue.qsize(),
+            "buffer_size": buffer_size,
         }
-        self.stats_aggregator.record_step(recording_step)
-        logger.debug(
-            f"{self.log_prefix} Game {current_game_num} started. Buffer size: {recording_step['buffer_size']}"
+        self.stats_aggregator.record_step.remote(recording_step)
+        logger.info(
+            f"{self.log_prefix} Game {current_game_num} started. Buffer size: {buffer_size}"
         )
 
         while not game.is_over() and game_steps < self.max_game_steps:
-            if self.stop_event.is_set():
+            if self._stop_requested:
                 logger.info(
-                    f"{self.log_prefix} Stop event set during game {current_game_num}. Aborting."
+                    f"{self.log_prefix} Stop requested during game {current_game_num}. Aborting."
                 )
                 self._update_render_state(
                     game, {"status": "Stopped", "game_steps": game_steps}
@@ -12772,36 +13320,55 @@ class SelfPlayWorker(threading.Thread):
                 self._update_render_state(
                     game, {"status": "Running", "game_steps": game_steps}
                 )
+                # Call qsize() directly, it returns an ObjectRef
+                qsize_ref = self.experience_queue.qsize()
+                buffer_size = await qsize_ref  # Await the ObjectRef
                 recording_step = {
                     "current_self_play_game_number": current_game_num,
                     "current_self_play_game_steps": game_steps,
-                    "buffer_size": self.experience_queue.qsize(),
+                    "buffer_size": buffer_size,
                 }
-                self.stats_aggregator.record_step(recording_step)
+                self.stats_aggregator.record_step.remote(recording_step)
                 self.last_intermediate_stats_time = current_time
 
             mcts_start_time = time.monotonic()
-            self.agent.eval()
-            root_node, mcts_stats = self.mcts.run_simulations(
-                root_state=game, num_simulations=self.mcts_config.NUM_SIMULATIONS
-            )
+            try:
+                root_node, mcts_stats = self.mcts.run_simulations(
+                    root_state=game, num_simulations=self.mcts_config.NUM_SIMULATIONS
+                )
+            except Exception as mcts_err:
+                if self._stop_requested:
+                    logger.info(
+                        f"{self.log_prefix} MCTS interrupted (stop requested) for game {current_game_num}, step {game_steps}. Aborting game."
+                    )
+                    self._update_render_state(
+                        game, {"status": "Stopped", "game_steps": game_steps}
+                    )
+                    return None
+                else:
+                    logger.error(
+                        f"{self.log_prefix} MCTS failed for game {current_game_num}, step {game_steps}: {mcts_err}",
+                        exc_info=True,
+                    )
+                    game.game_over = True
+                    break
+
             mcts_duration = time.monotonic() - mcts_start_time
             mcts_stats["game_steps"] = game_steps
             mcts_stats["status"] = "Running (MCTS)"
             logger.debug(
                 f"{self.log_prefix} Game {current_game_num} Step {game_steps}: MCTS took {mcts_duration:.4f}s"
             )
-
             self._update_render_state(game, mcts_stats)
 
             temperature = self._get_temperature(game_steps)
             policy_target = self.mcts.get_policy_target(root_node, temperature)
-            game_data.append((current_state_features, policy_target, 1))
+            game_data.append((copy.deepcopy(current_state_features), policy_target, 1))
 
             action = self.mcts.choose_action(root_node, temperature)
             if action == -1:
                 logger.error(
-                    f"{self.log_prefix} MCTS failed to choose an action. Aborting game."
+                    f"{self.log_prefix} MCTS failed to choose an action. Aborting game {current_game_num}."
                 )
                 game.game_over = True
                 break
@@ -12812,18 +13379,21 @@ class SelfPlayWorker(threading.Thread):
             logger.debug(
                 f"{self.log_prefix} Game {current_game_num} Step {game_steps}: Game step took {step_duration:.4f}s"
             )
-
             current_state_features = game.get_state()
             game_steps += 1
 
+            # Record MCTS Stats (Async Fire-and-forget)
+            # Call qsize() directly, it returns an ObjectRef
+            qsize_ref = self.experience_queue.qsize()
+            buffer_size = await qsize_ref  # Await the ObjectRef
             step_stats_for_aggregator = {
                 "mcts_sim_time": mcts_stats.get("mcts_total_duration", 0.0),
                 "mcts_nn_time": mcts_stats.get("total_nn_prediction_time", 0.0),
                 "mcts_nodes_explored": mcts_stats.get("nodes_created", 0),
                 "mcts_avg_depth": mcts_stats.get("avg_leaf_depth", 0.0),
-                "buffer_size": self.experience_queue.qsize(),
+                "buffer_size": buffer_size,
             }
-            self.stats_aggregator.record_step(step_stats_for_aggregator)
+            self.stats_aggregator.record_step.remote(step_stats_for_aggregator)
 
         status = (
             "Finished (Max Steps)"
@@ -12832,9 +13402,9 @@ class SelfPlayWorker(threading.Thread):
         )
         self._update_render_state(game, {"status": status, "game_steps": game_steps})
 
-        if self.stop_event.is_set():
+        if self._stop_requested:
             logger.info(
-                f"{self.log_prefix} Stop event set after game {current_game_num} finished. Not processing."
+                f"{self.log_prefix} Stop requested after game {current_game_num} finished. Not processing."
             )
             return None
 
@@ -12843,7 +13413,6 @@ class SelfPlayWorker(threading.Thread):
             (state, policy, final_outcome * player)
             for state, policy, player in game_data
         ]
-
         game_duration = time.monotonic() - start_time
         logger.info(
             f"{self.log_prefix} Game {current_game_num} finished in {game_duration:.2f}s "
@@ -12851,75 +13420,78 @@ class SelfPlayWorker(threading.Thread):
             f"Queueing {len(processed_data)} experiences."
         )
 
-        current_global_step = self.stats_aggregator.storage.current_global_step
         final_state_for_best = game.get_state()
-        self.stats_aggregator.record_episode(
+        self.stats_aggregator.record_episode.remote(
             episode_outcome=final_outcome,
             episode_length=game_steps,
             episode_num=current_game_num,
-            global_step=current_global_step,
             game_score=game.game_score,
             triangles_cleared=game.triangles_cleared_this_episode,
             game_state_for_best=final_state_for_best,
         )
         return processed_data
 
-    def run(self):
-        """Main loop for the self-play worker."""
+    async def run_loop(self):
+        """Main loop for the self-play worker actor (async)."""
         logger.info(f"{self.log_prefix} Starting run loop.")
-        while not self.stop_event.is_set():
+        while not self._stop_requested:
             try:
-                processed_data = self._play_one_game()
+                processed_data = await self._play_one_game()
                 if processed_data is None:
-                    if self.stop_event.is_set():
+                    if self._stop_requested:
                         break
                     else:
                         logger.warning(
                             f"{self.log_prefix} Game play returned None without stop signal. Continuing."
                         )
-                        time.sleep(0.5)
+                        await asyncio.sleep(0.5)
                         continue
 
                 if processed_data:
                     try:
                         q_put_start = time.monotonic()
-                        self.experience_queue.put(processed_data, timeout=5.0)
+                        await self.experience_queue.put_async(
+                            processed_data, timeout=1.0
+                        )
                         q_put_duration = time.monotonic() - q_put_start
+                        # Call qsize() directly, it returns an ObjectRef
+                        qsize_ref = self.experience_queue.qsize()
+                        qsize = await qsize_ref  # Await the ObjectRef
                         logger.debug(
-                            f"{self.log_prefix} Added game data to queue (qsize: {self.experience_queue.qsize()}) in {q_put_duration:.4f}s."
+                            f"{self.log_prefix} Added game data to queue (qsize: {qsize}) in {q_put_duration:.4f}s."
                         )
-                    except queue.Full:
+                    except asyncio.TimeoutError:
                         logger.warning(
-                            f"{self.log_prefix} Experience queue full after waiting. Discarding game data."
+                            f"{self.log_prefix} Experience queue put timed out. Discarding game data."
                         )
-                        time.sleep(0.1)
                     except Exception as q_err:
                         logger.error(
                             f"{self.log_prefix} Error putting data in queue: {q_err}"
                         )
+                        if self._stop_requested:
+                            break
+                        await asyncio.sleep(0.5)  # Corrected indentation
+
             except Exception as e:
                 logger.critical(
                     f"{self.log_prefix} CRITICAL ERROR in run loop: {e}", exc_info=True
                 )
-                with self._current_game_state_lock:
-                    self._current_render_state_dict = None
-                    self._last_stats = {
-                        "status": "Error",
-                        "game_steps": 0,
-                        "game_score": 0,
-                        "available_shapes_data": [],
-                    }
-                time.sleep(5.0)
+                self._update_render_state(None, {"status": "Error"})
+                if self._stop_requested:
+                    break
+                await asyncio.sleep(5.0)  # Corrected indentation
 
         logger.info(f"{self.log_prefix} Run loop finished.")
-        with self._current_game_state_lock:
-            self._current_render_state_dict = None
-            self._last_stats = {
-                "status": "Stopped",
-                "game_steps": 0,
-                "game_score": 0,
-                "available_shapes_data": [],
-            }
+        self._update_render_state(None, {"status": "Stopped"})
+
+    def stop(self):
+        """Signals the actor to stop gracefully."""
+        logger.info(f"{self.log_prefix} Stop requested.")
+        self._stop_requested = True
+
+    def health_check(self):
+        """Ray health check method."""
+        return "OK"
 
 
 File: workers\training_worker.py
@@ -12933,48 +13505,66 @@ import torch.optim as optim
 import torch.nn.functional as F
 from typing import TYPE_CHECKING, List, Tuple, Dict, Any, Optional
 import logging
+import multiprocessing as mp
+import ray
+import asyncio
 
 from config import TrainConfig
 from utils.types import StateType, ActionType
 
 if TYPE_CHECKING:
-    from agent.alphazero_net import AlphaZeroNet
-    from stats.aggregator import StatsAggregator
-    from torch.optim.lr_scheduler import _LRScheduler  # Import for type hint
+    from torch.optim.lr_scheduler import _LRScheduler
+    from ray.util.queue import Queue as RayQueue
+
+    AgentPredictorHandle = ray.actor.ActorHandle
+    StatsAggregatorHandle = ray.actor.ActorHandle
 
 ExperienceData = Tuple[StateType, Dict[ActionType, float], float]
 ProcessedExperienceBatch = List[ExperienceData]
 logger = logging.getLogger(__name__)
 
 
-class TrainingWorker(threading.Thread):
-    """Samples experience and trains the neural network."""
+@ray.remote(num_cpus=1, num_gpus=1 if torch.cuda.is_available() else 0)
+class TrainingWorker:
+    """Samples experience and trains the neural network (Ray Actor)."""
 
     def __init__(
         self,
-        agent: "AlphaZeroNet",
-        optimizer: optim.Optimizer,
-        scheduler: Optional["_LRScheduler"],  # Add scheduler parameter
-        experience_queue: queue.Queue,
-        stats_aggregator: "StatsAggregator",
-        stop_event: threading.Event,
+        agent_predictor: "AgentPredictorHandle",
+        optimizer_cls: type,
+        optimizer_kwargs: dict,
+        scheduler_cls: Optional[type],
+        scheduler_kwargs: Optional[dict],
+        experience_queue: "RayQueue",
+        stats_aggregator: "StatsAggregatorHandle",
         train_config: TrainConfig,
-        device: torch.device,
     ):
-        super().__init__(daemon=True, name="TrainingWorker")
-        self.agent = agent
-        self.optimizer = optimizer
-        self.scheduler = scheduler  # Store scheduler
+        self.agent_predictor = agent_predictor
         self.experience_queue = experience_queue
         self.stats_aggregator = stats_aggregator
-        self.stop_event = stop_event
         self.train_config = train_config
-        self.device = device
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.log_prefix = "[TrainingWorker]"
-        # Initialize steps_done from aggregator *after* potential checkpoint load
-        self.steps_done = self.stats_aggregator.storage.current_global_step
+
+        from config import EnvConfig, ModelConfig
+        from agent.alphazero_net import AlphaZeroNet
+
+        self.local_agent = AlphaZeroNet(EnvConfig(), ModelConfig.Network()).to(
+            self.device
+        )
+
+        self.optimizer = optimizer_cls(
+            self.local_agent.parameters(), **optimizer_kwargs
+        )
+        self.scheduler = None
+        if scheduler_cls and scheduler_kwargs:
+            self.scheduler = scheduler_cls(self.optimizer, **scheduler_kwargs)
+
+        self.steps_done = 0
+        self._stop_requested = False
+
         logger.info(
-            f"{self.log_prefix} Initialized. Device: {self.device}. Initial Step: {self.steps_done}"
+            f"{self.log_prefix} Initialized as Ray Actor. Device: {self.device}."
         )
         logger.info(
             f"{self.log_prefix} Config: Batch={self.train_config.BATCH_SIZE}, LR={self.train_config.LEARNING_RATE}, MinBuffer={self.train_config.MIN_BUFFER_SIZE_TO_TRAIN}"
@@ -12986,18 +13576,22 @@ class TrainingWorker(threading.Thread):
         else:
             logger.info(f"{self.log_prefix} LR Scheduler: DISABLED")
 
-    def get_init_args(self) -> Dict[str, Any]:
-        """Returns arguments needed to re-initialize the thread."""
-        return {
-            "agent": self.agent,
-            "optimizer": self.optimizer,
-            "scheduler": self.scheduler,  # Include scheduler
-            "experience_queue": self.experience_queue,
-            "stats_aggregator": self.stats_aggregator,
-            "stop_event": self.stop_event,
-            "train_config": self.train_config,
-            "device": self.device,
-        }
+    async def _get_initial_state(self):
+        """Asynchronously fetches initial weights and global step."""
+        try:
+            weights_ref = self.agent_predictor.get_weights.remote()
+            step_ref = self.stats_aggregator.get_current_global_step.remote()
+            initial_weights, initial_step = await asyncio.gather(weights_ref, step_ref)
+            self.local_agent.load_state_dict(initial_weights)
+            self.steps_done = initial_step
+            logger.info(
+                f"{self.log_prefix} Initial weights loaded. Initial global step: {self.steps_done}"
+            )
+        except Exception as e:
+            logger.error(
+                f"{self.log_prefix} Failed to get initial state: {e}. Starting from scratch."
+            )
+            self.steps_done = 0
 
     def _prepare_batch(
         self, batch_data: ProcessedExperienceBatch
@@ -13046,21 +13640,30 @@ class TrainingWorker(threading.Thread):
                     if key in states and isinstance(value, np.ndarray):
                         temp_state[key] = value
                     else:
-                        logger.warning(
-                            f"{self.log_prefix} Skipping invalid item in batch (invalid state key/value: {key}, type: {type(value)})."
-                        )
-                        valid_state = False
-                        break
+                        if key == "death_mask" and key not in states:
+                            logger.warning(
+                                f"{self.log_prefix} State dict missing expected 'death_mask' key initially."
+                            )
+                        elif key != "death_mask":
+                            logger.warning(
+                                f"{self.log_prefix} Skipping invalid item in batch (invalid state key/value: {key}, type: {type(value)})."
+                            )
+                            valid_state = False
+                            break
+                        else:
+                            temp_state[key] = value
                 if not valid_state:
                     continue
 
-                policy_array = np.zeros(self.agent.env_cfg.ACTION_DIM, dtype=np.float32)
+                policy_array = np.zeros(
+                    self.local_agent.env_cfg.ACTION_DIM, dtype=np.float32
+                )
                 policy_sum = 0.0
                 valid_policy_entries = 0
                 for action, prob in policy_dict.items():
                     if (
                         isinstance(action, int)
-                        and 0 <= action < self.agent.env_cfg.ACTION_DIM
+                        and 0 <= action < self.local_agent.env_cfg.ACTION_DIM
                         and isinstance(prob, (float, int))
                         and np.isfinite(prob)
                         and prob >= 0
@@ -13068,7 +13671,6 @@ class TrainingWorker(threading.Thread):
                         policy_array[action] = prob
                         policy_sum += prob
                         valid_policy_entries += 1
-
                 if valid_policy_entries > 0 and not np.isclose(
                     policy_sum, 1.0, atol=1e-4
                 ):
@@ -13107,15 +13709,14 @@ class TrainingWorker(threading.Thread):
                 return None
 
             return batched_states, batched_policy, batched_value
-
         except Exception as e:
             logger.error(f"{self.log_prefix} Error preparing batch: {e}", exc_info=True)
             return None
 
-    def _perform_training_step(
+    async def _perform_training_step(
         self, batch_data: ProcessedExperienceBatch
     ) -> Optional[Dict[str, float]]:
-        """Performs a single training step."""
+        """Performs a single training step (async for stats)."""
         prep_start = time.monotonic()
         prepared_batch = self._prepare_batch(batch_data)
         prep_duration = time.monotonic() - prep_start
@@ -13125,44 +13726,33 @@ class TrainingWorker(threading.Thread):
             )
             return None
         batch_states, batch_policy_targets, batch_value_targets = prepared_batch
-        logger.info(  # Changed to debug
-            f"{self.log_prefix} Batch preparation took {prep_duration:.4f}s."
-        )
+        logger.debug(f"{self.log_prefix} Batch preparation took {prep_duration:.4f}s.")
 
         try:
             step_start_time = time.monotonic()
-            self.agent.train()
+            self.local_agent.train()
             self.optimizer.zero_grad()
-
-            policy_logits, value_preds = self.agent(batch_states)
+            policy_logits, value_preds = self.local_agent(batch_states)
 
             if (
                 policy_logits.shape[0] != batch_policy_targets.shape[0]
                 or value_preds.shape[0] != batch_value_targets.shape[0]
             ):
                 logger.error(
-                    f"{self.log_prefix} Batch size mismatch after forward pass! Skipping. "
-                    f"Logits: {policy_logits.shape}, Targets: {batch_policy_targets.shape}, "
-                    f"Values: {value_preds.shape}, Targets: {batch_value_targets.shape}"
+                    f"{self.log_prefix} Batch size mismatch after forward pass! Skipping. Logits: {policy_logits.shape}, Targets: {batch_policy_targets.shape}, Values: {value_preds.shape}, Targets: {batch_value_targets.shape}"
                 )
                 return None
             if policy_logits.shape[1] != batch_policy_targets.shape[1]:
                 logger.error(
-                    f"{self.log_prefix} Action dim mismatch after forward pass! Skipping. "
-                    f"Logits: {policy_logits.shape[1]}, Targets: {batch_policy_targets.shape[1]}"
+                    f"{self.log_prefix} Action dim mismatch after forward pass! Skipping. Logits: {policy_logits.shape[1]}, Targets: {batch_policy_targets.shape[1]}"
                 )
                 return None
 
-            # Policy Loss: Cross-entropy between predicted policy logits and MCTS policy target
             log_policy_preds = F.log_softmax(policy_logits, dim=1)
             policy_loss = -torch.sum(
                 batch_policy_targets * log_policy_preds, dim=1
             ).mean()
-
-            # Value Loss: Mean Squared Error between predicted value and game outcome
             value_loss = F.mse_loss(value_preds, batch_value_targets)
-
-            # Total Loss
             total_loss = (
                 self.train_config.POLICY_LOSS_WEIGHT * policy_loss
                 + self.train_config.VALUE_LOSS_WEIGHT * value_loss
@@ -13170,23 +13760,25 @@ class TrainingWorker(threading.Thread):
 
             total_loss.backward()
             self.optimizer.step()
-
-            # Step the scheduler if it exists
             if self.scheduler:
                 self.scheduler.step()
 
             step_duration = time.monotonic() - step_start_time
-            logger.info(  # Changed to debug
-                f"{self.log_prefix} Training step took {step_duration:.4f}s."
-            )
-
+            logger.debug(f"{self.log_prefix} Training step took {step_duration:.4f}s.")
             current_lr = self.optimizer.param_groups[0]["lr"]
+
+            if self.steps_done % 10 == 0:
+                weights = self.local_agent.state_dict()
+                self.agent_predictor.set_weights.remote(weights)
+                logger.debug(
+                    f"{self.log_prefix} Sent updated weights to AgentPredictor."
+                )
 
             return {
                 "policy_loss": policy_loss.item(),
                 "value_loss": value_loss.item(),
                 "update_time": step_duration,
-                "lr": current_lr,  # Include learning rate
+                "lr": current_lr,
             }
         except Exception as e:
             logger.critical(
@@ -13195,120 +13787,123 @@ class TrainingWorker(threading.Thread):
             )
             return None
 
-    def run(self):
-        """Main training loop."""
+    async def run_loop(self):
+        """Main training loop (async)."""
         logger.info(f"{self.log_prefix} Starting run loop.")
-        # Ensure steps_done is correctly initialized *after* potential checkpoint load
-        self.steps_done = self.stats_aggregator.storage.current_global_step
+        await self._get_initial_state()
         logger.info(
             f"{self.log_prefix} Starting training from Global Step: {self.steps_done}"
         )
 
         last_buffer_update_time = 0
-        buffer_update_interval = 1.0  # Log buffer size roughly every second if waiting
+        buffer_update_interval = 1.0
 
-        while not self.stop_event.is_set():
-            buffer_size = self.experience_queue.qsize()
+        while not self._stop_requested:
+            # Call qsize() directly, it returns an ObjectRef
+            qsize_ref = self.experience_queue.qsize()
+            buffer_size = await qsize_ref  # Await the ObjectRef
 
-            # Wait if buffer is not large enough
             if buffer_size < self.train_config.MIN_BUFFER_SIZE_TO_TRAIN:
                 if time.time() - last_buffer_update_time > buffer_update_interval:
-                    # Record buffer size periodically while waiting
-                    self.stats_aggregator.record_step({"buffer_size": buffer_size})
+                    self.stats_aggregator.record_step.remote(
+                        {"buffer_size": buffer_size}
+                    )
                     last_buffer_update_time = time.time()
                     logger.info(
                         f"{self.log_prefix} Waiting for buffer... Size: {buffer_size}/{self.train_config.MIN_BUFFER_SIZE_TO_TRAIN}"
                     )
-                time.sleep(0.1)  # Short sleep while waiting
+                await asyncio.sleep(0.1)
                 continue
 
-            # Buffer is ready, start training iteration
-            logger.info(  # Changed to debug
+            logger.debug(
                 f"{self.log_prefix} Starting training iteration. Buffer size: {buffer_size}"
             )
             steps_this_iter, iter_policy_loss, iter_value_loss = 0, 0.0, 0.0
             iter_start_time = time.monotonic()
 
             for _ in range(self.train_config.NUM_TRAINING_STEPS_PER_ITER):
-                if self.stop_event.is_set():
-                    break  # Exit inner loop if stop event is set
+                if self._stop_requested:
+                    break
 
                 batch_data_list: Optional[ProcessedExperienceBatch] = None
                 try:
                     q_get_start = time.monotonic()
-                    # Get a batch of experience from the queue
-                    batch_data_list = self.experience_queue.get(timeout=1.0)
+                    batch_data_list = await self.experience_queue.get_async(timeout=1.0)
                     q_get_duration = time.monotonic() - q_get_start
-                    logger.info(  # Changed to debug
+                    logger.debug(
                         f"{self.log_prefix} Queue get (batch size {len(batch_data_list) if batch_data_list else 0}) took {q_get_duration:.4f}s."
                     )
-                except queue.Empty:
+                except asyncio.TimeoutError:
                     logger.warning(
                         f"{self.log_prefix} Queue empty during training iteration, waiting..."
                     )
-                    time.sleep(0.1)
-                    break  # Exit inner loop, will check buffer size again
+                    await asyncio.sleep(0.1)
+                    break
                 except Exception as e:
                     logger.error(
                         f"{self.log_prefix} Error getting data from queue: {e}",
                         exc_info=True,
                     )
-                    break  # Exit inner loop on error
+                    break
 
                 if not batch_data_list:
-                    continue  # Skip if queue returned None or empty list
+                    continue
 
-                # Use the actual batch size received, up to the configured max
                 actual_batch_size = min(
                     len(batch_data_list), self.train_config.BATCH_SIZE
                 )
-                if actual_batch_size < 1:  # Should not happen if queue get succeeded
+                if actual_batch_size < 1:
                     continue
 
-                # Perform one training step
-                step_result = self._perform_training_step(
-                    batch_data_list[:actual_batch_size]  # Slice to actual batch size
+                step_result = await self._perform_training_step(
+                    batch_data_list[:actual_batch_size]
                 )
                 if step_result is None:
                     logger.warning(
                         f"{self.log_prefix} Training step failed, ending iteration early."
                     )
-                    break  # Exit inner loop if step failed
+                    break
 
-                # Update counters and aggregate losses
                 self.steps_done += 1
                 steps_this_iter += 1
                 iter_policy_loss += step_result["policy_loss"]
                 iter_value_loss += step_result["value_loss"]
 
-                # Record step statistics
+                # Call qsize() directly, it returns an ObjectRef
+                qsize_ref = self.experience_queue.qsize()
+                current_buffer_size = await qsize_ref  # Await the ObjectRef
                 step_stats = {
-                    "global_step": self.steps_done,  # Pass the incremented step
-                    "buffer_size": self.experience_queue.qsize(),  # Get current size
-                    "training_steps_performed": self.steps_done,  # Track total steps
-                    **step_result,  # Include losses, time, lr from step result
+                    "global_step": self.steps_done,
+                    "buffer_size": current_buffer_size,
+                    "training_steps_performed": self.steps_done,
+                    **step_result,
                 }
-                self.stats_aggregator.record_step(step_stats)
+                self.stats_aggregator.record_step.remote(step_stats)
 
-            # Log iteration summary
             iter_duration = time.monotonic() - iter_start_time
             if steps_this_iter > 0:
                 avg_p = iter_policy_loss / steps_this_iter
                 avg_v = iter_value_loss / steps_this_iter
                 logger.info(
-                    f"{self.log_prefix} Iteration complete. Steps: {steps_this_iter}, "
-                    f"Duration: {iter_duration:.2f}s, Avg P.Loss: {avg_p:.4f}, Avg V.Loss: {avg_v:.4f}"
+                    f"{self.log_prefix} Iteration complete. Steps: {steps_this_iter}, Duration: {iter_duration:.2f}s, Avg P.Loss: {avg_p:.4f}, Avg V.Loss: {avg_v:.4f}"
                 )
             else:
                 logger.info(
                     f"{self.log_prefix} Iteration finished with 0 steps performed (Duration: {iter_duration:.2f}s)."
                 )
 
-            # Small sleep to yield control if needed
-            time.sleep(0.01)
+            await asyncio.sleep(0.01)
 
         logger.info(f"{self.log_prefix} Run loop finished.")
 
+    def stop(self):
+        """Signals the actor to stop gracefully."""
+        logger.info(f"{self.log_prefix} Stop requested.")
+        self._stop_requested = True
+
+    def health_check(self):
+        """Ray health check method."""
+        return "OK"
 
 File: workers\__init__.py
 # File: workers/__init__.py

@@ -1,317 +1,70 @@
 # File: main_pygame.py
-import pygame
 import sys
 import time
 import threading
 import logging
+import logging.handlers
 import argparse
 import os
 import traceback
-from typing import Optional, Dict, Any, List
-import queue
-import numpy as np
-from collections import deque
+import multiprocessing as mp
+from typing import Optional
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-
 if script_dir not in sys.path:
     sys.path.insert(0, script_dir)
 
-# --- Config and Utils Imports ---
 try:
-    from config import (
-        VisConfig,
-        EnvConfig,
-        TrainConfig,
-        MCTSConfig,
-        RANDOM_SEED,
-        BASE_CHECKPOINT_DIR,
-        set_device,
-        get_run_id,
-        set_run_id,
-        get_run_log_dir,
-        get_console_log_dir,
-        get_config_dict,
-    )
-    from utils.helpers import get_device as get_torch_device, set_random_seeds
+    from config import BASE_CHECKPOINT_DIR, set_run_id, get_run_id, get_run_log_dir
+    from training.checkpoint_manager import find_latest_run_and_checkpoint
     from logger import TeeLogger
-    from utils.init_checks import run_pre_checks
+    from ui_process import run_ui_process
+    from logic_process import run_logic_process
 except ImportError as e:
-    print(f"Error importing config/utils: {e}\n{traceback.format_exc()}")
-    sys.exit(1)
-
-# --- App Component Imports ---
-try:
-    from environment.game_state import GameState
-    from ui.renderer import UIRenderer
-    from stats import StatsAggregator
-    from training.checkpoint_manager import (
-        find_latest_run_and_checkpoint,
-    )
-    from app_state import AppState
-    from app_init import AppInitializer
-    from app_logic import AppLogic
-    from app_workers import AppWorkerManager
-    from app_setup import (
-        initialize_pygame,
-        initialize_directories,
-    )
-    from app_ui_utils import AppUIUtils
-    from ui.input_handler import InputHandler
-    from agent.alphazero_net import AlphaZeroNet
-    from workers.training_worker import ProcessedExperienceBatch
-except ImportError as e:
-    print(f"Error importing app components: {e}\n{traceback.format_exc()}")
+    print(f"Error importing core modules/functions: {e}\n{traceback.format_exc()}")
     sys.exit(1)
 
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    level=logging.INFO, format="[%(levelname)s|%(processName)s] %(message)s"
 )
-# Reduce default logging noise
-logging.getLogger("mcts").setLevel(logging.WARNING)
-logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
-logging.getLogger("workers.training_worker").setLevel(logging.INFO)
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
-logging.getLogger("PIL").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)  # Main app logger
-
-# --- Constants ---
-LOOP_TIMING_INTERVAL = 60
-
-
-class MainApp:
-    """Main application class orchestrating Pygame UI and AlphaZero components."""
-
-    def __init__(self, checkpoint_to_load: Optional[str] = None):
-        # Config Instances
-        self.vis_config = VisConfig()
-        self.env_config = EnvConfig()
-        self.train_config_instance = TrainConfig()
-        self.mcts_config = MCTSConfig()
-
-        # Core Components
-        self.screen: Optional[pygame.Surface] = None
-        self.clock: Optional[pygame.time.Clock] = None
-        self.renderer: Optional[UIRenderer] = None
-        self.input_handler: Optional[InputHandler] = None
-
-        # State
-        self.app_state: AppState = AppState.INITIALIZING
-        self.status: str = "Initializing..."
-        self.running: bool = True
-        self.update_progress_details: Dict[str, Any] = {}
-
-        # Threading & Communication
-        self.stop_event = threading.Event()
-        self.experience_queue: queue.Queue[ProcessedExperienceBatch] = queue.Queue(
-            maxsize=self.train_config_instance.BUFFER_CAPACITY
-        )
-        logger.info(
-            f"Experience Queue Size: {self.train_config_instance.BUFFER_CAPACITY}"
-        )
-
-        # RL Components (Managed by Initializer)
-        self.agent: Optional[AlphaZeroNet] = None
-        self.stats_aggregator: Optional[StatsAggregator] = None
-        self.demo_env: Optional[GameState] = None
-
-        # Helper Classes
-        self.device = get_torch_device()
-        set_device(self.device)
-        self.checkpoint_to_load = checkpoint_to_load
-        self.initializer = AppInitializer(self)
-        self.logic = AppLogic(self)
-        self.worker_manager = AppWorkerManager(self)
-        self.ui_utils = AppUIUtils(self)
-
-        # UI State
-        self.cleanup_confirmation_active: bool = False
-        self.cleanup_message: str = ""
-        self.last_cleanup_message_time: float = 0.0
-        self.total_gpu_memory_bytes: Optional[int] = None
-
-        # Timing
-        self.frame_count = 0
-        self.loop_times = deque(maxlen=LOOP_TIMING_INTERVAL)
-
-    def initialize(self):
-        """Initializes Pygame, directories, configs, and core components."""
-        logger.info("--- Application Initialization ---")
-        self.screen, self.clock = initialize_pygame(self.vis_config)
-        initialize_directories()
-        set_random_seeds(RANDOM_SEED)
-        run_pre_checks()
-
-        self.app_state = AppState.INITIALIZING
-        self.initializer.initialize_all()
-
-        self.agent = self.initializer.agent
-        self.stats_aggregator = self.initializer.stats_aggregator
-        self.demo_env = self.initializer.demo_env
-
-        if self.renderer and self.input_handler:
-            self.renderer.set_input_handler(self.input_handler)
-            if hasattr(self.input_handler, "app_ref"):
-                self.input_handler.app_ref = self
-
-        self.logic.check_initial_completion_status()
-        self.status = "Ready"
-        self.app_state = AppState.MAIN_MENU
-        logger.info("--- Initialization Complete ---")
-
-    def _handle_input(self) -> bool:
-        """Handles user input using the InputHandler."""
-        if self.input_handler:
-            return self.input_handler.handle_input(
-                self.app_state.value, self.cleanup_confirmation_active
-            )
-        else:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.logic.exit_app()
-                    return False
-            return True
-
-    def _update_state(self):
-        """Updates application logic and status."""
-        self.update_progress_details = {}
-        self.logic.update_status_and_check_completion()
-
-        # Update demo env timers if in demo/debug mode
-        if self.app_state in [AppState.PLAYING, AppState.DEBUG] and self.demo_env:
-            try:
-                self.demo_env._update_timers()
-            except Exception as e:
-                logger.error(f"Error updating demo env timers: {e}")
-
-    def _prepare_render_data(self) -> Dict[str, Any]:
-        """Gathers all necessary data for rendering the current frame."""
-        render_data = {
-            "app_state": self.app_state.value,
-            "status": self.status,
-            "cleanup_confirmation_active": self.cleanup_confirmation_active,
-            "cleanup_message": self.cleanup_message,
-            "last_cleanup_message_time": self.last_cleanup_message_time,
-            "update_progress_details": self.update_progress_details,
-            "demo_env": self.demo_env,  # Pass the demo env object itself
-            "env_config": self.env_config,
-            "num_envs": self.train_config_instance.NUM_SELF_PLAY_WORKERS,
-            "plot_data": {},
-            "stats_summary": {},
-            "best_game_state_data": None,
-            "agent_param_count": 0,
-            "worker_counts": {},
-            "is_process_running": False,
-            "worker_render_data": [],
-        }
-
-        if self.stats_aggregator:
-            render_data["plot_data"] = self.stats_aggregator.get_plot_data()
-            current_step = self.stats_aggregator.storage.current_global_step
-            render_data["stats_summary"] = self.stats_aggregator.get_summary(
-                current_step
-            )
-            render_data["best_game_state_data"] = (
-                self.stats_aggregator.get_best_game_state_data()
-            )
-
-        if self.initializer:
-            render_data["agent_param_count"] = self.initializer.agent_param_count
-
-        if self.worker_manager:
-            render_data["worker_counts"] = (
-                self.worker_manager.get_active_worker_counts()
-            )
-            render_data["is_process_running"] = (
-                self.worker_manager.is_any_worker_running()
-            )
-            if (
-                render_data["is_process_running"]
-                and self.app_state == AppState.MAIN_MENU
-            ):
-                num_to_render = self.vis_config.NUM_ENVS_TO_RENDER
-                if num_to_render > 0:
-                    render_data["worker_render_data"] = (
-                        self.worker_manager.get_worker_render_data(num_to_render)
-                    )
-
-        return render_data
-
-    def _render_frame(self, render_data: Dict[str, Any]):
-        """Renders the UI frame using the collected data."""
-        if self.renderer:
-            self.renderer.render_all(**render_data)
-        else:
-            try:
-                self.screen.fill((20, 0, 0))
-                font = pygame.font.Font(None, 30)
-                text_surf = font.render(
-                    "Renderer Initialization Failed!", True, (255, 50, 50)
-                )
-                self.screen.blit(
-                    text_surf, text_surf.get_rect(center=self.screen.get_rect().center)
-                )
-                pygame.display.flip()
-            except Exception:
-                pass
-
-    def _log_loop_timing(self, loop_start_time: float):
-        """Logs average loop time periodically."""
-        self.loop_times.append(time.monotonic() - loop_start_time)
-        self.frame_count += 1
-
-    def run_main_loop(self):
-        """The main application loop."""
-        logger.info("Starting main application loop...")
-        while self.running:
-            loop_start_time = time.monotonic()
-
-            if not self.clock or not self.screen:
-                logger.error("Pygame clock or screen not initialized. Exiting.")
-                break
-
-            dt = self.clock.tick(self.vis_config.FPS) / 1000.0
-
-            self.running = self._handle_input()
-            if not self.running:
-                break
-
-            self._update_state()  # Updates demo timers if needed
-            render_data = self._prepare_render_data()
-            self._render_frame(render_data)
-
-            self._log_loop_timing(loop_start_time)
-
-        logger.info("Main application loop exited.")
-
-    def shutdown(self):
-        """Cleans up resources and exits."""
-        logger.info("Initiating shutdown sequence...")
-        logger.info("Stopping worker threads...")
-        self.worker_manager.stop_all_workers()
-        logger.info("Worker threads stopped.")
-        logger.info("Attempting final checkpoint save...")
-        self.logic.save_final_checkpoint()
-        logger.info("Final checkpoint save attempt finished.")
-        logger.info("Closing stats recorder (before pygame.quit)...")
-        self.initializer.close_stats_recorder()
-        logger.info("Stats recorder closed.")
-        logger.info("Quitting Pygame...")
-        pygame.quit()
-        logger.info("Pygame quit.")
-        logger.info("Shutdown complete.")
-
-
-# --- Main Execution ---
 tee_logger_instance: Optional[TeeLogger] = None
+log_listener_thread: Optional[threading.Thread] = None
+
+
+# --- Logging Setup Functions (remain the same) ---
+def setup_logging_queue_listener(log_queue: mp.Queue):
+    global log_listener_thread
+
+    def listener_process():
+        listener_logger = logging.getLogger("LogListener")
+        listener_logger.info("Log listener started.")
+        while True:
+            try:
+                record = log_queue.get()
+                if record is None:
+                    break
+                logger_handler = logging.getLogger(record.name)
+                logger_handler.handle(record)
+            except (EOFError, OSError):
+                listener_logger.warning("Log queue closed or broken pipe.")
+                break
+            except Exception as e:
+                print(f"Log listener error: {e}", file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+        listener_logger.info("Log listener stopped.")
+
+    log_listener_thread = threading.Thread(
+        target=listener_process, daemon=True, name="LogListener"
+    )
+    log_listener_thread.start()
+    return log_listener_thread
 
 
 def setup_logging_and_run_id(args: argparse.Namespace):
-    """Sets up logging (including TeeLogger) and determines the run ID."""
     global tee_logger_instance
     run_id_source = "New"
-
     if args.load_checkpoint:
         try:
             run_id_from_path = os.path.basename(os.path.dirname(args.load_checkpoint))
@@ -337,10 +90,8 @@ def setup_logging_and_run_id(args: argparse.Namespace):
         else:
             get_run_id()
             run_id_source = f"New (No previous runs found)"
-
     current_run_id = get_run_id()
     print(f"Run ID: {current_run_id} (Source: {run_id_source})")
-
     original_stdout, original_stderr = sys.stdout, sys.stderr
     try:
         log_file_dir = get_run_log_dir()
@@ -349,42 +100,43 @@ def setup_logging_and_run_id(args: argparse.Namespace):
         tee_logger_instance = TeeLogger(log_file_path, sys.stdout)
         sys.stdout = tee_logger_instance
         sys.stderr = tee_logger_instance
-        print(f"Console output will be mirrored to: {log_file_path}")
+        print(f"Main process console output will be mirrored to: {log_file_path}")
     except Exception as e:
         sys.stdout = original_stdout
         sys.stderr = original_stderr
         logger.error(f"Error setting up TeeLogger: {e}", exc_info=True)
-
-    # Configure Python's logging system
     log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(log_level)
-    # Set default levels for noisy libraries
     logging.getLogger("matplotlib").setLevel(logging.WARNING)
     logging.getLogger("PIL").setLevel(logging.WARNING)
-    # Set default levels for our workers unless overridden by args.log_level
-    if log_level <= logging.INFO:
-        logging.getLogger("mcts").setLevel(logging.WARNING)  # Keep MCTS quieter
-        logging.getLogger("workers.self_play_worker").setLevel(logging.INFO)
-        logging.getLogger("workers.training_worker").setLevel(logging.INFO)
-    # If DEBUG is requested, set workers/MCTS to DEBUG too
-    if log_level == logging.DEBUG:
-        logging.getLogger("mcts").setLevel(logging.DEBUG)
-        logging.getLogger("workers.self_play_worker").setLevel(logging.DEBUG)
-        logging.getLogger("workers.training_worker").setLevel(logging.DEBUG)
-
-    logger.info(f"Logging level set to: {args.log_level.upper()}")
+    logger.info(f"Main process logging level set to: {args.log_level.upper()}")
     logger.info(f"Using Run ID: {current_run_id}")
     if args.load_checkpoint:
         logger.info(f"Attempting to load checkpoint: {args.load_checkpoint}")
-
     return original_stdout, original_stderr
 
 
-def cleanup_logging(original_stdout, original_stderr, exit_code):
-    """Restores standard output/error and closes logger."""
+def cleanup_logging(
+    original_stdout, original_stderr, log_queue: Optional[mp.Queue], exit_code
+):
     print("[Main Finally] Restoring stdout/stderr and closing logger...")
-    logger = logging.getLogger(__name__)
-
+    if log_queue:
+        try:
+            log_queue.put(None)
+            log_queue.close()
+            log_queue.join_thread()
+        except Exception as qe:
+            print(f"Error closing log queue: {qe}", file=original_stderr)
+    if log_listener_thread:
+        try:
+            log_listener_thread.join(timeout=2.0)
+            if log_listener_thread.is_alive():
+                print(
+                    "Warning: Log listener thread did not join cleanly.",
+                    file=original_stderr,
+                )
+        except Exception as le:
+            print(f"Error joining log listener thread: {le}", file=original_stderr)
     if tee_logger_instance:
         try:
             if isinstance(sys.stdout, TeeLogger):
@@ -398,54 +150,136 @@ def cleanup_logging(original_stdout, original_stderr, exit_code):
         except Exception as log_close_err:
             original_stdout.write(f"ERROR closing TeeLogger: {log_close_err}\n")
             traceback.print_exc(file=original_stderr)
-
     print(f"[Main Finally] Exiting with code {exit_code}.")
     sys.exit(exit_code)
 
 
+# =========================================================================
+# Main Execution Block
+# =========================================================================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="AlphaZero Trainer")
+    mp.freeze_support()
+    try:
+        mp.set_start_method("spawn", force=True)
+        print("Multiprocessing start method set to 'spawn'.")
+    except RuntimeError:
+        print("Could not set start method to 'spawn', using default.")
+
+    parser = argparse.ArgumentParser(description="AlphaZero Trainer - Multiprocess")
     parser.add_argument(
-        "--load-checkpoint",
-        type=str,
-        default=None,
-        help="Path to a specific checkpoint file (.pth) to load.",
+        "--load-checkpoint", type=str, default=None, help="Path to checkpoint."
     )
     parser.add_argument(
         "--log-level",
         type=str,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level.",
+        help="Logging level.",
     )
     args = parser.parse_args()
 
     original_stdout, original_stderr = setup_logging_and_run_id(args)
 
-    app = None
+    ui_to_logic_queue = mp.Queue()
+    logic_to_ui_queue = mp.Queue(maxsize=10)
+    stop_event = mp.Event()
+    log_queue = mp.Queue()
+    log_listener = setup_logging_queue_listener(log_queue)
+
+    # Set daemon=True for simpler exit handling, rely on stop_event and timeouts
+    ui_process = mp.Process(
+        target=run_ui_process,
+        args=(stop_event, ui_to_logic_queue, logic_to_ui_queue, log_queue),
+        name="UIProcess",
+        daemon=True,
+    )
+    logic_process = mp.Process(
+        target=run_logic_process,
+        args=(
+            stop_event,
+            ui_to_logic_queue,
+            logic_to_ui_queue,
+            args.load_checkpoint,
+            log_queue,
+        ),
+        name="LogicProcess",
+        daemon=True,
+    )
+
     exit_code = 0
     try:
-        app = MainApp(checkpoint_to_load=args.load_checkpoint)
-        app.initialize()
-        app.run_main_loop()
+        logger.info("Starting UI process...")
+        ui_process.start()
+        logger.info("Starting Logic process...")
+        logic_process.start()
 
-    except KeyboardInterrupt:
-        logger.warning("KeyboardInterrupt received. Shutting down gracefully...")
-        if app:
-            app.logic.exit_app()
-        else:
-            pygame.quit()
-        exit_code = 130
+        # --- Wait for Processes ---
+        while True:  # Loop indefinitely until stop_event or error
+            if stop_event.is_set():
+                logger.info("Stop event detected by main process. Exiting wait loop.")
+                break
+            if not logic_process.is_alive():
+                logger.warning("Logic process terminated unexpectedly. Signaling stop.")
+                stop_event.set()
+                exit_code = 1  # Indicate error
+                break
+            if not ui_process.is_alive():
+                logger.warning("UI process terminated unexpectedly. Signaling stop.")
+                stop_event.set()
+                exit_code = 1  # Indicate error
+                break
+            try:
+                # Sleep briefly to prevent busy-waiting
+                time.sleep(0.2)
+            except KeyboardInterrupt:
+                logger.warning(
+                    "Main process received KeyboardInterrupt. Signaling stop..."
+                )
+                stop_event.set()
+                exit_code = 130
+                break  # Exit the waiting loop
 
-    except Exception as e:
-        logger.critical(f"Unhandled exception in main execution: {e}", exc_info=True)
-        if app:
-            app.logic.exit_app()
-        else:
-            pygame.quit()
+    except Exception as main_err:
+        logger.critical(
+            f"Error in main process coordination: {main_err}", exc_info=True
+        )
+        stop_event.set()
         exit_code = 1
 
     finally:
-        if app:
-            app.shutdown()
-        cleanup_logging(original_stdout, original_stderr, exit_code)
+        logger.info("Main process initiating cleanup...")
+        if not stop_event.is_set():
+            stop_event.set()  # Ensure stop is signaled
+
+        time.sleep(0.5)  # Allow processes to potentially react
+
+        # --- Join Processes with Timeouts ---
+        join_timeout_logic = 10.0  # More time for logic to save
+        join_timeout_ui = 3.0
+
+        logger.info(
+            f"Waiting for Logic process to join (timeout: {join_timeout_logic}s)..."
+        )
+        if logic_process.is_alive():
+            logic_process.join(timeout=join_timeout_logic)
+        if logic_process.is_alive():
+            logger.warning("Logic process did not join cleanly. Terminating.")
+            try:
+                logic_process.terminate()
+                logic_process.join(1.0)
+            except Exception as term_err:
+                logger.error(f"Error terminating Logic process: {term_err}")
+
+        logger.info(f"Waiting for UI process to join (timeout: {join_timeout_ui}s)...")
+        if ui_process.is_alive():
+            ui_process.join(timeout=join_timeout_ui)
+        if ui_process.is_alive():
+            logger.warning("UI process did not join cleanly. Terminating.")
+            try:
+                ui_process.terminate()
+                ui_process.join(1.0)
+            except Exception as term_err:
+                logger.error(f"Error terminating UI process: {term_err}")
+
+        logger.info("Processes joined or terminated.")
+        cleanup_logging(original_stdout, original_stderr, log_queue, exit_code)

@@ -41,19 +41,19 @@ from .constants import (
 class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
-    PUCT_C: float = 1.5
-    NUM_SIMULATIONS: int = 5000
+    PUCT_C: float = 1.25  # Slightly lower exploration emphasis
+    NUM_SIMULATIONS: int = 25  # Significantly reduced simulations per move
     TEMPERATURE_INITIAL: float = 1.0
-    TEMPERATURE_FINAL: float = 0.01
-    TEMPERATURE_ANNEAL_STEPS: int = 30
+    TEMPERATURE_FINAL: float = 0.1  # Anneal faster
+    TEMPERATURE_ANNEAL_STEPS: int = 15  # Anneal over fewer steps
     DIRICHLET_ALPHA: float = 0.3
     DIRICHLET_EPSILON: float = 0.25
-    MAX_SEARCH_DEPTH: int = 100
+    MAX_SEARCH_DEPTH: int = 50  # Reduced max depth
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 4
-    FPS = 0
+    NUM_ENVS_TO_RENDER = 2  # Reduced to match NUM_SELF_PLAY_WORKERS
+    FPS = 30  # Limit FPS for smoother UI during short runs
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
     VISUAL_STEP_DELAY = 0.00  # Keep at 0 for workers
@@ -140,20 +140,20 @@ class TransformerConfig:
 class TrainConfig:
     """Configuration parameters for the Training Worker."""
 
-    CHECKPOINT_SAVE_FREQ = 1000
+    CHECKPOINT_SAVE_FREQ = 200  # Save more frequently for short runs
     LOAD_CHECKPOINT_PATH: Optional[str] = None
-    NUM_SELF_PLAY_WORKERS: int = 8
-    BATCH_SIZE: int = 512
-    LEARNING_RATE: float = 1e-4
+    NUM_SELF_PLAY_WORKERS: int = 2# Reduced workers
+    BATCH_SIZE: int = 64  # Smaller batch size
+    LEARNING_RATE: float = 3e-4  # Slightly higher LR might help faster convergence
     WEIGHT_DECAY: float = 1e-5
-    NUM_TRAINING_STEPS_PER_ITER: int = 100
-    MIN_BUFFER_SIZE_TO_TRAIN: int = 2000
-    BUFFER_CAPACITY: int = 200000
+    NUM_TRAINING_STEPS_PER_ITER: int = 20  # Fewer training steps per iteration
+    MIN_BUFFER_SIZE_TO_TRAIN: int = 200  # Start training sooner
+    BUFFER_CAPACITY: int = 2000  # Smaller buffer
     POLICY_LOSS_WEIGHT: float = 1.0
     VALUE_LOSS_WEIGHT: float = 1.0
     USE_LR_SCHEDULER: bool = True
     SCHEDULER_TYPE: str = "CosineAnnealingLR"
-    SCHEDULER_T_MAX: int = 100000
+    SCHEDULER_T_MAX: int = 5000  # Reduced scheduler cycle for faster testing
     SCHEDULER_ETA_MIN: float = 1e-6
 
 
@@ -164,24 +164,24 @@ class ModelConfig:
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [32, 64, 128]
+        CONV_CHANNELS = [16, 32]  # Reduced channels
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
-        SHAPE_FEATURE_MLP_DIMS = [64]
+        SHAPE_FEATURE_MLP_DIMS = [32]  # Reduced MLP dims
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
-        COMBINED_FC_DIMS = [256, 128]
+        COMBINED_FC_DIMS = [64]  # Reduced FC dims
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
         DROPOUT_FC = 0.1
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [100, 500]
-    CONSOLE_LOG_FREQ = 100
-    PLOT_DATA_WINDOW = 10000
+    STATS_AVG_WINDOW: List[int] = [50, 200]  # Smaller windows for faster feedback
+    CONSOLE_LOG_FREQ = 50  # Log more frequently
+    PLOT_DATA_WINDOW = 1000  # Reduced plot window
 
 
 class DemoConfig:

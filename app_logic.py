@@ -3,100 +3,111 @@ import time
 import traceback
 import os
 import shutil
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING, Tuple, Dict, Any, Optional
+import logging
+import ray  # Added Ray
 
 from app_state import AppState
-from config.general import get_run_checkpoint_dir 
+from config.general import get_run_checkpoint_dir
 
 if TYPE_CHECKING:
-    from main_pygame import MainApp
+    LogicAppState = Any
+    StatsAggregatorHandle = ray.actor.ActorHandle  # Type hint
+
+logger = logging.getLogger(__name__)
 
 
 class AppLogic:
-    """Handles the core application logic and state transitions."""
+    """Handles the core application logic and state transitions within the Logic Process."""
 
-    def __init__(self, app: "MainApp"):
+    def __init__(self, app: "LogicAppState"):
         self.app = app
 
     def check_initial_completion_status(self):
-        """Checks if training target was met upon loading (placeholder)."""
-        pass 
+        pass
 
     def update_status_and_check_completion(self):
-        """Updates the status text based on application state."""
         is_running = self.app.worker_manager.is_any_worker_running()
         state = self.app.app_state
+        new_status = self.app.status
+
         if state == AppState.MAIN_MENU:
-            self.app.status = (
+            new_status = (
                 "Confirm Cleanup"
                 if self.app.cleanup_confirmation_active
                 else "Running AlphaZero" if is_running else "Ready"
             )
         elif state == AppState.PLAYING:
-            self.app.status = "Playing Demo"
+            new_status = "Playing Demo"
         elif state == AppState.DEBUG:
-            self.app.status = "Debugging Grid"
+            new_status = "Debugging Grid"
         elif state == AppState.INITIALIZING:
-            self.app.status = "Initializing..."
+            new_status = "Initializing..."
+        elif state == AppState.ERROR:
+            new_status = self.app.status
+        elif state == AppState.CLEANING:
+            new_status = "Cleaning"
 
-    # --- Worker Control ---
+        if new_status != self.app.status:
+            self.app.set_status(new_status)
+
     def start_run(self):
-        """Starts both self-play and training workers."""
         if (
             self.app.app_state != AppState.MAIN_MENU
             or self.app.worker_manager.is_any_worker_running()
         ):
-            print("Cannot start run: Not in Main Menu or already running.")
+            logger.warning(
+                "[AppLogic] Cannot start run: Not in Main Menu or already running."
+            )
             return
-        print("Starting AlphaZero Run (Self-Play & Training)...")
-        self.app.worker_manager.start_all_workers()
+        logger.info("[AppLogic] Starting AlphaZero Run (Self-Play & Training)...")
+        self.app.worker_manager.start_all_workers()  # Starts actor loops
         self.update_status_and_check_completion()
 
     def stop_run(self):
-        """Stops both self-play and training workers."""
         if not self.app.worker_manager.is_any_worker_running():
-            print("Run not currently active.")
+            logger.info("[AppLogic] Run not currently active.")
             return
-        print("Stopping AlphaZero Run...")
-        self.app.worker_manager.stop_all_workers()
+        logger.info("[AppLogic] Stop Run command received. Initiating worker stop...")
+        self.app.worker_manager.stop_all_workers()  # Stops actors
         self.update_status_and_check_completion()
 
-    # --- Mode Transitions & Cleanup ---
     def request_cleanup(self):
         if self.app.app_state != AppState.MAIN_MENU:
             return
         if self.app.worker_manager.is_any_worker_running():
             self._set_temp_message("Stop Run before Cleanup!")
             return
-        self.app.cleanup_confirmation_active = True
-        self.app.status = "Confirm Cleanup"
-        print("Cleanup requested. Confirm action.")
+        self.app.set_cleanup_confirmation(True)
+        self.update_status_and_check_completion()
+        logger.info("[AppLogic] Cleanup requested. Confirm action.")
 
     def start_demo_mode(self):
         if self._can_start_mode("Demo"):
-            print("Entering Demo Mode...")
+            logger.info("[AppLogic] Entering Demo Mode...")
             self.try_save_checkpoint()
-            self.app.app_state = AppState.PLAYING
-            self.app.status = "Playing Demo"
+            self.app.set_state(AppState.PLAYING)
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
+            self.update_status_and_check_completion()
 
     def start_debug_mode(self):
         if self._can_start_mode("Debug"):
-            print("Entering Debug Mode...")
+            logger.info("[AppLogic] Entering Debug Mode...")
             self.try_save_checkpoint()
-            self.app.app_state = AppState.DEBUG
-            self.app.status = "Debugging Grid"
+            self.app.set_state(AppState.DEBUG)
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
+            self.update_status_and_check_completion()
 
     def _can_start_mode(self, mode_name: str) -> bool:
-        """Checks if demo/debug mode can be started."""
         if self.app.initializer.demo_env is None:
-            print(f"Cannot start {mode_name}: Env not initialized.")
+            logger.warning(f"[AppLogic] Cannot start {mode_name}: Env not initialized.")
             return False
         if self.app.app_state != AppState.MAIN_MENU:
-            print(f"Cannot start {mode_name} mode outside MainMenu.")
+            logger.warning(
+                f"[AppLogic] Cannot start {mode_name} mode outside MainMenu."
+            )
             return False
         if self.app.worker_manager.is_any_worker_running():
             self._set_temp_message(f"Stop Run before {mode_name}!")
@@ -105,184 +116,152 @@ class AppLogic:
 
     def exit_demo_mode(self):
         if self.app.app_state == AppState.PLAYING:
-            print("Exiting Demo Mode...")
-            if self.app.initializer.demo_env:
-                self.app.initializer.demo_env.deselect_dragged_shape()
+            logger.info("[AppLogic] Exiting Demo Mode...")
             self._return_to_main_menu()
 
     def exit_debug_mode(self):
         if self.app.app_state == AppState.DEBUG:
-            print("Exiting Debug Mode...")
+            logger.info("[AppLogic] Exiting Debug Mode...")
             self._return_to_main_menu()
 
     def _return_to_main_menu(self):
-        """Helper to transition back to the main menu state."""
-        self.app.app_state = AppState.MAIN_MENU
+        self.app.set_state(AppState.MAIN_MENU)
         self.check_initial_completion_status()
         self.update_status_and_check_completion()
 
     def cancel_cleanup(self):
-        self.app.cleanup_confirmation_active = False
+        self.app.set_cleanup_confirmation(False)
         self._set_temp_message("Cleanup cancelled.")
         self.update_status_and_check_completion()
-        print("Cleanup cancelled by user.")
+        logger.info("[AppLogic] Cleanup cancelled by user.")
 
     def confirm_cleanup(self):
-        print("Cleanup confirmed by user. Starting process...")
+        logger.info("[AppLogic] Cleanup confirmed by user. Starting process...")
         try:
             self._cleanup_data()
         except Exception as e:
-            print(f"FATAL ERROR during cleanup: {e}")
-            traceback.print_exc()
-            self.app.status = "Error: Cleanup Failed Critically"
-            self.app.app_state = AppState.ERROR
+            logger.error(f"[AppLogic] FATAL ERROR during cleanup: {e}", exc_info=True)
+            self.app.set_status("Error: Cleanup Failed Critically")
+            self.app.set_state(AppState.ERROR)
         finally:
-            self.app.cleanup_confirmation_active = False
-            print(
-                f"Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
+            self.app.set_cleanup_confirmation(False)
+            logger.info(
+                f"[AppLogic] Cleanup process finished. State: {self.app.app_state}, Status: {self.app.status}"
             )
 
-    def exit_app(self) -> bool:
-        print("Exit requested.")
-        self.app.stop_event.set()
-        self.app.worker_manager.stop_all_workers()
-        return False  # Signal main loop to stop
-
-    # --- Input Handling Callbacks ---
-    def handle_demo_mouse_motion(self, mouse_pos: Tuple[int, int]):
-        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
+    def handle_demo_mouse_motion(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.PLAYING
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
+        grid_coords = payload.get("pos")
         demo_env = self.app.initializer.demo_env
         if demo_env.is_frozen() or demo_env.is_over():
             return
         if demo_env.demo_dragged_shape_idx is None:
             return
-        grid_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
         demo_env.update_snapped_position(grid_coords)
 
-    def handle_demo_mouse_button_down(self, event: pygame.event.Event):
-        if self.app.app_state != AppState.PLAYING or not self.app.initializer.demo_env:
+    def handle_demo_mouse_button_down(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.PLAYING
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
         demo_env = self.app.initializer.demo_env
-        if demo_env.is_frozen() or demo_env.is_over() or event.button != 1:
+        if demo_env.is_frozen() or demo_env.is_over():
             return
-
-        mouse_pos = event.pos
-        clicked_preview = self.app.ui_utils.map_screen_to_preview(mouse_pos)
-        if clicked_preview is not None:
-            action = (
-                demo_env.deselect_dragged_shape
-                if clicked_preview == demo_env.demo_dragged_shape_idx
-                else lambda: demo_env.select_shape_for_drag(clicked_preview)
-            )
-            action()
-            return
-
-        grid_coords = self.app.ui_utils.map_screen_to_grid(mouse_pos)
-        if (
-            grid_coords is not None
-            and demo_env.demo_dragged_shape_idx is not None
-            and demo_env.demo_snapped_position == grid_coords
-        ):
-            placed = demo_env.place_dragged_shape()
-            if placed and demo_env.is_over():
-                print("[Demo] Game Over! Press ESC to exit.")
-        else:
+        click_type = payload.get("type")
+        if click_type == "preview":
+            clicked_preview = payload.get("index")
+            if clicked_preview is not None:
+                action = (
+                    demo_env.deselect_dragged_shape
+                    if clicked_preview == demo_env.demo_dragged_shape_idx
+                    else lambda: demo_env.select_shape_for_drag(clicked_preview)
+                )
+                action()
+        elif click_type == "grid":
+            grid_coords = payload.get("grid_coords")
+            if (
+                grid_coords is not None
+                and demo_env.demo_dragged_shape_idx is not None
+                and demo_env.demo_snapped_position == grid_coords
+            ):
+                placed = demo_env.place_dragged_shape()
+                if placed and demo_env.is_over():
+                    logger.info("[Demo] Game Over! (UI handles exit prompt)")
+            else:
+                demo_env.deselect_dragged_shape()
+        elif click_type == "outside":
             demo_env.deselect_dragged_shape()
 
-    def handle_debug_input(self, event: pygame.event.Event):
-        if self.app.app_state != AppState.DEBUG or not self.app.initializer.demo_env:
+    def handle_debug_input(self, payload: Optional[Dict]):
+        if (
+            self.app.app_state != AppState.DEBUG
+            or not self.app.initializer.demo_env
+            or not payload
+        ):
             return
         demo_env = self.app.initializer.demo_env
-        if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
-            print("[Debug] Resetting grid...")
+        input_type = payload.get("type")
+        if input_type == "reset":
+            logger.info("[Debug] Resetting grid...")
             demo_env.reset()
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            clicked_coords = self.app.ui_utils.map_screen_to_grid(event.pos)
+        elif input_type == "toggle_triangle":
+            clicked_coords = payload.get("grid_coords")
             if clicked_coords:
                 demo_env.toggle_triangle_debug(*clicked_coords)
 
-    # --- Internal Helpers ---
     def _set_temp_message(self, message: str):
-        """Sets a temporary message to be displayed."""
-        self.app.cleanup_message = message
-        self.app.last_cleanup_message_time = time.time()
+        self.app.set_cleanup_message(message, time.time())
 
     def _cleanup_data(self):
-        """Deletes current run's checkpoint and re-initializes components."""
-        print("\n--- CLEANUP DATA INITIATED (Current Run Only) ---")
-        self.app.app_state = AppState.INITIALIZING
-        self.app.status = "Cleaning"
+        logger.info("\n[AppLogic] --- CLEANUP DATA INITIATED (Current Run Only) ---")
+        self.app.set_state(AppState.CLEANING)
+        self.app.set_status("Cleaning")
         messages = []
-        self._render_during_cleanup()
-
-        print("[Cleanup] Stopping existing worker threads (if any)...")
-        self.app.worker_manager.stop_all_workers()
-        print("[Cleanup] Existing worker threads stopped.")
-        print("[Cleanup] Closing stats recorder...")
+        logger.info("[AppLogic Cleanup] Stopping existing worker actors (if any)...")
+        self.app.worker_manager.stop_all_workers()  # Stops actors
+        logger.info("[AppLogic Cleanup] Existing worker actors stopped.")
+        logger.info("[AppLogic Cleanup] Closing stats recorder...")
         self.app.initializer.close_stats_recorder(is_cleanup=True)
-        print("[Cleanup] Stats recorder closed.")
-
+        logger.info("[AppLogic Cleanup] Stats recorder closed.")
         messages.append(self._delete_checkpoint_dir())
         time.sleep(0.1)
-
-        print("[Cleanup] Re-initializing components...")
+        logger.info("[AppLogic Cleanup] Re-initializing components...")
         try:
+            # Re-init actors (handled by initializer)
+            self.app.initializer._init_ray_actors()
             self.app.initializer.initialize_rl_components(
                 is_reinit=True, checkpoint_to_load=None
             )
-            print("[Cleanup] Components re-initialized.")
+            logger.info("[AppLogic Cleanup] RL Components re-initialized.")
             if self.app.initializer.demo_env:
                 self.app.initializer.demo_env.reset()
-            self.app.initializer.initialize_workers()
-            print("[Cleanup] Workers re-initialized (not started).")
+            self.app.worker_manager.initialize_actors()  # Re-init worker actors
+            logger.info("[AppLogic Cleanup] Workers re-initialized (not started).")
             messages.append("Components re-initialized.")
-            self.app.status = "Ready"
-            self.app.app_state = AppState.MAIN_MENU
+            self.app.set_status("Ready")
+            self.app.set_state(AppState.MAIN_MENU)
         except Exception as e:
-            print(f"FATAL ERROR during re-initialization after cleanup: {e}")
-            traceback.print_exc()
-            self.app.status = "Error: Re-init Failed"
-            self.app.app_state = AppState.ERROR
+            logger.error(
+                f"[AppLogic] FATAL ERROR during re-initialization after cleanup: {e}",
+                exc_info=True,
+            )
+            self.app.set_status("Error: Re-init Failed")
+            self.app.set_state(AppState.ERROR)
             messages.append("ERROR RE-INITIALIZING COMPONENTS!")
-            if self.app.renderer:
-                self.app.renderer._render_error_screen(self.app.status)
-
         self._set_temp_message("\n".join(messages))
-        print(f"--- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}) ---")
-
-    def _render_during_cleanup(self):
-        """Renders the screen while cleanup is in progress."""
-        if self.app.renderer:
-            try:
-                self.app.renderer.render_all(
-                    app_state=self.app.app_state.value,
-                    is_process_running=False,
-                    status=self.app.status,
-                    stats_summary={},
-                    envs=[],
-                    num_envs=0,
-                    env_config=self.app.env_config,
-                    cleanup_confirmation_active=False,
-                    cleanup_message="",
-                    last_cleanup_message_time=0,
-                    plot_data={},
-                    demo_env=self.app.initializer.demo_env,
-                    update_progress_details={},
-                    agent_param_count=getattr(
-                        self.app.initializer, "agent_param_count", 0
-                    ),
-                    worker_counts={},
-                    best_game_state_data=None,
-                )
-                pygame.display.flip()
-                pygame.time.delay(100)
-            except Exception as render_err:
-                print(f"Warning: Error rendering during cleanup start: {render_err}")
+        logger.info(
+            f"[AppLogic] --- CLEANUP DATA COMPLETE (Final State: {self.app.app_state}) ---"
+        )
 
     def _delete_checkpoint_dir(self) -> str:
-        """Deletes the checkpoint directory and returns a status message."""
-        print("[Cleanup] Deleting agent checkpoint file/dir...")
+        logger.info("[AppLogic Cleanup] Deleting agent checkpoint file/dir...")
         msg = ""
         try:
             save_dir = get_run_checkpoint_dir()
@@ -293,12 +272,11 @@ class AppLogic:
                 msg = f"Run checkpoint directory not found: {save_dir}"
         except OSError as e:
             msg = f"Error deleting checkpoint dir: {e}"
-        print(f"  - {msg}")
-        print("[Cleanup] Checkpoint deletion attempt finished.")
+        logger.info(f"  - {msg}")
+        logger.info("[AppLogic Cleanup] Checkpoint deletion attempt finished.")
         return msg
 
     def try_save_checkpoint(self):
-        """Saves checkpoint if in main menu and workers are not running."""
         if (
             self.app.app_state != AppState.MAIN_MENU
             or self.app.worker_manager.is_any_worker_running()
@@ -309,15 +287,17 @@ class AppLogic:
             or not self.app.initializer.stats_aggregator
         ):
             return
-
-        print("Saving checkpoint...")
+        logger.info("[AppLogic] Saving checkpoint...")
         try:
-            agg_storage = self.app.initializer.stats_aggregator.storage
-            current_step = getattr(agg_storage, "current_global_step", 0)
-            episode_count = getattr(agg_storage, "total_episodes", 0)
-            target_step = getattr(
-                self.app.initializer.checkpoint_manager, "training_target_step", 0
+            # Fetch stats from aggregator actor
+            agg_actor: "StatsAggregatorHandle" = self.app.initializer.stats_aggregator
+            step_ref = agg_actor.get_current_global_step.remote()
+            ep_ref = agg_actor.get_total_episodes.remote()
+            target_ref = agg_actor.get_training_target_step.remote()  # Use new getter
+            current_step, episode_count, target_step = ray.get(
+                [step_ref, ep_ref, target_ref]
             )
+
             self.app.initializer.checkpoint_manager.save_checkpoint(
                 current_step,
                 episode_count,
@@ -325,36 +305,57 @@ class AppLogic:
                 is_final=False,
             )
         except Exception as e:
-            print(f"Error saving checkpoint: {e}")
-            traceback.print_exc()
+            logger.error(f"[AppLogic] Error saving checkpoint: {e}", exc_info=True)
 
     def save_final_checkpoint(self):
-        """Saves the final checkpoint."""
         if (
-            not self.app.initializer.checkpoint_manager
+            not hasattr(self.app, "initializer")
+            or not self.app.initializer.checkpoint_manager
             or not self.app.initializer.stats_aggregator
         ):
+            logger.warning(
+                "[AppLogic] Cannot save final checkpoint: components missing."
+            )
             return
         save_on_exit = (
-            self.app.status != "Cleaning" and self.app.app_state != AppState.ERROR
+            self.app.app_state != AppState.CLEANING
+            and self.app.app_state != AppState.ERROR
         )
         if save_on_exit:
-            print("Performing final checkpoint save...")
+            logger.info("[AppLogic] Performing final checkpoint save...")
             try:
-                agg_storage = self.app.initializer.stats_aggregator.storage
-                current_step = getattr(agg_storage, "current_global_step", 0)
-                episode_count = getattr(agg_storage, "total_episodes", 0)
-                target_step = getattr(
-                    self.app.initializer.checkpoint_manager, "training_target_step", 0
+                # Fetch stats from aggregator actor
+                agg_actor: "StatsAggregatorHandle" = (
+                    self.app.initializer.stats_aggregator
                 )
+                step_ref = agg_actor.get_current_global_step.remote()
+                ep_ref = agg_actor.get_total_episodes.remote()
+                target_ref = (
+                    agg_actor.get_training_target_step.remote()
+                )  # Use new getter
+                current_step, episode_count, target_step = ray.get(
+                    [step_ref, ep_ref, target_ref]
+                )
+
                 self.app.initializer.checkpoint_manager.save_checkpoint(
                     current_step,
                     episode_count,
                     training_target_step=target_step,
                     is_final=True,
                 )
+                logger.info("[AppLogic] Final checkpoint save successful.")
+            except AttributeError as ae:
+                # This specific error might be less likely now, but keep general exception handling
+                logger.error(
+                    f"[AppLogic] Attribute error during final checkpoint save: {ae}",
+                    exc_info=True,
+                )
             except Exception as final_save_err:
-                print(f"Error during final checkpoint save: {final_save_err}")
-                traceback.print_exc()
+                logger.error(
+                    f"[AppLogic] Error during final checkpoint save: {final_save_err}",
+                    exc_info=True,
+                )
         else:
-            print("Skipping final checkpoint save.")
+            logger.info(
+                f"[AppLogic] Skipping final checkpoint save due to state: {self.app.app_state}"
+            )

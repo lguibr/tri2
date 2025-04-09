@@ -4,18 +4,19 @@ from typing import Deque, Dict, Any, List, Optional
 import time
 import numpy as np
 import logging
+import pickle  # Needed for potential complex data in best_game_state_data
 
 logger = logging.getLogger(__name__)
 
 
 class AggregatorStorage:
     """Holds the data structures (deques and scalar values) for StatsAggregator.
-    Refactored for AlphaZero focus. Resource usage removed."""
+    Ensures best_game_state_data is stored as a serializable dictionary.
+    """
 
     def __init__(self, plot_window: int):
         self.plot_window = plot_window
-
-        # --- Deques for Plotting ---
+        # ... (Deque definitions remain the same) ...
         # Training Stats
         self.policy_losses: Deque[float] = deque(maxlen=plot_window)
         self.value_losses: Deque[float] = deque(maxlen=plot_window)
@@ -33,13 +34,12 @@ class AggregatorStorage:
         self.mcts_avg_depths: Deque[float] = deque(maxlen=plot_window)
         # System Stats
         self.buffer_sizes: Deque[int] = deque(maxlen=plot_window)
-        self.steps_per_second: Deque[float] = deque(
-            maxlen=plot_window
-        )  # Added steps/sec deque
+        self.steps_per_second: Deque[float] = deque(maxlen=plot_window)
         self._last_step_time: Optional[float] = None
         self._last_step_count: Optional[int] = None
 
         # --- Scalar State Variables ---
+        # ... (remain the same) ...
         self.total_episodes: int = 0
         self.total_triangles_cleared: int = 0
         self.current_buffer_size: int = 0
@@ -49,14 +49,16 @@ class AggregatorStorage:
         self.training_target_step: int = 0
 
         # --- Intermediate Progress Tracking ---
+        # ... (remain the same) ...
         self.current_self_play_game_number: int = 0
         self.current_self_play_game_steps: int = 0
         self.training_steps_performed: int = 0
 
         # --- Best Value Tracking ---
-        self.best_outcome: float = -float("inf")  # Less relevant now
-        self.previous_best_outcome: float = -float("inf")  # Less relevant now
-        self.best_outcome_step: int = 0  # Less relevant now
+        # ... (remain the same) ...
+        self.best_outcome: float = -float("inf")
+        self.previous_best_outcome: float = -float("inf")
+        self.best_outcome_step: int = 0
         self.best_game_score: float = -float("inf")
         self.previous_best_game_score: float = -float("inf")
         self.best_game_score_step: int = 0
@@ -66,19 +68,20 @@ class AggregatorStorage:
         self.best_policy_loss: float = float("inf")
         self.previous_best_policy_loss: float = float("inf")
         self.best_policy_loss_step: int = 0
-        self.best_mcts_sim_time: float = float("inf")  # Best is lowest time
+        self.best_mcts_sim_time: float = float("inf")
         self.previous_best_mcts_sim_time: float = float("inf")
         self.best_mcts_sim_time_step: int = 0
 
         # --- Best Game State Data ---
+        # Now stores the already processed serializable dict
         self.best_game_state_data: Optional[Dict[str, Any]] = None
 
+    # get_deque remains the same
     def get_deque(self, name: str) -> Deque:
-        """Safely gets a deque attribute."""
         return getattr(self, name, deque(maxlen=self.plot_window))
 
+    # get_all_plot_deques remains the same
     def get_all_plot_deques(self) -> Dict[str, Deque]:
-        """Returns copies of all deques intended for plotting."""
         deque_names = [
             "policy_losses",
             "value_losses",
@@ -101,29 +104,24 @@ class AggregatorStorage:
             if hasattr(self, name)
         }
 
+    # update_steps_per_second remains the same
     def update_steps_per_second(self, global_step: int):
-        """Calculates and updates the steps per second deque."""
         current_time = time.time()
         if self._last_step_time is not None and self._last_step_count is not None:
             time_diff = current_time - self._last_step_time
             step_diff = global_step - self._last_step_count
-            if (
-                time_diff > 1e-3 and step_diff > 0
-            ):  # Avoid division by zero and stale data
+            if time_diff > 1e-3 and step_diff > 0:
                 sps = step_diff / time_diff
                 self.steps_per_second.append(sps)
-            elif (
-                step_diff <= 0 and time_diff > 1.0
-            ):  # If no steps for a while, record 0
+            elif step_diff <= 0 and time_diff > 1.0:
                 self.steps_per_second.append(0.0)
-
-        # Update last step time/count for the next calculation
         self._last_step_time = current_time
         self._last_step_count = global_step
 
     def state_dict(self) -> Dict[str, Any]:
         """Returns the state of the storage for saving."""
         state = {}
+        # ... (Deque serialization remains the same) ...
         deque_names = [
             "policy_losses",
             "value_losses",
@@ -146,6 +144,7 @@ class AggregatorStorage:
                 if deque_instance is not None:
                     state[name] = list(deque_instance)
 
+        # ... (Scalar serialization remains the same) ...
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
@@ -158,11 +157,12 @@ class AggregatorStorage:
             "current_self_play_game_steps",
             "training_steps_performed",
             "_last_step_time",
-            "_last_step_count",  # Include for sps calculation resume
+            "_last_step_count",
         ]
         for key in scalar_keys:
             state[key] = getattr(self, key, None if key.startswith("_last") else 0)
 
+        # ... (Best value serialization remains the same) ...
         best_value_keys = [
             "best_outcome",
             "previous_best_outcome",
@@ -190,31 +190,28 @@ class AggregatorStorage:
             )
             state[key] = getattr(self, key, default)
 
-        # Serialize best game state data carefully
+        # Serialize best game state data directly (it should already be a dict)
+        # We might need pickle for numpy arrays within the dict
         if self.best_game_state_data:
             try:
-                # Convert GameState object to a serializable format (e.g., its state dict)
-                serializable_data = {
-                    "score": self.best_game_state_data.get("score"),
-                    "step": self.best_game_state_data.get("step"),
-                    # Add other relevant scalar info if needed
-                }
-                # Save the game state's internal state (which should be serializable)
-                game_state_obj = self.best_game_state_data.get("game_state")
-                if game_state_obj and hasattr(game_state_obj, "get_state"):
-                    serializable_data["game_state_dict"] = game_state_obj.get_state()
-
-                state["best_game_state_data"] = serializable_data
+                # Ensure numpy arrays are handled by pickle if torch save fails
+                state["best_game_state_data_pkl"] = pickle.dumps(
+                    self.best_game_state_data
+                )
             except Exception as e:
-                logger.error(f"Error serializing best_game_state_data: {e}")
-                state["best_game_state_data"] = None
+                logger.error(f"Could not pickle best_game_state_data: {e}")
+                state["best_game_state_data_pkl"] = None
         else:
-            state["best_game_state_data"] = None
+            state["best_game_state_data_pkl"] = None
+
+        # Deprecated direct storage in torch checkpoint:
+        # state["best_game_state_data"] = self.best_game_state_data
 
         return state
 
     def load_state_dict(self, state_dict: Dict[str, Any], plot_window: int):
         """Loads the state from a dictionary."""
+        # ... (Deque loading remains the same) ...
         self.plot_window = plot_window
         deque_names = [
             "policy_losses",
@@ -237,13 +234,13 @@ class AggregatorStorage:
             if isinstance(data, (list, tuple)):
                 setattr(self, key, deque(data, maxlen=self.plot_window))
             else:
-                # Initialize empty deque if data is missing or invalid
                 setattr(self, key, deque(maxlen=self.plot_window))
                 if data is not None:
                     logger.warning(
-                        f"Invalid data type for deque '{key}' in loaded state: {type(data)}. Initializing empty deque."
+                        f"Invalid data type for deque '{key}' in loaded state: {type(data)}. Init empty."
                     )
 
+        # ... (Scalar loading remains the same) ...
         scalar_keys = [
             "total_episodes",
             "total_triangles_cleared",
@@ -256,7 +253,7 @@ class AggregatorStorage:
             "current_self_play_game_steps",
             "training_steps_performed",
             "_last_step_time",
-            "_last_step_count",  # Restore for sps calculation
+            "_last_step_count",
         ]
         defaults = {
             "start_time": time.time(),
@@ -275,6 +272,7 @@ class AggregatorStorage:
         for key in scalar_keys:
             setattr(self, key, state_dict.get(key, defaults.get(key)))
 
+        # ... (Best value loading remains the same) ...
         best_value_keys = [
             "best_outcome",
             "previous_best_outcome",
@@ -312,34 +310,47 @@ class AggregatorStorage:
         for key in best_value_keys:
             setattr(self, key, state_dict.get(key, best_defaults.get(key)))
 
-        # Deserialize best game state data (requires GameState class)
-        loaded_best_data = state_dict.get("best_game_state_data")
-        if loaded_best_data and isinstance(loaded_best_data, dict):
+        # Deserialize best game state data using pickle
+        best_game_data_pkl = state_dict.get("best_game_state_data_pkl")
+        if best_game_data_pkl:
             try:
-                from environment.game_state import GameState  # Local import
-
-                temp_game_state = GameState()
-                # We only saved the state dict, not the object itself
-                # Reconstructing the exact state might be complex or impossible
-                # Store the basic info (score, step) and maybe the state dict for inspection
-                self.best_game_state_data = {
-                    "score": loaded_best_data.get("score"),
-                    "step": loaded_best_data.get("step"),
-                    "game_state_dict": loaded_best_data.get(
-                        "game_state_dict"
-                    ),  # Store the dict
-                    # Cannot easily reconstruct the full GameState object here
-                }
-            except ImportError:
-                logger.error(
-                    "Could not import GameState during best_game_state_data deserialization."
-                )
-                self.best_game_state_data = None
+                self.best_game_state_data = pickle.loads(best_game_data_pkl)
+                if not isinstance(self.best_game_state_data, dict):
+                    logger.warning(
+                        "Loaded best_game_state_data is not a dict, resetting."
+                    )
+                    self.best_game_state_data = None
+                else:
+                    # Basic validation
+                    if (
+                        "score" not in self.best_game_state_data
+                        or "step" not in self.best_game_state_data
+                        or "game_state_dict" not in self.best_game_state_data
+                    ):
+                        logger.warning(
+                            "Loaded best_game_state_data dict missing keys, resetting."
+                        )
+                        self.best_game_state_data = None
             except Exception as e:
-                logger.error(f"Error deserializing best_game_state_data: {e}")
+                logger.error(f"Error unpickling best_game_state_data: {e}")
                 self.best_game_state_data = None
         else:
-            self.best_game_state_data = None
+            # Fallback to old direct storage method if pkl missing
+            loaded_best_data = state_dict.get("best_game_state_data")
+            if isinstance(loaded_best_data, dict):
+                self.best_game_state_data = loaded_best_data
+                # Basic validation
+                if (
+                    "score" not in self.best_game_state_data
+                    or "step" not in self.best_game_state_data
+                    or "game_state_dict" not in self.best_game_state_data
+                ):
+                    logger.warning(
+                        "Loaded legacy best_game_state_data dict missing keys, resetting."
+                    )
+                    self.best_game_state_data = None
+            else:
+                self.best_game_state_data = None
 
         # Ensure critical attributes exist after loading
         for attr, default_factory in [

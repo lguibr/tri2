@@ -1,108 +1,157 @@
 # File: mcts/search.py
 import numpy as np
 import time
-import copy  # Keep for potential future use, but avoid for GameState
+import copy
 from typing import Dict, Optional, Tuple, Callable, Any, List
 import logging
-import torch  # Added for batching
-import threading  # Added for stop_event
+import torch
+import threading
+import multiprocessing as mp
+import ray  # Added Ray
 
-from environment.game_state import GameState  # Import GameState directly
+from environment.game_state import GameState
 from utils.types import ActionType, StateType
 from .node import MCTSNode
 from config import MCTSConfig, EnvConfig
 
+# Removed NetworkPredictor type hint, using ActorHandle now
+# from agent.alphazero_net import AgentPredictor # Import Actor type if needed for hinting
 
-# Updated signature for batch prediction
-NetworkPredictor = Callable[
-    [List[StateType]], Tuple[List[Dict[ActionType, float]], List[float]]
-]
 logger = logging.getLogger(__name__)
 
 
 class MCTS:
     """Monte Carlo Tree Search implementation based on AlphaZero principles with batching."""
 
+    MCTS_NN_BATCH_SIZE = 8  # Default internal batch size for NN predictions
+
     def __init__(
         self,
-        network_predictor: NetworkPredictor,  # Predictor now handles batches
+        # network_predictor: NetworkPredictor, # Replaced with actor handle
+        agent_predictor: ray.actor.ActorHandle,  # Actor handle for AgentPredictor
         config: Optional[MCTSConfig] = None,
         env_config: Optional[EnvConfig] = None,
-        batch_size: int = 8,  # Default MCTS batch size
-        stop_event: Optional[threading.Event] = None,  # Add stop_event
+        batch_size: int = MCTS_NN_BATCH_SIZE,
+        stop_event: Optional[mp.Event] = None,
     ):
-        self.network_predictor = network_predictor
+        # self.network_predictor = network_predictor # Removed
+        self.agent_predictor = agent_predictor  # Store actor handle
         self.config = config if config else MCTSConfig()
         self.env_config = env_config if env_config else EnvConfig()
-        self.batch_size = batch_size  # Store batch size
-        self.stop_event = stop_event  # Store stop_event
+        self.batch_size = max(1, batch_size)
+        self.stop_event = stop_event
         self.log_prefix = "[MCTS]"
         logger.info(
-            f"{self.log_prefix} Initialized with NN batch size: {self.batch_size}"
+            f"{self.log_prefix} Initialized with AgentPredictor actor. NN batch size: {self.batch_size}"
         )
 
     def _select_leaf(self, root_node: MCTSNode) -> Tuple[MCTSNode, int]:
-        """Traverses the tree using PUCT until a leaf node is reached. Returns node and depth."""
+        """Selects a leaf node using PUCT criteria, checking stop_event."""
         node = root_node
         depth = 0
         while node.is_expanded and not node.is_terminal:
             if self.stop_event and self.stop_event.is_set():
-                raise InterruptedError("MCTS selection interrupted by stop event.")
+                raise InterruptedError("MCTS selection interrupted.")
+
             if depth >= self.config.MAX_SEARCH_DEPTH:
                 break
             if not node.children:
                 break
-            node = node.select_best_child()
-            depth += 1
+
+            try:
+                node = node.select_best_child()
+                depth += 1
+            except ValueError:
+                logger.warning(
+                    f"{self.log_prefix} Node claims expanded but has no selectable children."
+                )
+                break
+
         return node, depth
 
     def _expand_and_backpropagate_batch(
         self, nodes_to_expand: List[MCTSNode]
     ) -> Tuple[float, int]:
         """
-        Expands a batch of leaf nodes using batched NN prediction and backpropagates results.
+        Expands a batch of leaf nodes using batched NN prediction via Ray actor and backpropagates results.
+        Checks stop_event more frequently.
         Returns (total_nn_prediction_time, nodes_created_count).
         """
         if not nodes_to_expand:
             return 0.0, 0
+
         if self.stop_event and self.stop_event.is_set():
-            raise InterruptedError("MCTS expansion interrupted by stop event.")
+            raise InterruptedError(
+                "MCTS expansion interrupted by stop event (before NN)."
+            )
 
         batch_states = [node.game_state.get_state() for node in nodes_to_expand]
         total_nn_prediction_time = 0.0
         nodes_created_count = 0
+        policy_probs_list = []
+        predicted_values = []
 
         try:
             start_pred_time = time.monotonic()
-            policy_probs_list, predicted_values = self.network_predictor(batch_states)
+            # --- Call the AgentPredictor actor ---
+            prediction_ref = self.agent_predictor.predict_batch.remote(batch_states)
+            policy_probs_list, predicted_values = ray.get(prediction_ref)
+            # --- End Actor Call ---
             total_nn_prediction_time = time.monotonic() - start_pred_time
-            logger.info(
-                f"{self.log_prefix} Batched NN Prediction ({len(batch_states)} states) took {total_nn_prediction_time:.4f}s."
+            logger.debug(
+                f"{self.log_prefix} Batched NN Prediction ({len(batch_states)} states) via Actor took {total_nn_prediction_time:.4f}s."
             )
+        except ray.exceptions.RayActorError as rae:
+            logger.error(
+                f"{self.log_prefix} RayActorError during prediction: {rae}",
+                exc_info=True,
+            )
+            # Backpropagate 0 if NN fails, mark as expanded to avoid re-selection
+            for node in nodes_to_expand:
+                if self.stop_event and self.stop_event.is_set():
+                    break
+                if not node.is_expanded:
+                    node.is_expanded = True
+                    node.backpropagate(0.0)
+            return total_nn_prediction_time, 0
         except Exception as e:
             logger.error(
                 f"{self.log_prefix} Error during batched network prediction: {e}",
                 exc_info=True,
             )
+            # Backpropagate 0 if NN fails, mark as expanded to avoid re-selection
             for node in nodes_to_expand:
+                if self.stop_event and self.stop_event.is_set():
+                    break
                 if not node.is_expanded:
                     node.is_expanded = True
                     node.backpropagate(0.0)
             return total_nn_prediction_time, 0
 
+        if self.stop_event and self.stop_event.is_set():
+            raise InterruptedError(
+                "MCTS expansion interrupted by stop event (after NN)."
+            )
+
         for i, node in enumerate(nodes_to_expand):
             if self.stop_event and self.stop_event.is_set():
-                raise InterruptedError(
-                    "MCTS expansion processing interrupted by stop event."
+                logger.info(
+                    f"{self.log_prefix} Stop event detected during batch expansion processing."
                 )
+                break
 
             if node.is_expanded or node.is_terminal:
                 if node.visit_count == 0:
-                    node.backpropagate(predicted_values[i])
+                    value_to_prop = (
+                        predicted_values[i] if i < len(predicted_values) else 0.0
+                    )
+                    node.backpropagate(value_to_prop)
                 continue
 
-            policy_probs_dict = policy_probs_list[i]
-            predicted_value = predicted_values[i]
+            policy_probs_dict = (
+                policy_probs_list[i] if i < len(policy_probs_list) else {}
+            )
+            predicted_value = predicted_values[i] if i < len(predicted_values) else 0.0
             children_created_count_node = 0
 
             valid_actions = node.game_state.valid_actions()
@@ -115,13 +164,18 @@ class MCTS:
             parent_state = node.game_state
             start_expand_time = time.monotonic()
             for action in valid_actions:
+                if self.stop_event and self.stop_event.is_set():
+                    logger.info(
+                        f"{self.log_prefix} Stop event detected during child creation loop for node {id(node)}."
+                    )
+                    if not node.is_expanded:
+                        node.is_expanded = True
+                        node.backpropagate(predicted_value)
+                    break
+
                 try:
-                    # --- Create new state and apply action ---
-                    # This uses the grid's deepcopy method, which is necessary for now.
-                    child_state = GameState()  # Create a fresh GameState
-                    child_state.grid = (
-                        parent_state.grid.deepcopy_grid()
-                    )  # Use grid's deepcopy
+                    child_state = GameState()
+                    child_state.grid = parent_state.grid.deepcopy_grid()
                     child_state.shapes = [
                         s.copy() if s else None for s in parent_state.shapes
                     ]
@@ -132,12 +186,7 @@ class MCTS:
                     child_state.pieces_placed_this_episode = (
                         parent_state.pieces_placed_this_episode
                     )
-                    # Apply step to the *new* child_state
                     _, done = child_state.step(action)
-                    # --- End state modification ---
-                    logger.info(
-                        f"{self.log_prefix} Created child state for action {action}. Parent score: {parent_state.game_score}, Child score: {child_state.game_score}, Done: {done}"
-                    )
 
                     prior_prob = policy_probs_dict.get(action, 0.0)
                     child_node = MCTSNode(
@@ -149,7 +198,6 @@ class MCTS:
                     )
                     if done:
                         child_node.is_terminal = True
-
                     node.children[action] = child_node
                     children_created_count_node += 1
                 except Exception as child_creation_err:
@@ -158,16 +206,31 @@ class MCTS:
                         exc_info=True,
                     )
                     continue
-            expand_duration = time.monotonic() - start_expand_time
-            logger.info(
-                f"{self.log_prefix} Node expansion ({children_created_count_node} children) took {expand_duration:.4f}s."
-            )
 
+            if self.stop_event and self.stop_event.is_set():
+                logger.info(
+                    f"{self.log_prefix} Stop event detected after child creation loop for node {id(node)}."
+                )
+                if not node.is_expanded:
+                    node.is_expanded = True
+                    node.backpropagate(predicted_value)
+                break
+
+            expand_duration = time.monotonic() - start_expand_time
             node.is_expanded = True
             nodes_created_count += children_created_count_node
+
+            if self.stop_event and self.stop_event.is_set():
+                logger.info(
+                    f"{self.log_prefix} Stop event detected before backpropagation for node {id(node)}."
+                )
+                break
             node.backpropagate(predicted_value)
 
         return total_nn_prediction_time, nodes_created_count
+
+    # run_simulations, _add_dirichlet_noise, get_policy_target, choose_action remain largely the same
+    # but they now rely on _expand_and_backpropagate_batch which uses the Ray actor.
 
     def run_simulations(
         self, root_state: GameState, num_simulations: int
@@ -175,45 +238,28 @@ class MCTS:
         """
         Runs the MCTS process for a given number of simulations using batching.
         Returns the root node and a dictionary of simulation statistics.
+        Handles InterruptedError from stop_event checks.
         """
-        try:
-            # --- Create a copy of the root state for the search ---
-            search_root_state = GameState()
-            search_root_state.grid = (
-                root_state.grid.deepcopy_grid()
-            )  # Use grid's deepcopy
-            search_root_state.shapes = [
-                s.copy() if s else None for s in root_state.shapes
-            ]
-            search_root_state.game_score = root_state.game_score
-            search_root_state.triangles_cleared_this_episode = (
-                root_state.triangles_cleared_this_episode
-            )
-            search_root_state.pieces_placed_this_episode = (
-                root_state.pieces_placed_this_episode
-            )
-            search_root_state.game_over = root_state.game_over
-            # --- End state copy ---
-        except Exception as e:
-            logger.error(
-                f"{self.log_prefix} Error copying root game state for MCTS: {e}",
-                exc_info=True,
+        if self.stop_event and self.stop_event.is_set():
+            logger.warning(
+                f"{self.log_prefix} Stop event set before starting simulations."
             )
             return MCTSNode(game_state=root_state, config=self.config), {
                 "simulations_run": 0,
                 "mcts_total_duration": 0.0,
                 "total_nn_prediction_time": 0.0,
-                "nodes_created": 0,
+                "nodes_created": 1,
                 "avg_leaf_depth": 0.0,
                 "root_visits": 0,
             }
 
-        root_node = MCTSNode(game_state=search_root_state, config=self.config)
+        root_node = MCTSNode(game_state=root_state, config=self.config)
         sim_start_time = time.monotonic()
         total_nn_prediction_time = 0.0
         nodes_created_this_run = 1
         total_leaf_depth = 0
-        simulations_run = 0
+        simulations_run_attempted = 0
+        simulations_completed_full = 0
 
         if root_node.is_terminal:
             logger.warning(
@@ -229,21 +275,26 @@ class MCTS:
             }
 
         try:
-            initial_batch_time, initial_nodes_created = (
-                self._expand_and_backpropagate_batch([root_node])
-            )
-            total_nn_prediction_time += initial_batch_time
-            nodes_created_this_run += initial_nodes_created
-            simulations_run += 1
-
-            if root_node.is_expanded and not root_node.is_terminal:
-                self._add_dirichlet_noise(root_node)
+            if not root_node.is_expanded:
+                if self.stop_event and self.stop_event.is_set():
+                    raise InterruptedError("Stop event before initial root expansion.")
+                initial_batch_time, initial_nodes_created = (
+                    self._expand_and_backpropagate_batch([root_node])
+                )
+                total_nn_prediction_time += initial_batch_time
+                nodes_created_this_run += initial_nodes_created
+                simulations_completed_full += 1
+                if root_node.is_expanded and not root_node.is_terminal:
+                    self._add_dirichlet_noise(root_node)
 
             leaves_to_expand: List[MCTSNode] = []
-            for sim_num in range(simulations_run, num_simulations):
+            simulations_run_attempted = 1
+
+            for sim_num in range(simulations_run_attempted, num_simulations):
+                simulations_run_attempted += 1
                 if self.stop_event and self.stop_event.is_set():
                     logger.info(
-                        f"{self.log_prefix} Stop event detected during simulation {sim_num+1}. Stopping MCTS."
+                        f"{self.log_prefix} Stop event detected before simulation {sim_num+1}. Stopping MCTS."
                     )
                     break
 
@@ -255,9 +306,7 @@ class MCTS:
                     value = leaf_node.game_state.get_outcome()
                     leaf_node.backpropagate(value)
                     sim_duration_step = time.monotonic() - sim_start_step
-                    logger.info(
-                        f"{self.log_prefix} Sim {sim_num+1}/{num_simulations} hit terminal node. Backprop: {value:.2f}. Took {sim_duration_step:.5f}s"
-                    )
+                    simulations_completed_full += 1
                     continue
 
                 leaves_to_expand.append(leaf_node)
@@ -267,23 +316,38 @@ class MCTS:
                     or sim_num == num_simulations - 1
                 ):
                     if leaves_to_expand:
+                        if self.stop_event and self.stop_event.is_set():
+                            logger.info(
+                                f"{self.log_prefix} Stop event detected before expanding batch."
+                            )
+                            break
+
                         batch_nn_time, batch_nodes_created = (
                             self._expand_and_backpropagate_batch(leaves_to_expand)
                         )
                         total_nn_prediction_time += batch_nn_time
                         nodes_created_this_run += batch_nodes_created
+                        simulations_completed_full += len(leaves_to_expand)
                         leaves_to_expand = []
 
-            if leaves_to_expand:
+            if leaves_to_expand and not (self.stop_event and self.stop_event.is_set()):
+                logger.info(
+                    f"{self.log_prefix} Processing remaining {len(leaves_to_expand)} leaves after loop exit."
+                )
                 batch_nn_time, batch_nodes_created = (
                     self._expand_and_backpropagate_batch(leaves_to_expand)
                 )
                 total_nn_prediction_time += batch_nn_time
                 nodes_created_this_run += batch_nodes_created
+                simulations_completed_full += len(leaves_to_expand)
 
         except InterruptedError as e:
-            logger.warning(f"{self.log_prefix} MCTS run interrupted: {e}")
-            pass
+            logger.warning(f"{self.log_prefix} MCTS run interrupted gracefully: {e}")
+        except Exception as e:
+            logger.error(
+                f"{self.log_prefix} Error during MCTS run_simulations: {e}",
+                exc_info=True,
+            )
 
         sim_duration_total = time.monotonic() - sim_start_time
         effective_sims = max(1, root_node.visit_count)
@@ -292,7 +356,7 @@ class MCTS:
         )
 
         logger.info(
-            f"{self.log_prefix} Finished {root_node.visit_count} effective simulations in {sim_duration_total:.4f}s. "
+            f"{self.log_prefix} Finished {root_node.visit_count} effective simulations ({simulations_run_attempted} attempted) in {sim_duration_total:.4f}s. "
             f"Nodes created: {nodes_created_this_run}, "
             f"Total NN time: {total_nn_prediction_time:.4f}s, Avg Depth: {avg_leaf_depth:.1f}"
         )
@@ -311,16 +375,17 @@ class MCTS:
         """Adds Dirichlet noise to the prior probabilities of the root node's children."""
         if not node.children or self.config.DIRICHLET_ALPHA <= 0:
             return
-        actions = list(node.children.keys())
-        if not actions:
+        child_actions = [a for a in node.children.keys() if a in node.children]
+        if not child_actions:
             return
-        noise = np.random.dirichlet([self.config.DIRICHLET_ALPHA] * len(actions))
+
+        num_children = len(child_actions)
+        noise = np.random.dirichlet([self.config.DIRICHLET_ALPHA] * num_children)
         eps = self.config.DIRICHLET_EPSILON
-        for i, action in enumerate(actions):
-            child = node.children.get(action)
-            if child:
-                child.prior = (1 - eps) * child.prior + eps * noise[i]
-        logger.info(f"{self.log_prefix} Applied Dirichlet noise to root node priors.")
+        for i, action in enumerate(child_actions):
+            child = node.children[action]
+            child.prior = (1 - eps) * child.prior + eps * noise[i]
+        logger.debug(f"{self.log_prefix} Applied Dirichlet noise to root node priors.")
 
     def get_policy_target(
         self, root_node: MCTSNode, temperature: float
@@ -328,88 +393,66 @@ class MCTS:
         """Calculates the improved policy distribution based on visit counts."""
         if not root_node.children:
             return {}
-        total_visits = sum(child.visit_count for child in root_node.children.values())
+
+        existing_children = {a: c for a, c in root_node.children.items() if c}
+        if not existing_children:
+            return {}
+
+        total_visits = sum(child.visit_count for child in existing_children.values())
         if total_visits == 0:
-            num_children = len(root_node.children)
+            num_children = len(existing_children)
+            logger.warning(
+                f"{self.log_prefix} Root node has 0 total visits across children. Returning uniform policy."
+            )
             return (
-                {a: 1.0 / num_children for a in root_node.children}
+                {a: 1.0 / num_children for a in existing_children}
                 if num_children > 0
                 else {}
             )
 
         policy_target: Dict[ActionType, float] = {}
         if temperature == 0:
-            best_action, max_visits = -1, -1
-            for action, child in root_node.children.items():
-                if child.visit_count > max_visits:
-                    max_visits, best_action = child.visit_count, action
-            if best_action != -1:
-                for action in root_node.children:
-                    policy_target[action] = 1.0 if action == best_action else 0.0
-            else:
-                num_children = len(root_node.children)
-                prob = 1.0 / num_children if num_children > 0 else 0.0
-                for action in root_node.children:
-                    policy_target[action] = prob
+            best_action = max(
+                existing_children, key=lambda a: existing_children[a].visit_count
+            )
+            for action in existing_children:
+                policy_target[action] = 1.0 if action == best_action else 0.0
         else:
             total_power, powered_counts = 0.0, {}
-            for action, child in root_node.children.items():
+            max_power_val = np.finfo(np.float64).max / (len(existing_children) + 1)
+
+            for action, child in existing_children.items():
                 visit_count = max(0, child.visit_count)
                 try:
                     powered_count = np.power(
                         np.float64(visit_count), 1.0 / temperature, dtype=np.float64
                     )
-                    if np.isinf(powered_count):
+                    if np.isinf(powered_count) or np.isnan(powered_count):
                         logger.warning(
-                            f"{self.log_prefix} Infinite powered count encountered for action {action} (visits={visit_count}, temp={temperature}). Clamping."
+                            f"{self.log_prefix} Infinite/NaN powered count for action {action}. Clamping."
                         )
-                        powered_count = np.finfo(np.float64).max / len(
-                            root_node.children
-                        )
+                        powered_count = max_power_val
                 except (OverflowError, ValueError):
                     logger.warning(
-                        f"{self.log_prefix} Power calculation overflow/error for action {action} (visits={visit_count}, temp={temperature}). Setting to 0."
+                        f"{self.log_prefix} Power calc overflow/error for action {action}. Setting large value."
                     )
-                    powered_count = 0.0
+                    powered_count = max_power_val
+
                 powered_counts[action] = powered_count
-                if not np.isinf(powered_count):
+                if not np.isinf(powered_count) and not np.isnan(powered_count):
                     total_power += powered_count
 
-            if total_power <= 1e-9 or np.isinf(total_power):
-                if np.isinf(total_power):
-                    inf_actions = [
-                        a
-                        for a, pc in powered_counts.items()
-                        if np.isinf(pc)
-                        or pc > np.finfo(np.float64).max / (len(root_node.children) * 2)
-                    ]
-                    num_inf = len(inf_actions)
-                    prob = 1.0 / num_inf if num_inf > 0 else 0.0
-                    for action in root_node.children:
-                        policy_target[action] = prob if action in inf_actions else 0.0
+            if total_power <= 1e-9 or np.isinf(total_power) or np.isnan(total_power):
+                num_valid_children = len(powered_counts)
+                if num_valid_children > 0:
+                    prob = 1.0 / num_valid_children
+                    for action in existing_children:
+                        policy_target[action] = prob
                     logger.warning(
-                        f"{self.log_prefix} Total power infinite, assigned uniform prob to {num_inf} actions."
+                        f"{self.log_prefix} Total power invalid ({total_power:.2e}), assigned uniform prob {prob:.3f}."
                     )
                 else:
-                    visited_children = [
-                        a for a, c in root_node.children.items() if c.visit_count > 0
-                    ]
-                    num_visited = len(visited_children)
-                    if num_visited > 0:
-                        prob = 1.0 / num_visited
-                        for action in root_node.children:
-                            policy_target[action] = (
-                                prob if action in visited_children else 0.0
-                            )
-                    elif root_node.children:
-                        prob = 1.0 / len(root_node.children)
-                        for action in root_node.children:
-                            policy_target[action] = prob
-                    else:
-                        prob = 0.0
-                    logger.warning(
-                        f"{self.log_prefix} Total power near zero ({total_power}), assigned uniform prob."
-                    )
+                    policy_target = {}
             else:
                 for action, powered_count in powered_counts.items():
                     policy_target[action] = float(powered_count / total_power)
@@ -491,6 +534,6 @@ class MCTS:
             return int(chosen_action)
         except ValueError as e:
             logger.error(
-                f"{self.log_prefix} Error during np.random.choice: {e}. Probabilities sum: {np.sum(probabilities)}. Actions: {actions}. Probs: {probabilities}"
+                f"{self.log_prefix} Error during np.random.choice: {e}. Prob sum: {np.sum(probabilities)}. Choosing uniformly."
             )
             return np.random.choice(actions)

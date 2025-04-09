@@ -2,11 +2,12 @@
 import pygame
 import math
 import traceback
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Any, Optional
 
 from config import VisConfig, EnvConfig, DemoConfig, RED
-from environment.game_state import GameState
-from .panels.game_area import GameAreaRenderer  # Keep for grid rendering logic
+
+# from environment.game_state import GameState # No longer use GameState directly
+from .panels.game_area import GameAreaRenderer  # Keep for rendering logic if needed
 from .demo_components.grid_renderer import DemoGridRenderer
 from .demo_components.preview_renderer import DemoPreviewRenderer
 from .demo_components.hud_renderer import DemoHudRenderer
@@ -14,8 +15,7 @@ from .demo_components.hud_renderer import DemoHudRenderer
 
 class DemoRenderer:
     """
-    Handles rendering specifically for the interactive Demo/Debug Mode.
-    Delegates rendering tasks to sub-components.
+    Handles rendering for Demo/Debug Mode based on data received from logic process.
     """
 
     def __init__(
@@ -23,14 +23,15 @@ class DemoRenderer:
         screen: pygame.Surface,
         vis_config: VisConfig,
         demo_config: DemoConfig,
-        game_area_renderer: GameAreaRenderer,  # Pass GameAreaRenderer for shared logic/fonts
+        game_area_renderer: GameAreaRenderer,
     ):
         self.screen = screen
         self.vis_config = vis_config
         self.demo_config = demo_config
-        self.game_area_renderer = game_area_renderer  # Keep reference
+        # GameAreaRenderer might not be needed if all logic is self-contained
+        self.game_area_renderer = game_area_renderer
 
-        # Initialize sub-renderers
+        # Initialize sub-renderers (pass screen, configs)
         self.grid_renderer = DemoGridRenderer(
             screen, vis_config, demo_config, game_area_renderer
         )
@@ -44,14 +45,35 @@ class DemoRenderer:
         self.shape_preview_rects: Dict[int, pygame.Rect] = {}
 
     def render(
-        self, demo_env: GameState, env_config: EnvConfig, is_debug: bool = False
+        self,
+        demo_env_data: Dict[str, Any],  # Now accepts a data dictionary
+        env_config: Optional[Dict[str, Any]] = None,  # Env config values as dict
+        is_debug: bool = False,
     ):
-        """Renders the entire demo/debug mode screen."""
-        if not demo_env:
-            print("Error: DemoRenderer called with demo_env=None")
+        """Renders the entire demo/debug mode screen using provided data."""
+        if not demo_env_data or not env_config:
+            print("Error: DemoRenderer called with missing data or env_config")
+            # Optionally render an error message
             return
 
-        bg_color = self.hud_renderer.determine_background_color(demo_env)
+        # Extract necessary info from demo_env_data
+        # This replaces accessing demo_env object attributes
+        is_over = demo_env_data.get("demo_env_is_over", False)
+        score = demo_env_data.get("demo_env_score", 0)
+        state_dict = demo_env_data.get("demo_env_state")  # The StateType dict
+        dragged_shape_idx = demo_env_data.get("demo_env_dragged_shape_idx")
+        snapped_pos = demo_env_data.get("demo_env_snapped_pos")
+        selected_shape_idx = demo_env_data.get("demo_env_selected_shape_idx", -1)
+        # Get shape data (assuming it's part of the state_dict or stats)
+        available_shapes_data = []
+        if (
+            state_dict and "shapes" in state_dict
+        ):  # Placeholder: Need actual shape info passed
+            pass  # Need to reconstruct shape info for previews if not passed separately
+
+        # Determine background color based on state flags (passed in demo_env_data)
+        # bg_color = self.hud_renderer.determine_background_color(demo_env_data) # Adapt this method
+        bg_color = self.demo_config.BACKGROUND_COLOR  # Simplified for now
         self.screen.fill(bg_color)
 
         screen_width, screen_height = self.screen.get_size()
@@ -59,13 +81,19 @@ class DemoRenderer:
         hud_height = 60
         help_height = 30
 
+        # Calculate game area using env_config dict
         game_rect, clipped_game_rect = self.grid_renderer.calculate_game_area_rect(
             screen_width, screen_height, padding, hud_height, help_height, env_config
         )
 
         if clipped_game_rect.width > 10 and clipped_game_rect.height > 10:
+            # Pass necessary data down to grid renderer
             self.grid_renderer.render_game_area(
-                demo_env, env_config, clipped_game_rect, bg_color, is_debug
+                demo_env_data,  # Pass the data dict
+                env_config,
+                clipped_game_rect,
+                bg_color,
+                is_debug,
             )
         else:
             self.hud_renderer.render_too_small_message(
@@ -73,28 +101,28 @@ class DemoRenderer:
             )
 
         if not is_debug:
+            # Pass necessary data down to preview renderer
             self.shape_preview_rects = self.preview_renderer.render_shape_previews_area(
-                demo_env, screen_width, clipped_game_rect, padding
+                demo_env_data,  # Pass the data dict
+                screen_width,
+                clipped_game_rect,
+                padding,
             )
         else:
             self.shape_preview_rects.clear()
 
+        # Pass necessary data down to HUD renderer
         self.hud_renderer.render_hud(
-            demo_env, screen_width, game_rect.bottom + 10, is_debug
+            demo_env_data,  # Pass the data dict
+            screen_width,
+            game_rect.bottom + 10,
+            is_debug,
         )
         self.hud_renderer.render_help_text(screen_width, screen_height, is_debug)
 
-    # Expose calculation methods if needed by InputHandler
-    def _calculate_game_area_rect(self, *args, **kwargs):
-        return self.grid_renderer.calculate_game_area_rect(*args, **kwargs)
-
-    def _calculate_demo_triangle_size(self, *args, **kwargs):
-        return self.grid_renderer.calculate_demo_triangle_size(*args, **kwargs)
-
-    def _calculate_grid_offset(self, *args, **kwargs):
-        return self.grid_renderer.calculate_grid_offset(*args, **kwargs)
+    # Expose calculation methods if needed by InputHandler (unlikely now)
+    # ...
 
     def get_shape_preview_rects(self) -> Dict[int, pygame.Rect]:
         """Returns the dictionary of screen-relative shape preview rects."""
-        # Get rects from the preview renderer
         return self.preview_renderer.get_shape_preview_rects()

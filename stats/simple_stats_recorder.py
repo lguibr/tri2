@@ -5,39 +5,51 @@ import numpy as np
 import torch
 import threading
 import logging
+import ray # Added Ray
 
-from .stats_recorder import StatsRecorderBase
-from .aggregator import StatsAggregator
+# from .stats_recorder import StatsRecorderBase # Keep Base class import
+from .aggregator import StatsAggregatorActor # Import Actor for type hint
 from config import StatsConfig, TrainConfig
-from utils.helpers import format_eta  # Import helper
+from utils.helpers import format_eta
 
 if TYPE_CHECKING:
     from environment.game_state import GameState
+    StatsAggregatorHandle = ray.actor.ActorHandle # Type hint for handle
+
+# Import base class correctly
+from .stats_recorder import StatsRecorderBase
 
 logger = logging.getLogger(__name__)
 
 
 class SimpleStatsRecorder(StatsRecorderBase):
-    """Logs aggregated statistics to the console periodically."""
+    """Logs aggregated statistics fetched from StatsAggregatorActor to the console periodically."""
 
     def __init__(
         self,
-        aggregator: StatsAggregator,
+        aggregator: "StatsAggregatorHandle", # Expect Actor Handle
         console_log_interval: int = StatsConfig.CONSOLE_LOG_FREQ,
         train_config: Optional[TrainConfig] = None,
     ):
-        self.aggregator = aggregator
+        self.aggregator_handle = aggregator # Store actor handle
         self.console_log_interval = (
             max(1, console_log_interval) if console_log_interval > 0 else -1
         )
         self.train_config = train_config if train_config else TrainConfig()
         self.last_log_time: float = time.time()
-        self.summary_avg_window = self.aggregator.summary_avg_window
+        # Get summary window size from config, actor doesn't store it directly this way
+        self.summary_avg_window = StatsConfig.STATS_AVG_WINDOW[0] if StatsConfig.STATS_AVG_WINDOW else 100
         self.updates_since_last_log = 0
-        self._lock = threading.Lock()
+        self._lock = threading.Lock() # Lock for updates_since_last_log counter
         logger.info(
             f"[SimpleStatsRecorder] Initialized. Log Interval: {self.console_log_interval if self.console_log_interval > 0 else 'Disabled'} updates/episodes. Avg Window: {self.summary_avg_window}"
         )
+        # Store last known best values locally to detect changes
+        self._last_best_score = -float('inf')
+        self._last_best_vloss = float('inf')
+        self._last_best_ploss = float('inf')
+        self._last_best_mcts_time = float('inf')
+
 
     def _log_new_best(
         self,
@@ -45,132 +57,83 @@ class SimpleStatsRecorder(StatsRecorderBase):
         current_best: float,
         previous_best: float,
         step: int,
-        is_loss: bool,  # True if lower is better
+        is_loss: bool,
         is_time: bool = False,
     ):
         """Logs a new best value achieved."""
-        # Check if the current value is actually an improvement
+        # This logic remains the same, uses passed values
         improvement_made = False
-        if is_loss:  # Lower is better (losses, times)
-            if np.isfinite(current_best) and current_best < previous_best:
-                improvement_made = True
-        else:  # Higher is better (scores)
-            if np.isfinite(current_best) and current_best > previous_best:
-                improvement_made = True
+        if is_loss:
+            if np.isfinite(current_best) and current_best < previous_best: improvement_made = True
+        else:
+            if np.isfinite(current_best) and current_best > previous_best: improvement_made = True
+        if not improvement_made: return
 
-        if not improvement_made:
-            return  # Don't log if it's not better than the previous best
-
-        # Format the values
         if is_time:
             format_str = "{:.3f}s"
-            prev_str = (
-                format_str.format(previous_best)
-                if np.isfinite(previous_best) and previous_best != float("inf")
-                else "N/A"
-            )
+            prev_str = format_str.format(previous_best) if np.isfinite(previous_best) and previous_best != float("inf") else "N/A"
             current_str = format_str.format(current_best)
             prefix = "⏱️"
-        elif is_loss:  # Includes losses
+        elif is_loss:
             format_str = "{:.4f}"
-            prev_str = (
-                format_str.format(previous_best)
-                if np.isfinite(previous_best) and previous_best != float("inf")
-                else "N/A"
-            )
+            prev_str = format_str.format(previous_best) if np.isfinite(previous_best) and previous_best != float("inf") else "N/A"
             current_str = format_str.format(current_best)
             prefix = "📉"
-        else:  # Score
+        else:
             format_str = "{:.0f}"
-            prev_str = (
-                format_str.format(previous_best)
-                if np.isfinite(previous_best) and previous_best != -float("inf")
-                else "N/A"
-            )
+            prev_str = format_str.format(previous_best) if np.isfinite(previous_best) and previous_best != -float("inf") else "N/A"
             current_str = format_str.format(current_best)
             prefix = "🎮"
 
         step_info = f"at Step ~{step/1e6:.1f}M" if step > 0 else "at Start"
-        logger.info(
-            f"--- {prefix} New Best {metric_name}: {current_str} {step_info} (Prev: {prev_str}) ---"
-        )
+        logger.info(f"--- {prefix} New Best {metric_name}: {current_str} {step_info} (Prev: {prev_str}) ---")
 
     def record_episode(
         self,
-        episode_outcome: float,
+        episode_outcome: float, # These args are now less relevant as data comes from aggregator
         episode_length: int,
         episode_num: int,
         global_step: Optional[int] = None,
         game_score: Optional[int] = None,
         triangles_cleared: Optional[int] = None,
-        game_state_for_best: Optional["GameState"] = None,
+        game_state_for_best: Optional["GameState"] = None, # This arg is also less relevant
     ):
-        """Records episode stats and prints new bests to console."""
-        update_info = self.aggregator.record_episode(
-            episode_outcome,
-            episode_length,
-            episode_num,
-            global_step,
-            game_score,
-            triangles_cleared,
-            game_state_for_best,
-        )
-        current_step = (
-            global_step
-            if global_step is not None
-            else self.aggregator.storage.current_global_step
-        )
-
-        # Check for new best game score
-        if update_info.get("new_best_game"):
-            self._log_new_best(
-                "Game Score",
-                self.aggregator.storage.best_game_score,
-                self.aggregator.storage.previous_best_game_score,
-                current_step,
-                is_loss=False,  # Higher score is better
-            )
+        """Checks for new bests by fetching summary from aggregator."""
+        # This method is now primarily a trigger based on episode completion
+        # The actual recording happens via remote calls from workers
+        # We just need to check if the interval requires logging a summary
+        current_step = global_step # Use passed step if available
+        if current_step is None:
+             # Fetch step from aggregator if not passed (blocking)
+             try:
+                  step_ref = self.aggregator_handle.get_current_global_step.remote()
+                  current_step = ray.get(step_ref)
+             except Exception as e:
+                  logger.error(f"Error fetching global step from aggregator: {e}")
+                  current_step = 0 # Fallback
 
         self._check_and_log_summary(current_step)
 
-    def record_step(self, step_data: Dict[str, Any]):
-        """Records step stats and triggers console logging if interval met."""
-        update_info = self.aggregator.record_step(step_data)
-        g_step = step_data.get(
-            "global_step", self.aggregator.storage.current_global_step
-        )
 
-        # Check for new best losses and MCTS time
-        if update_info.get("new_best_value_loss"):
-            self._log_new_best(
-                "V.Loss",
-                self.aggregator.storage.best_value_loss,
-                self.aggregator.storage.previous_best_value_loss,
-                g_step,
-                is_loss=True,  # Lower loss is better
-            )
-        if update_info.get("new_best_policy_loss"):
-            self._log_new_best(
-                "P.Loss",
-                self.aggregator.storage.best_policy_loss,
-                self.aggregator.storage.previous_best_policy_loss,
-                g_step,
-                is_loss=True,  # Lower loss is better
-            )
-        if update_info.get("new_best_mcts_sim_time"):
-            self._log_new_best(
-                "MCTS Sim Time",
-                self.aggregator.storage.best_mcts_sim_time,
-                self.aggregator.storage.previous_best_mcts_sim_time,
-                g_step,
-                is_loss=True,  # Lower time is better
-                is_time=True,
-            )
+    def record_step(self, step_data: Dict[str, Any]):
+        """Checks for new bests by fetching summary from aggregator."""
+        # This method is now primarily a trigger based on step completion
+        # The actual recording happens via remote calls from workers
+        g_step = step_data.get("global_step")
+        if g_step is None:
+             # Fetch step from aggregator if not passed (blocking)
+             try:
+                  step_ref = self.aggregator_handle.get_current_global_step.remote()
+                  g_step = ray.get(step_ref)
+             except Exception as e:
+                  logger.error(f"Error fetching global step from aggregator: {e}")
+                  g_step = 0 # Fallback
 
         self._check_and_log_summary(g_step)
 
+
     def _check_and_log_summary(self, global_step: int):
-        """Checks if the logging interval is met and logs summary."""
+        """Checks if the logging interval is met and logs summary by fetching from actor."""
         log_now = False
         with self._lock:
             self.updates_since_last_log += 1
@@ -181,61 +144,90 @@ class SimpleStatsRecorder(StatsRecorderBase):
                 log_now = True
                 self.updates_since_last_log = 0
         if log_now:
-            self.log_summary(global_step)
+            self.log_summary(global_step) # Fetch data and log
 
     def get_summary(self, current_global_step: int) -> Dict[str, Any]:
-        """Gets the summary dictionary from the aggregator."""
-        return self.aggregator.get_summary(current_global_step)
+        """Gets the summary dictionary from the aggregator actor (blocking)."""
+        if not self.aggregator_handle: return {}
+        try:
+            summary_ref = self.aggregator_handle.get_summary.remote(current_global_step)
+            summary = ray.get(summary_ref)
+            return summary
+        except Exception as e:
+            logger.error(f"Error getting summary from StatsAggregatorActor: {e}")
+            return {"error": str(e)}
 
     def get_plot_data(self) -> Dict[str, Deque]:
-        """Gets the plot data deques from the aggregator."""
-        return self.aggregator.get_plot_data()
+        """Gets the plot data deques from the aggregator actor (blocking)."""
+        # Note: Returns lists, not deques, due to serialization
+        if not self.aggregator_handle: return {}
+        try:
+            plot_data_ref = self.aggregator_handle.get_plot_data.remote()
+            plot_data_list_dict = ray.get(plot_data_ref)
+            # Convert lists back to deques locally if needed by UI plotter
+            # For now, return the dict of lists as received
+            return plot_data_list_dict
+        except Exception as e:
+            logger.error(f"Error getting plot data from StatsAggregatorActor: {e}")
+            return {"error": str(e)}
 
     def log_summary(self, global_step: int):
-        """Logs the current summary statistics to the console."""
+        """Logs the current summary statistics fetched from the aggregator actor."""
         summary = self.get_summary(global_step)
-        runtime_hrs = (time.time() - self.aggregator.storage.start_time) / 3600
-        best_score = (
-            f"{summary['best_game_score']:.0f}"
-            if summary["best_game_score"] > -float("inf")
-            else "N/A"
-        )
-        avg_win = summary.get("summary_avg_window_size", "?")
+        if not summary or "error" in summary:
+             logger.error(f"Could not log summary, failed to fetch data: {summary.get('error', 'Unknown error')}")
+             return
+
+        # --- Check for New Bests ---
+        # Compare fetched best values with locally stored last known bests
+        new_best_score = summary.get("best_game_score", -float('inf'))
+        new_best_vloss = summary.get("best_value_loss", float('inf'))
+        new_best_ploss = summary.get("best_policy_loss", float('inf'))
+        new_best_mcts_time = summary.get("best_mcts_sim_time", float('inf'))
+
+        if new_best_score > self._last_best_score:
+             self._log_new_best("Game Score", new_best_score, self._last_best_score, summary.get("best_game_score_step", 0), is_loss=False)
+             self._last_best_score = new_best_score
+        if new_best_vloss < self._last_best_vloss:
+             self._log_new_best("V.Loss", new_best_vloss, self._last_best_vloss, summary.get("best_value_loss_step", 0), is_loss=True)
+             self._last_best_vloss = new_best_vloss
+        if new_best_ploss < self._last_best_ploss:
+             self._log_new_best("P.Loss", new_best_ploss, self._last_best_ploss, summary.get("best_policy_loss_step", 0), is_loss=True)
+             self._last_best_ploss = new_best_ploss
+        if new_best_mcts_time < self._last_best_mcts_time:
+             self._log_new_best("MCTS Sim Time", new_best_mcts_time, self._last_best_mcts_time, summary.get("best_mcts_sim_time_step", 0), is_loss=True, is_time=True)
+             self._last_best_mcts_time = new_best_mcts_time
+        # --- End New Best Check ---
+
+
+        runtime_hrs = (time.time() - summary.get("start_time", time.time())) / 3600
+        best_score_str = f"{new_best_score:.0f}" if new_best_score > -float("inf") else "N/A"
+        avg_win = summary.get("summary_avg_window_size", self.summary_avg_window)
         buf_size = summary.get("buffer_size", 0)
-        min_buf = self.train_config.MIN_BUFFER_SIZE_TO_TRAIN
+        min_buf = summary.get("min_buffer_size", self.train_config.MIN_BUFFER_SIZE_TO_TRAIN)
         phase = "Buffering" if buf_size < min_buf and global_step == 0 else "Training"
-        steps_sec = summary.get(
-            "steps_per_second_avg", 0.0
-        )  # Use averaged value for summary
+        steps_sec = summary.get("steps_per_second_avg", 0.0)
 
         current_game = summary.get("current_self_play_game_number", 0)
         current_game_step = summary.get("current_self_play_game_steps", 0)
-        game_prog_str = (
-            f"Game: {current_game}({current_game_step})" if current_game > 0 else ""
-        )
+        game_prog_str = f"Game: {current_game}({current_game_step})" if current_game > 0 else ""
 
-        # --- Build Log String ---
         log_items = [
             f"[{runtime_hrs:.1f}h|{phase}]",
             f"Step: {global_step/1e6:<6.2f}M ({steps_sec:.1f}/s)",
-            f"Ep: {summary['total_episodes']:<7,}".replace(",", "_"),
+            f"Ep: {summary.get('total_episodes', 0):<7,}".replace(",", "_"),
             f"Buf: {buf_size:,}/{min_buf:,}".replace(",", "_"),
-            f"Score(Avg{avg_win}): {summary['avg_game_score_window']:<6.0f} (Best: {best_score})",
+            f"Score(Avg{avg_win}): {summary.get('avg_game_score_window', 0.0):<6.0f} (Best: {best_score_str})",
         ]
 
-        # Training specific stats
         if global_step > 0 or phase == "Training":
-            log_items.extend(
-                [
-                    f"VLoss(Avg{avg_win}): {summary['value_loss']:.4f}",
-                    f"PLoss(Avg{avg_win}): {summary['policy_loss']:.4f}",
-                    f"LR: {summary['current_lr']:.1e}",
-                ]
-            )
-        else:  # Buffering phase
-            log_items.append("Loss: N/A")
+            log_items.extend([
+                f"VLoss(Avg{avg_win}): {summary.get('value_loss', 0.0):.4f}",
+                f"PLoss(Avg{avg_win}): {summary.get('policy_loss', 0.0):.4f}",
+                f"LR: {summary.get('current_lr', 0.0):.1e}",
+            ])
+        else: log_items.append("Loss: N/A")
 
-        # MCTS specific stats (show averages)
         mcts_sim_time_avg = summary.get("mcts_simulation_time_avg", 0.0)
         mcts_nn_time_avg = summary.get("mcts_nn_prediction_time_avg", 0.0)
         mcts_nodes_avg = summary.get("mcts_nodes_explored_avg", 0.0)
@@ -243,12 +235,11 @@ class SimpleStatsRecorder(StatsRecorderBase):
             mcts_str = f"MCTS(Avg{avg_win}): SimT={mcts_sim_time_avg*1000:.1f}ms | NNT={mcts_nn_time_avg*1000:.1f}ms | Nodes={mcts_nodes_avg:.0f}"
             log_items.append(mcts_str)
 
-        if game_prog_str:
-            log_items.append(game_prog_str)  # Append game progress last
+        if game_prog_str: log_items.append(game_prog_str)
 
-        # Calculate ETA if training target is set
-        if self.aggregator.storage.training_target_step > 0 and steps_sec > 0:
-            steps_remaining = self.aggregator.storage.training_target_step - global_step
+        training_target_step = summary.get("training_target_step", 0)
+        if training_target_step > 0 and steps_sec > 0:
+            steps_remaining = training_target_step - global_step
             if steps_remaining > 0:
                 eta_seconds = steps_remaining / steps_sec
                 eta_str = format_eta(eta_seconds)
@@ -258,30 +249,21 @@ class SimpleStatsRecorder(StatsRecorderBase):
         self.last_log_time = time.time()
 
     # --- No-op methods for other recording types ---
-    def record_histogram(
-        self,
-        tag: str,
-        values: Union[np.ndarray, torch.Tensor, List[float]],
-        global_step: int,
-    ):
-        pass
-
-    def record_image(
-        self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int
-    ):
-        pass
-
-    def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]):
-        pass
-
-    def record_graph(
-        self, model: torch.nn.Module, input_to_model: Optional[Any] = None
-    ):
-        pass
+    def record_histogram(self, tag: str, values: Union[np.ndarray, torch.Tensor, List[float]], global_step: int): pass
+    def record_image(self, tag: str, image: Union[np.ndarray, torch.Tensor], global_step: int): pass
+    def record_hparams(self, hparam_dict: Dict[str, Any], metric_dict: Dict[str, Any]): pass
+    def record_graph(self, model: torch.nn.Module, input_to_model: Optional[Any] = None): pass
 
     def close(self, is_cleanup: bool = False):
         # Ensure final summary is logged if interval logging is enabled
         if self.console_log_interval > 0 and self.updates_since_last_log > 0:
             logger.info("[SimpleStatsRecorder] Logging final summary before closing...")
-            self.log_summary(self.aggregator.storage.current_global_step)
+            # Fetch final step count before logging
+            final_step = 0
+            if self.aggregator_handle:
+                 try:
+                      step_ref = self.aggregator_handle.get_current_global_step.remote()
+                      final_step = ray.get(step_ref)
+                 except Exception: pass # Ignore error on close
+            self.log_summary(final_step)
         logger.info(f"[SimpleStatsRecorder] Closed (is_cleanup={is_cleanup}).")

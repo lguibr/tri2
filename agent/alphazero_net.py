@@ -1,11 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Tuple, Optional, Any, List  # Added List
-import numpy as np  # Added numpy
+from typing import Dict, Tuple, Optional, Any, List
+import numpy as np
+import ray
+import logging
 
 from config import ModelConfig, EnvConfig
 from utils.types import StateType, ActionType
+
+logger = logging.getLogger(__name__)
 
 
 class ResidualBlock(nn.Module):
@@ -150,23 +154,19 @@ class AlphaZeroNet(nn.Module):
 
         return policy_logits, value
 
-    def _prepare_state_batch(self, state_numpy_list: List[StateType]) -> StateType:
-        """Converts a list of numpy state dicts to a batched tensor state dict."""
-        device = next(self.parameters()).device
-        # Initialize structure to hold batched data for each state component
+    def _prepare_state_batch(
+        self, state_numpy_list: List[StateType], device: torch.device
+    ) -> StateType:
+        """Converts a list of numpy state dicts to a batched tensor state dict on the specified device."""
         batched_tensors = {key: [] for key in state_numpy_list[0].keys()}
-
         for state_numpy in state_numpy_list:
             for key, value in state_numpy.items():
                 if key in batched_tensors:
                     batched_tensors[key].append(value)
                 else:
-                    # This shouldn't happen if all state dicts have the same keys
-                    print(
+                    logger.warning(
                         f"Warning: Key {key} not found in initial state dict during batching."
                     )
-
-        # Convert lists of numpy arrays to batched tensors
         final_batched_states = {
             k: torch.from_numpy(np.stack(v)).to(device)
             for k, v in batched_tensors.items()
@@ -174,50 +174,81 @@ class AlphaZeroNet(nn.Module):
         return final_batched_states
 
     def predict_batch(
-        self,
-        state_numpy_list: List[
-            StateType
-        ],  # Expects list of numpy arrays from GameState
+        self, state_numpy_list: List[StateType], device: torch.device
     ) -> Tuple[List[Dict[ActionType, float]], List[float]]:
         """
         Performs batched prediction for MCTS.
-        Takes a list of state dictionaries (numpy arrays), converts to a batch tensor,
-        runs inference, applies softmax, and returns lists of policy dicts and scalar values.
         """
         if not state_numpy_list:
             return [], []
-
-        # Prepare the batch of states
-        batched_state_tensors = self._prepare_state_batch(state_numpy_list)
-
+        batched_state_tensors = self._prepare_state_batch(state_numpy_list, device)
         self.eval()
         with torch.no_grad():
             policy_logits_batch, value_batch = self.forward(batched_state_tensors)
-
-        # Process results back into lists
         policy_probs_batch = F.softmax(policy_logits_batch, dim=-1).cpu().numpy()
-        values = value_batch.squeeze(-1).cpu().numpy().tolist()  # Squeeze value output
-
+        values = value_batch.squeeze(-1).cpu().numpy().tolist()
         policy_dicts = []
         for policy_probs in policy_probs_batch:
             policy_dicts.append({i: float(prob) for i, prob in enumerate(policy_probs)})
-
         return policy_dicts, values
 
     def predict(
-        self, state_numpy: StateType  # Expects numpy arrays from GameState
+        self, state_numpy: StateType, device: torch.device
     ) -> Tuple[Dict[ActionType, float], float]:
         """
-        Convenience method for single prediction (e.g., initial root prediction).
-        Uses predict_batch internally.
+        Convenience method for single prediction.
         """
-        policy_list, value_list = self.predict_batch([state_numpy])
+        policy_list, value_list = self.predict_batch([state_numpy], device)
         return policy_list[0], value_list[0]
 
     def get_state_dict(self) -> Dict[str, Any]:
         """Returns the model's state dictionary."""
         return self.state_dict()
 
-    def load_state_dict(self, state_dict: Dict[str, Any]):
+    def load_state_dict_custom(self, state_dict: Dict[str, Any]):
         """Loads the model's state dictionary."""
         super().load_state_dict(state_dict)
+
+
+# --- Ray Actor Wrapper ---
+@ray.remote(num_cpus=0, num_gpus=1 if torch.cuda.is_available() else 0)
+class AgentPredictor:
+    """Ray actor to handle batched predictions using the AlphaZeroNet."""
+
+    def __init__(self, env_config: EnvConfig, model_config: ModelConfig.Network):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = AlphaZeroNet(env_config=env_config, model_config=model_config).to(
+            self.device
+        )
+        self.model.eval()
+        logger.info(f"[AgentPredictor] Initialized on device: {self.device}")
+
+    def predict_batch(
+        self, state_numpy_list: List[StateType]
+    ) -> Tuple[List[Dict[ActionType, float]], List[float]]:
+        """Performs batched prediction using the internal model."""
+        if not state_numpy_list:
+            return [], []
+        return self.model.predict_batch(state_numpy_list, self.device)
+
+    def get_weights(self) -> Dict[str, Any]:
+        """Returns the current model weights."""
+        return self.model.state_dict()
+
+    def set_weights(self, weights: Dict[str, Any]):
+        """Sets the model weights."""
+        self.model.load_state_dict(weights)
+        self.model.eval()
+        logger.info("[AgentPredictor] Weights updated.")
+
+    def get_param_count(self) -> int:
+        """Calculates and returns the number of trainable parameters."""
+        try:
+            return sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        except Exception as e:
+            logger.error(f"[AgentPredictor] Error calculating param count: {e}")
+            return 0
+
+    def health_check(self):
+        """Basic health check method for Ray."""
+        return "OK"
