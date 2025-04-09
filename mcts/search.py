@@ -7,15 +7,13 @@ import logging
 import torch
 import threading
 import multiprocessing as mp
-import ray  # Added Ray
+import ray
+import asyncio  # Added asyncio
 
 from environment.game_state import GameState
 from utils.types import ActionType, StateType
 from .node import MCTSNode
 from config import MCTSConfig, EnvConfig
-
-# Removed NetworkPredictor type hint, using ActorHandle now
-# from agent.alphazero_net import AgentPredictor # Import Actor type if needed for hinting
 
 logger = logging.getLogger(__name__)
 
@@ -23,36 +21,33 @@ logger = logging.getLogger(__name__)
 class MCTS:
     """Monte Carlo Tree Search implementation based on AlphaZero principles with batching."""
 
-    MCTS_NN_BATCH_SIZE = 8  # Default internal batch size for NN predictions
+    # Increase internal batch size for potentially better GPU util during self-play
+    MCTS_NN_BATCH_SIZE = 32  # Increased batch size for NN predictions within MCTS
 
     def __init__(
         self,
-        # network_predictor: NetworkPredictor, # Replaced with actor handle
-        agent_predictor: ray.actor.ActorHandle,  # Actor handle for AgentPredictor
+        agent_predictor: ray.actor.ActorHandle,
         config: Optional[MCTSConfig] = None,
         env_config: Optional[EnvConfig] = None,
         batch_size: int = MCTS_NN_BATCH_SIZE,
-        stop_event: Optional[mp.Event] = None,
+        # stop_event: Optional[mp.Event] = None, # Stop event removed
     ):
-        # self.network_predictor = network_predictor # Removed
-        self.agent_predictor = agent_predictor  # Store actor handle
+        self.agent_predictor = agent_predictor
         self.config = config if config else MCTSConfig()
         self.env_config = env_config if env_config else EnvConfig()
         self.batch_size = max(1, batch_size)
-        self.stop_event = stop_event
+        # self.stop_event = stop_event # Removing stop_event check from MCTS itself
         self.log_prefix = "[MCTS]"
         logger.info(
             f"{self.log_prefix} Initialized with AgentPredictor actor. NN batch size: {self.batch_size}"
         )
 
     def _select_leaf(self, root_node: MCTSNode) -> Tuple[MCTSNode, int]:
-        """Selects a leaf node using PUCT criteria, checking stop_event."""
+        """Selects a leaf node using PUCT criteria."""
         node = root_node
         depth = 0
         while node.is_expanded and not node.is_terminal:
-            if self.stop_event and self.stop_event.is_set():
-                raise InterruptedError("MCTS selection interrupted.")
-
+            # Removed stop_event check here
             if depth >= self.config.MAX_SEARCH_DEPTH:
                 break
             if not node.children:
@@ -69,21 +64,17 @@ class MCTS:
 
         return node, depth
 
-    def _expand_and_backpropagate_batch(
+    async def _expand_and_backpropagate_batch(  # Made async
         self, nodes_to_expand: List[MCTSNode]
     ) -> Tuple[float, int]:
         """
         Expands a batch of leaf nodes using batched NN prediction via Ray actor and backpropagates results.
-        Checks stop_event more frequently.
         Returns (total_nn_prediction_time, nodes_created_count).
         """
         if not nodes_to_expand:
             return 0.0, 0
 
-        if self.stop_event and self.stop_event.is_set():
-            raise InterruptedError(
-                "MCTS expansion interrupted by stop event (before NN)."
-            )
+        # Removed stop_event check here
 
         batch_states = [node.game_state.get_state() for node in nodes_to_expand]
         total_nn_prediction_time = 0.0
@@ -95,7 +86,8 @@ class MCTS:
             start_pred_time = time.monotonic()
             # --- Call the AgentPredictor actor ---
             prediction_ref = self.agent_predictor.predict_batch.remote(batch_states)
-            policy_probs_list, predicted_values = ray.get(prediction_ref)
+            # Use await instead of ray.get()
+            policy_probs_list, predicted_values = await prediction_ref
             # --- End Actor Call ---
             total_nn_prediction_time = time.monotonic() - start_pred_time
             logger.debug(
@@ -108,8 +100,7 @@ class MCTS:
             )
             # Backpropagate 0 if NN fails, mark as expanded to avoid re-selection
             for node in nodes_to_expand:
-                if self.stop_event and self.stop_event.is_set():
-                    break
+                # Removed stop_event check here
                 if not node.is_expanded:
                     node.is_expanded = True
                     node.backpropagate(0.0)
@@ -121,24 +112,16 @@ class MCTS:
             )
             # Backpropagate 0 if NN fails, mark as expanded to avoid re-selection
             for node in nodes_to_expand:
-                if self.stop_event and self.stop_event.is_set():
-                    break
+                # Removed stop_event check here
                 if not node.is_expanded:
                     node.is_expanded = True
                     node.backpropagate(0.0)
             return total_nn_prediction_time, 0
 
-        if self.stop_event and self.stop_event.is_set():
-            raise InterruptedError(
-                "MCTS expansion interrupted by stop event (after NN)."
-            )
+        # Removed stop_event check here
 
         for i, node in enumerate(nodes_to_expand):
-            if self.stop_event and self.stop_event.is_set():
-                logger.info(
-                    f"{self.log_prefix} Stop event detected during batch expansion processing."
-                )
-                break
+            # Removed stop_event check here
 
             if node.is_expanded or node.is_terminal:
                 if node.visit_count == 0:
@@ -164,16 +147,10 @@ class MCTS:
             parent_state = node.game_state
             start_expand_time = time.monotonic()
             for action in valid_actions:
-                if self.stop_event and self.stop_event.is_set():
-                    logger.info(
-                        f"{self.log_prefix} Stop event detected during child creation loop for node {id(node)}."
-                    )
-                    if not node.is_expanded:
-                        node.is_expanded = True
-                        node.backpropagate(predicted_value)
-                    break
+                # Removed stop_event check here
 
                 try:
+                    # Creating child state remains synchronous
                     child_state = GameState()
                     child_state.grid = parent_state.grid.deepcopy_grid()
                     child_state.shapes = [
@@ -207,51 +184,25 @@ class MCTS:
                     )
                     continue
 
-            if self.stop_event and self.stop_event.is_set():
-                logger.info(
-                    f"{self.log_prefix} Stop event detected after child creation loop for node {id(node)}."
-                )
-                if not node.is_expanded:
-                    node.is_expanded = True
-                    node.backpropagate(predicted_value)
-                break
+            # Removed stop_event check here
 
             expand_duration = time.monotonic() - start_expand_time
             node.is_expanded = True
             nodes_created_count += children_created_count_node
 
-            if self.stop_event and self.stop_event.is_set():
-                logger.info(
-                    f"{self.log_prefix} Stop event detected before backpropagation for node {id(node)}."
-                )
-                break
+            # Removed stop_event check here
             node.backpropagate(predicted_value)
 
         return total_nn_prediction_time, nodes_created_count
 
-    # run_simulations, _add_dirichlet_noise, get_policy_target, choose_action remain largely the same
-    # but they now rely on _expand_and_backpropagate_batch which uses the Ray actor.
-
-    def run_simulations(
+    async def run_simulations(  # Made async
         self, root_state: GameState, num_simulations: int
     ) -> Tuple[MCTSNode, Dict[str, Any]]:
         """
-        Runs the MCTS process for a given number of simulations using batching.
+        Runs the MCTS process for a given number of simulations using batching (async).
         Returns the root node and a dictionary of simulation statistics.
-        Handles InterruptedError from stop_event checks.
         """
-        if self.stop_event and self.stop_event.is_set():
-            logger.warning(
-                f"{self.log_prefix} Stop event set before starting simulations."
-            )
-            return MCTSNode(game_state=root_state, config=self.config), {
-                "simulations_run": 0,
-                "mcts_total_duration": 0.0,
-                "total_nn_prediction_time": 0.0,
-                "nodes_created": 1,
-                "avg_leaf_depth": 0.0,
-                "root_visits": 0,
-            }
+        # Removed stop_event check here
 
         root_node = MCTSNode(game_state=root_state, config=self.config)
         sim_start_time = time.monotonic()
@@ -276,10 +227,10 @@ class MCTS:
 
         try:
             if not root_node.is_expanded:
-                if self.stop_event and self.stop_event.is_set():
-                    raise InterruptedError("Stop event before initial root expansion.")
+                # Removed stop_event check here
+                # Await the async batch expansion
                 initial_batch_time, initial_nodes_created = (
-                    self._expand_and_backpropagate_batch([root_node])
+                    await self._expand_and_backpropagate_batch([root_node])
                 )
                 total_nn_prediction_time += initial_batch_time
                 nodes_created_this_run += initial_nodes_created
@@ -292,11 +243,7 @@ class MCTS:
 
             for sim_num in range(simulations_run_attempted, num_simulations):
                 simulations_run_attempted += 1
-                if self.stop_event and self.stop_event.is_set():
-                    logger.info(
-                        f"{self.log_prefix} Stop event detected before simulation {sim_num+1}. Stopping MCTS."
-                    )
-                    break
+                # Removed stop_event check here
 
                 sim_start_step = time.monotonic()
                 leaf_node, depth = self._select_leaf(root_node)
@@ -316,32 +263,31 @@ class MCTS:
                     or sim_num == num_simulations - 1
                 ):
                     if leaves_to_expand:
-                        if self.stop_event and self.stop_event.is_set():
-                            logger.info(
-                                f"{self.log_prefix} Stop event detected before expanding batch."
-                            )
-                            break
+                        # Removed stop_event check here
 
+                        # Await the async batch expansion
                         batch_nn_time, batch_nodes_created = (
-                            self._expand_and_backpropagate_batch(leaves_to_expand)
+                            await self._expand_and_backpropagate_batch(leaves_to_expand)
                         )
                         total_nn_prediction_time += batch_nn_time
                         nodes_created_this_run += batch_nodes_created
                         simulations_completed_full += len(leaves_to_expand)
                         leaves_to_expand = []
 
-            if leaves_to_expand and not (self.stop_event and self.stop_event.is_set()):
+            # Removed stop_event check here
+            if leaves_to_expand:
                 logger.info(
                     f"{self.log_prefix} Processing remaining {len(leaves_to_expand)} leaves after loop exit."
                 )
+                # Await the async batch expansion
                 batch_nn_time, batch_nodes_created = (
-                    self._expand_and_backpropagate_batch(leaves_to_expand)
+                    await self._expand_and_backpropagate_batch(leaves_to_expand)
                 )
                 total_nn_prediction_time += batch_nn_time
                 nodes_created_this_run += batch_nodes_created
                 simulations_completed_full += len(leaves_to_expand)
 
-        except InterruptedError as e:
+        except InterruptedError as e:  # This might not be reachable now
             logger.warning(f"{self.log_prefix} MCTS run interrupted gracefully: {e}")
         except Exception as e:
             logger.error(

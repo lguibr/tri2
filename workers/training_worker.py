@@ -1,4 +1,3 @@
-# File: workers/training_worker.py
 import threading
 import time
 import queue
@@ -65,6 +64,7 @@ class TrainingWorker:
 
         self.steps_done = 0
         self._stop_requested = False
+        # self._qsize_type_error_logged = False # No longer needed
 
         logger.info(
             f"{self.log_prefix} Initialized as Ray Actor. Device: {self.device}."
@@ -143,18 +143,23 @@ class TrainingWorker:
                     if key in states and isinstance(value, np.ndarray):
                         temp_state[key] = value
                     else:
+                        # Allow missing 'death_mask' initially, handle in network if needed
                         if key == "death_mask" and key not in states:
+                            pass  # Network should handle missing keys if designed for it
+                        elif key not in states:
                             logger.warning(
-                                f"{self.log_prefix} State dict missing expected 'death_mask' key initially."
+                                f"{self.log_prefix} Skipping unexpected state key: {key}"
                             )
-                        elif key != "death_mask":
+                            continue  # Skip unknown keys
+                        elif not isinstance(value, np.ndarray):
                             logger.warning(
-                                f"{self.log_prefix} Skipping invalid item in batch (invalid state key/value: {key}, type: {type(value)})."
+                                f"{self.log_prefix} Skipping invalid item in batch (invalid state value type for {key}: {type(value)})."
                             )
                             valid_state = False
                             break
-                        else:
-                            temp_state[key] = value
+                        else:  # Key exists but value is wrong type (shouldn't happen with check above)
+                            temp_state[key] = value  # Should already be handled
+
                 if not valid_state:
                     continue
 
@@ -177,15 +182,26 @@ class TrainingWorker:
                 if valid_policy_entries > 0 and not np.isclose(
                     policy_sum, 1.0, atol=1e-4
                 ):
-                    logger.warning(
-                        f"{self.log_prefix} Policy target sum is {policy_sum:.4f}, expected ~1.0. Using as is."
-                    )
+                    # This warning might be noisy if MCTS policy isn't perfectly normalized
+                    # logger.warning(f"{self.log_prefix} Policy target sum is {policy_sum:.4f}, expected ~1.0. Using as is.")
+                    pass
 
+                # Ensure all expected keys are present before appending
+                all_keys_present = True
                 for key in states.keys():
+                    if key not in temp_state:
+                        # Handle missing keys, e.g., fill with zeros or skip item
+                        logger.warning(
+                            f"{self.log_prefix} Skipping item missing state key: {key}"
+                        )
+                        all_keys_present = False
+                        break
                     states[key].append(temp_state[key])
-                policy_targets.append(policy_array)
-                value_targets.append(outcome)
-                valid_items += 1
+
+                if all_keys_present:
+                    policy_targets.append(policy_array)
+                    value_targets.append(outcome)
+                    valid_items += 1
 
             if valid_items == 0:
                 logger.error(f"{self.log_prefix} No valid items found in the batch.")
@@ -302,8 +318,13 @@ class TrainingWorker:
         buffer_update_interval = 1.0
 
         while not self._stop_requested:
-            # Call qsize() directly, assume it returns int
-            buffer_size = self.experience_queue.qsize()
+            # Call qsize() directly, accepting potential blocking warning
+            buffer_size = 0  # Default
+            try:
+                buffer_size = self.experience_queue.qsize()
+            except Exception as e:
+                logger.error(f"{self.log_prefix} Error getting qsize: {e}")
+                buffer_size = 0  # Fallback
 
             if buffer_size < self.train_config.MIN_BUFFER_SIZE_TO_TRAIN:
                 if time.time() - last_buffer_update_time > buffer_update_interval:
@@ -372,8 +393,14 @@ class TrainingWorker:
                 iter_policy_loss += step_result["policy_loss"]
                 iter_value_loss += step_result["value_loss"]
 
-                # Call qsize() directly, assume it returns int
-                current_buffer_size = self.experience_queue.qsize()
+                # Call qsize() directly
+                current_buffer_size = -1  # Default error value
+                try:
+                    current_buffer_size = self.experience_queue.qsize()
+                except Exception as e:
+                    logger.error(f"{self.log_prefix} Error getting step qsize: {e}")
+                    current_buffer_size = -1
+
                 step_stats = {
                     "global_step": self.steps_done,
                     "buffer_size": current_buffer_size,

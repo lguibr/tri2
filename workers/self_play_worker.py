@@ -1,3 +1,4 @@
+# File: workers/self_play_worker.py
 import threading
 import time
 import queue
@@ -59,6 +60,7 @@ class SelfPlayWorker:
         self.max_game_steps = max_game_steps if max_game_steps else float("inf")
         self.log_prefix = f"[SelfPlayWorker-{self.worker_id}]"
         self.last_intermediate_stats_time = 0.0
+        # self._qsize_type_error_logged = False # No longer needed
 
         self._current_render_state_dict: Optional[StateType] = None
         self._last_stats: Dict[str, Any] = {
@@ -159,8 +161,14 @@ class SelfPlayWorker:
         self._update_render_state(game, {"status": "Starting", "game_steps": 0})
 
         # Initial Stats Update (Async)
-        # Call qsize() directly, assume it returns int (based on error)
-        buffer_size = self.experience_queue.qsize()
+        # Call qsize() directly, accepting potential blocking warning
+        buffer_size = 0  # Default
+        try:
+            buffer_size = self.experience_queue.qsize()
+        except Exception as e:
+            logger.error(f"{self.log_prefix} Error getting initial qsize: {e}")
+            buffer_size = 0  # Fallback
+
         recording_step = {
             "current_self_play_game_number": current_game_num,
             "current_self_play_game_steps": 0,
@@ -189,8 +197,16 @@ class SelfPlayWorker:
                 self._update_render_state(
                     game, {"status": "Running", "game_steps": game_steps}
                 )
-                # Call qsize() directly, assume it returns int
-                buffer_size = self.experience_queue.qsize()
+                # Call qsize() directly
+                buffer_size = 0  # Default
+                try:
+                    buffer_size = self.experience_queue.qsize()
+                except Exception as e:
+                    logger.error(
+                        f"{self.log_prefix} Error getting intermediate qsize: {e}"
+                    )
+                    buffer_size = 0  # Fallback
+
                 recording_step = {
                     "current_self_play_game_number": current_game_num,
                     "current_self_play_game_steps": game_steps,
@@ -201,7 +217,8 @@ class SelfPlayWorker:
 
             mcts_start_time = time.monotonic()
             try:
-                root_node, mcts_stats = self.mcts.run_simulations(
+                # Await the now async MCTS call
+                root_node, mcts_stats = await self.mcts.run_simulations(
                     root_state=game, num_simulations=self.mcts_config.NUM_SIMULATIONS
                 )
             except Exception as mcts_err:
@@ -251,8 +268,14 @@ class SelfPlayWorker:
             game_steps += 1
 
             # Record MCTS Stats (Async Fire-and-forget)
-            # Call qsize() directly, assume it returns int
-            buffer_size = self.experience_queue.qsize()
+            # Call qsize() directly
+            buffer_size = 0  # Default
+            try:
+                buffer_size = self.experience_queue.qsize()
+            except Exception as e:
+                logger.error(f"{self.log_prefix} Error getting step qsize: {e}")
+                buffer_size = 0  # Fallback
+
             step_stats_for_aggregator = {
                 "mcts_sim_time": mcts_stats.get("mcts_total_duration", 0.0),
                 "mcts_nn_time": mcts_stats.get("total_nn_prediction_time", 0.0),
@@ -322,8 +345,16 @@ class SelfPlayWorker:
                             processed_data, timeout=1.0
                         )
                         q_put_duration = time.monotonic() - q_put_start
-                        # Call qsize() directly, assume it returns int
-                        qsize = self.experience_queue.qsize()
+                        # Call qsize() directly
+                        qsize = -1  # Default error value
+                        try:
+                            qsize = self.experience_queue.qsize()
+                        except Exception as e:
+                            logger.error(
+                                f"{self.log_prefix} Error getting post-put qsize: {e}"
+                            )
+                            qsize = -1
+
                         logger.debug(
                             f"{self.log_prefix} Added game data to queue (qsize: {qsize}) in {q_put_duration:.4f}s."
                         )

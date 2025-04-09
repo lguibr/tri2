@@ -41,26 +41,28 @@ from .constants import (
 class MCTSConfig:
     """Configuration parameters for the Monte Carlo Tree Search."""
 
-    PUCT_C: float = 1.25  # Slightly lower exploration emphasis
-    NUM_SIMULATIONS: int = 25  # Significantly reduced simulations per move
+    PUCT_C: float = 1.25
+    NUM_SIMULATIONS: int = 150  # Substantial simulations for better policy
     TEMPERATURE_INITIAL: float = 1.0
-    TEMPERATURE_FINAL: float = 0.1  # Anneal faster
-    TEMPERATURE_ANNEAL_STEPS: int = 15  # Anneal over fewer steps
+    TEMPERATURE_FINAL: float = 0.1
+    TEMPERATURE_ANNEAL_STEPS: int = 20  # Anneal over a reasonable number of steps
     DIRICHLET_ALPHA: float = 0.3
     DIRICHLET_EPSILON: float = 0.25
-    MAX_SEARCH_DEPTH: int = 50  # Reduced max depth
+    MAX_SEARCH_DEPTH: int = 40
 
 
 class VisConfig:
-    NUM_ENVS_TO_RENDER = 2  # Reduced to match NUM_SELF_PLAY_WORKERS
-    FPS = 30  # Limit FPS for smoother UI during short runs
+    # Render fewer envs to save performance during serious training
+    NUM_ENVS_TO_RENDER = 4
+    FPS = 60
     SCREEN_WIDTH = 1600
     SCREEN_HEIGHT = 900
-    VISUAL_STEP_DELAY = 0.00  # Keep at 0 for workers
+    VISUAL_STEP_DELAY = 0.00
     LEFT_PANEL_RATIO = 0.5
     ENV_SPACING = 2
     ENV_GRID_PADDING = 1
 
+    # Colors remain the same
     WHITE = WHITE
     BLACK = BLACK
     LIGHTG = LIGHTG
@@ -96,6 +98,7 @@ class VisConfig:
 
 
 class EnvConfig:
+    # Environment definition remains the same
     ROWS = 8
     COLS = 15
     GRID_FEATURES_PER_CELL = 2
@@ -121,13 +124,13 @@ class EnvConfig:
         return self.NUM_SHAPE_SLOTS * (self.ROWS * self.COLS)
 
 
-class RNNConfig:
+class RNNConfig:  # Keep disabled
     USE_RNN = False
     LSTM_HIDDEN_SIZE = 256
     LSTM_NUM_LAYERS = 2
 
 
-class TransformerConfig:
+class TransformerConfig:  # Keep disabled
     USE_TRANSFORMER = False
     TRANSFORMER_D_MODEL = 256
     TRANSFORMER_NHEAD = 8
@@ -140,20 +143,23 @@ class TransformerConfig:
 class TrainConfig:
     """Configuration parameters for the Training Worker."""
 
-    CHECKPOINT_SAVE_FREQ = 200  # Save more frequently for short runs
+    CHECKPOINT_SAVE_FREQ = 1000  # Save every 10k training steps
     LOAD_CHECKPOINT_PATH: Optional[str] = None
-    NUM_SELF_PLAY_WORKERS: int = 2# Reduced workers
-    BATCH_SIZE: int = 64  # Smaller batch size
-    LEARNING_RATE: float = 3e-4  # Slightly higher LR might help faster convergence
-    WEIGHT_DECAY: float = 1e-5
-    NUM_TRAINING_STEPS_PER_ITER: int = 20  # Fewer training steps per iteration
-    MIN_BUFFER_SIZE_TO_TRAIN: int = 200  # Start training sooner
-    BUFFER_CAPACITY: int = 2000  # Smaller buffer
+    # --- Worker Configuration ---
+    # Adjust based on your CPU cores (e.g., num_cores - 2)
+    NUM_SELF_PLAY_WORKERS: int = 12
+    # --------------------------
+    BATCH_SIZE: int = 256  # Larger batch size for stable gradients (monitor VRAM)
+    LEARNING_RATE: float = 3e-4  # Initial learning rate
+    WEIGHT_DECAY: float = 1e-4  # Regularization
+    NUM_TRAINING_STEPS_PER_ITER: int = 100  # Train more per iteration
+    MIN_BUFFER_SIZE_TO_TRAIN: int = 5_000  # Ensure sufficient diverse data
+    BUFFER_CAPACITY: int = 100_000  # Larger buffer for more experience diversity
     POLICY_LOSS_WEIGHT: float = 1.0
     VALUE_LOSS_WEIGHT: float = 1.0
     USE_LR_SCHEDULER: bool = True
     SCHEDULER_TYPE: str = "CosineAnnealingLR"
-    SCHEDULER_T_MAX: int = 5000  # Reduced scheduler cycle for faster testing
+    SCHEDULER_T_MAX: int = 100000  # Corresponds to ~1M training steps cycle
     SCHEDULER_ETA_MIN: float = 1e-6
 
 
@@ -164,27 +170,30 @@ class ModelConfig:
         WIDTH = _env_cfg_instance.COLS
         del _env_cfg_instance
 
-        CONV_CHANNELS = [16, 32]  # Reduced channels
+        # Deeper and wider network
+        CONV_CHANNELS = [128, 256, 256]  # Added a third conv stage
         CONV_KERNEL_SIZE = 3
         CONV_STRIDE = 1
         CONV_PADDING = 1
         CONV_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_CONV = True
-        SHAPE_FEATURE_MLP_DIMS = [32]  # Reduced MLP dims
+        NUM_RESIDUAL_BLOCKS = 3  # More residual blocks per stage
+        SHAPE_FEATURE_MLP_DIMS = [256]  # Larger MLP
         SHAPE_MLP_ACTIVATION = torch.nn.ReLU
-        COMBINED_FC_DIMS = [64]  # Reduced FC dims
+        COMBINED_FC_DIMS = [512, 512, 256]  # Deeper/wider FC layers
         COMBINED_ACTIVATION = torch.nn.ReLU
         USE_BATCHNORM_FC = True
-        DROPOUT_FC = 0.1
+        DROPOUT_FC = 0.3  # Increased dropout for larger network
 
 
 class StatsConfig:
-    STATS_AVG_WINDOW: List[int] = [50, 200]  # Smaller windows for faster feedback
-    CONSOLE_LOG_FREQ = 50  # Log more frequently
-    PLOT_DATA_WINDOW = 1000  # Reduced plot window
+    STATS_AVG_WINDOW: List[int] = [10,50,100,500,1000, 5000]  # Average over more steps/episodes
+    CONSOLE_LOG_FREQ = 1000  # Log every 1000 updates (steps or episodes)
+    PLOT_DATA_WINDOW = 50000  # See longer trends
 
 
 class DemoConfig:
+    # Demo config remains the same
     BACKGROUND_COLOR = (10, 10, 20)
     SELECTED_SHAPE_HIGHLIGHT_COLOR = BLUE
     HUD_FONT_SIZE = 24

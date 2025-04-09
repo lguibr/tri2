@@ -1,3 +1,4 @@
+# File: agent/alphazero_net.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,7 +7,10 @@ import numpy as np
 import ray
 import logging
 
-from config import ModelConfig, EnvConfig
+# Import config classes individually to avoid circular import via config/__init__.py
+from config.core import EnvConfig
+from config.core import ModelConfig as CoreModelConfig  # Use alias
+
 from utils.types import StateType, ActionType
 
 logger = logging.getLogger(__name__)
@@ -44,15 +48,20 @@ class AlphaZeroNet(nn.Module):
     def __init__(
         self,
         env_config: Optional[EnvConfig] = None,
-        model_config: Optional[ModelConfig.Network] = None,
+        model_config: Optional[CoreModelConfig.Network] = None,  # Use aliased type hint
     ):
         super().__init__()
         self.env_cfg = env_config if env_config else EnvConfig()
-        self.model_cfg = model_config if model_config else ModelConfig.Network()
+        self.model_cfg = (
+            model_config if model_config else CoreModelConfig.Network()
+        )  # Use aliased config
 
         # --- Input Processing Layers ---
         grid_input_channels = self.env_cfg.GRID_STATE_SHAPE[0]
         conv_channels = self.model_cfg.CONV_CHANNELS
+        num_res_blocks = (
+            self.model_cfg.NUM_RESIDUAL_BLOCKS
+        )  # Get number of blocks from config
         current_channels = grid_input_channels
         conv_layers = []
         for out_channels in conv_channels:
@@ -69,8 +78,9 @@ class AlphaZeroNet(nn.Module):
             if self.model_cfg.USE_BATCHNORM_CONV:
                 conv_layers.append(nn.BatchNorm2d(out_channels))
             conv_layers.append(self.model_cfg.CONV_ACTIVATION())
-            # Add ResidualBlock *after* activation
-            conv_layers.append(ResidualBlock(out_channels))
+            # Add specified number of ResidualBlocks *after* activation
+            for _ in range(num_res_blocks):
+                conv_layers.append(ResidualBlock(out_channels))
             current_channels = out_channels
         self.conv_backbone = nn.Sequential(*conv_layers)
 
@@ -215,7 +225,9 @@ class AlphaZeroNet(nn.Module):
 class AgentPredictor:
     """Ray actor to handle batched predictions using the AlphaZeroNet."""
 
-    def __init__(self, env_config: EnvConfig, model_config: ModelConfig.Network):
+    def __init__(
+        self, env_config: EnvConfig, model_config: CoreModelConfig.Network
+    ):  # Use aliased config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = AlphaZeroNet(env_config=env_config, model_config=model_config).to(
             self.device

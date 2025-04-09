@@ -44,24 +44,19 @@ class AggregatorLogic:
                 self.storage.best_game_score_step = current_step
                 self.storage.best_game_score_history.append(game_score)
                 update_info["new_best_game"] = True
-                # Store best game state data if provided (now expects state dict)
                 if game_state_for_best and isinstance(game_state_for_best, dict):
                     self.storage.best_game_state_data = {
                         "score": game_score,
                         "step": current_step,
-                        "game_state_dict": game_state_for_best,  # Store the state dict directly
+                        "game_state_dict": game_state_for_best,
                     }
-                elif game_state_for_best:  # Log warning if wrong type passed
+                elif game_state_for_best:
                     logger.warning(
                         f"Received game_state_for_best of type {type(game_state_for_best)}, expected dict. Skipping storage."
                     )
-                    self.storage.best_game_state_data = (
-                        None  # Clear previous best if new best has invalid state
-                    )
+                    self.storage.best_game_state_data = None
                 else:
-                    self.storage.best_game_state_data = (
-                        None  # Clear if no state provided for new best
-                    )
+                    self.storage.best_game_state_data = None
 
             elif self.storage.best_game_score > -float("inf"):
                 self.storage.best_game_score_history.append(
@@ -72,7 +67,6 @@ class AggregatorLogic:
             self.storage.episode_triangles_cleared.append(triangles_cleared)
             self.storage.total_triangles_cleared += triangles_cleared
 
-        # Update best outcome (less relevant now)
         if episode_outcome > self.storage.best_outcome:
             self.storage.previous_best_outcome = self.storage.best_outcome
             self.storage.best_outcome = episode_outcome
@@ -99,14 +93,10 @@ class AggregatorLogic:
 
         # --- Log Global Step Update ---
         # Use INFO level as requested
-        logger.info(
-            f"[AggLogic] update_step_stats called. Incoming g_step: {g_step}, Stored step before update: {self.storage.current_global_step}"
-        )
+        # logger.info(f"[AggLogic] update_step_stats called. Incoming g_step: {g_step}, Stored step before update: {self.storage.current_global_step}")
         if g_step > self.storage.current_global_step:
             self.storage.current_global_step = g_step
-            logger.info(
-                f"[AggLogic] Updated storage.current_global_step to: {self.storage.current_global_step}"
-            )
+            # logger.info(f"[AggLogic] Updated storage.current_global_step to: {self.storage.current_global_step}")
         # --- End Log ---
 
         # Training Stats
@@ -149,6 +139,9 @@ class AggregatorLogic:
             self.storage.mcts_nn_prediction_times.append(mcts_nn_time)
         if mcts_nodes_explored is not None and np.isfinite(mcts_nodes_explored):
             self.storage.mcts_nodes_explored.append(mcts_nodes_explored)
+            self.storage.total_mcts_nodes_explored += (
+                mcts_nodes_explored  # Accumulate total nodes
+            )
         if mcts_avg_depth is not None and np.isfinite(mcts_avg_depth):
             self.storage.mcts_avg_depths.append(mcts_avg_depth)
 
@@ -158,7 +151,9 @@ class AggregatorLogic:
             self.storage.buffer_sizes.append(buffer_size)
             self.storage.current_buffer_size = buffer_size
 
+        # Update Rates
         self.storage.update_steps_per_second(g_step)
+        self.storage.update_nodes_per_second()  # Call new method
 
         # Intermediate Progress
         current_game = step_data.get("current_self_play_game_number")
@@ -221,6 +216,11 @@ class AggregatorLogic:
         )
         summary["steps_per_second_avg"] = self._calculate_average(
             self.storage.steps_per_second, avg_window
+        )
+        summary["nodes_per_second_avg"] = (
+            self._calculate_average(  # Added nodes/sec avg
+                self.storage.nodes_per_second, avg_window
+            )
         )
 
         summary["best_game_score"] = self.storage.best_game_score
