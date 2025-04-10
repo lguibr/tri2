@@ -1,7 +1,11 @@
+# File: requirements.txt
 pygame>=2.1.0
 numpy>=1.20.0
 torch>=1.10.0
-tensorboard
-cloudpickle
-torchvision
-matplotlib
+torchvision>=0.11.0 # Added for potential NN architectures
+cloudpickle>=2.0.0 # For state persistence
+numba>=0.55.0 # For grid performance
+mlflow>=1.20.0 # Added for experiment tracking and artifact storage
+matplotlib>=3.5.0 # Added for advanced plotting
+ray>=2.8.0 # Added for parallelization
+pydantic>=2.0.0 # Added for data validation and schemas

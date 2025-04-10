@@ -1,6 +1,5 @@
-__pycache__
-checkpoints
-logs
-venv
-.DS_Store
-fonts
+venv/
+.venv/
+.resumed.txt
+__pycache__/
+.alphatriangle_data/
