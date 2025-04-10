@@ -1,5 +1,4 @@
 # File: run_training_headless.py
-# File: run_training_headless.py
 import sys
 import os
 import logging
@@ -17,12 +16,16 @@ if src_dir not in sys.path:
 # Updated imports
 from src import config, utils, nn, data
 from src.rl import TrainingOrchestrator, ExperienceBuffer, Trainer
-from src.mcts import MCTSConfig # Import Pydantic MCTSConfig
+from src.mcts import MCTSConfig  # Import Pydantic MCTSConfig
 from src.stats import StatsCollectorActor
 
 # --- Configuration ---
 LOG_LEVEL = logging.INFO
-logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
@@ -41,20 +44,30 @@ if __name__ == "__main__":
         train_config = config.TrainConfig()
         env_config = config.EnvConfig()
         model_config = config.ModelConfig()
-        mcts_config = MCTSConfig() # Instantiate Pydantic model
+        mcts_config = MCTSConfig()  # Instantiate Pydantic model
         persist_config = config.PersistenceConfig()
 
         # --- Configuration Overrides ---
-        persist_config.RUN_NAME = train_config.RUN_NAME # Ensure RUN_NAME is consistent
+        persist_config.RUN_NAME = train_config.RUN_NAME  # Ensure RUN_NAME is consistent
         # Example: train_config.LOAD_CHECKPOINT_PATH = ".alphatriangle_data/runs/<PREVIOUS_RUN_NAME>/checkpoints/latest.pkl"
 
-        # --- Set MLflow Tracking URI ---
+        # --- Setup MLflow Tracking ---
+        # Get the absolute OS path first
+        mlflow_abs_path = persist_config.get_mlflow_abs_path()
+        # Create the directory using the OS path
+        os.makedirs(mlflow_abs_path, exist_ok=True)
+        logger.info(f"Ensured MLflow directory exists: {mlflow_abs_path}")
+        # Get the correctly formatted file URI
         mlflow_tracking_uri = persist_config.MLFLOW_TRACKING_URI
-        os.makedirs(os.path.dirname(mlflow_tracking_uri.replace("file:", "")), exist_ok=True)
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         logger.info(f"Set MLflow tracking URI to: {mlflow_tracking_uri}")
 
-        config.print_config_info_and_validate(mcts_config) # Pass Pydantic instance
+        # --- Set Experiment (creates if not exists) ---
+        experiment_name = config.APP_NAME  # Use app name from config
+        mlflow.set_experiment(experiment_name)
+        logger.info(f"Set MLflow experiment to: {experiment_name}")
+
+        config.print_config_info_and_validate(mcts_config)  # Pass Pydantic instance
 
         # --- Setup ---
         utils.set_random_seeds(train_config.RANDOM_SEED)
@@ -82,9 +95,9 @@ if __name__ == "__main__":
             stats_collector_actor=stats_collector_actor,
             train_config=train_config,
             env_config=env_config,
-            mcts_config=mcts_config, # Pass Pydantic instance
+            mcts_config=mcts_config,  # Pass Pydantic instance
             persist_config=persist_config,
-            visual_state_queue=None, # No visualization
+            visual_state_queue=None,  # No visualization
         )
 
         # --- Run Training ---
@@ -99,7 +112,7 @@ if __name__ == "__main__":
                 mlflow.log_param("training_status", "FAILED")
                 mlflow.log_param("error_message", str(e))
             except Exception as mlf_err:
-                 logger.error(f"Failed to log error status to MLflow: {mlf_err}")
+                logger.error(f"Failed to log error status to MLflow: {mlf_err}")
         sys.exit(1)
 
     finally:
@@ -117,13 +130,13 @@ if __name__ == "__main__":
 
             # --- Force Save Final State ---
             logger.info("Attempting to save final training state...")
-            orchestrator.save_final_state() # Calls DataManager internally
+            orchestrator.save_final_state()  # Calls DataManager internally
 
             # --- Perform Orchestrator Cleanup (kills actors) ---
             orchestrator._final_cleanup()
         elif "e" in locals() and isinstance(e, Exception):
-             final_status = "FAILED"
-             error_msg = str(e)
+            final_status = "FAILED"
+            error_msg = str(e)
 
         logger.info(f"Final Training Status: {final_status}")
 

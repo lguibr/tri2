@@ -1,7 +1,8 @@
-# File: src/config/persistence_config.py
 from typing import Optional
 import os
+from pathlib import Path  # Import pathlib
 from pydantic import BaseModel, Field, computed_field
+
 
 class PersistenceConfig(BaseModel):
     """Configuration for saving/loading artifacts (Pydantic model)."""
@@ -29,20 +30,23 @@ class PersistenceConfig(BaseModel):
     SAVE_BUFFER: bool = Field(True)
     BUFFER_SAVE_FREQ_STEPS: int = Field(10, ge=1)
 
-    @computed_field # type: ignore[misc]
+    @computed_field  # type: ignore[misc]
     @property
     def MLFLOW_TRACKING_URI(self) -> str:
-        """Constructs the file URI for MLflow tracking."""
-        # Ensure the path is absolute for MLflow
-        abs_path = os.path.abspath(os.path.join(self.ROOT_DATA_DIR, self.MLFLOW_DIR_NAME))
-        # Replace backslashes with forward slashes for file URI compatibility on Windows
-        uri_path = abs_path.replace(os.sep, '/')
-        # Ensure the URI starts with file:///
-        if not uri_path.startswith('/'):
-            uri_path = '/' + uri_path
-        return f"file://{uri_path}"
+        """Constructs the file URI for MLflow tracking using pathlib."""
+        # Get the absolute path using pathlib
+        abs_path = Path(self.ROOT_DATA_DIR).joinpath(self.MLFLOW_DIR_NAME).resolve()
+        # Convert Path object to a file URI (handles drive letters etc.)
+        return abs_path.as_uri()
 
     def get_run_base_dir(self, run_name: Optional[str] = None) -> str:
         """Gets the base directory for a specific run."""
         name = run_name if run_name else self.RUN_NAME
-        return os.path.join(self.ROOT_DATA_DIR, self.RUNS_DIR_NAME, name)
+        # Use pathlib here too for consistency, return as string
+        return str(Path(self.ROOT_DATA_DIR).joinpath(self.RUNS_DIR_NAME, name))
+
+    def get_mlflow_abs_path(self) -> str:
+        """Gets the absolute OS path to the MLflow directory as a string."""
+        # Use pathlib to resolve the absolute path and return as string
+        abs_path = Path(self.ROOT_DATA_DIR).joinpath(self.MLFLOW_DIR_NAME).resolve()
+        return str(abs_path)
