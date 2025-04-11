@@ -2,6 +2,7 @@
 import math
 import numpy as np
 import logging
+import random  # Import random for fallback choice
 from typing import TYPE_CHECKING, Tuple, Optional
 
 # Use relative imports within mcts package
@@ -15,29 +16,25 @@ def calculate_puct_score(
     child_node: Node,
     parent_visit_count: int,
     config: MCTSConfig,
-    log_details: bool = False,
+    log_details: bool = False,  # Keep log_details flag
 ) -> Tuple[float, float, float]:  # Return components for logging
     """Calculates the PUCT score and its components for a child node."""
     q_value = child_node.value_estimate
     prior = child_node.prior_probability
     visits = child_node.visit_count
 
-    if parent_visit_count == 0:
-        exploration_term = config.puct_coefficient * prior
-    else:
-        exploration_term = (
-            config.puct_coefficient
-            * prior
-            * (math.sqrt(parent_visit_count) / (1 + visits))
-        )
+    # Handle case where parent_visit_count might be 0 (e.g., root before backprop)
+    # Add small epsilon to denominator to prevent division by zero if visits=0
+    # Use sqrt(max(1, parent_visit_count)) to handle parent_visit_count=0 gracefully
+    exploration_term = (
+        config.puct_coefficient
+        * prior
+        * (math.sqrt(max(1, parent_visit_count)) / (1 + visits))
+    )
 
     score = q_value + exploration_term
 
-    # Use logger.debug for detailed logs
-    if log_details:
-        logger.debug(
-            f"    Action {child_node.action_taken}: Q={q_value:.3f}, P={prior:.4f}, N={visits}, ParentN={parent_visit_count} -> ExpTerm={exploration_term:.4f} -> PUCT={score:.4f}"
-        )
+    # Logging is handled by the caller (select_child_node) based on logger level
 
     return score, q_value, exploration_term
 
@@ -48,7 +45,7 @@ def add_dirichlet_noise(node: Node, config: MCTSConfig):
         config.dirichlet_alpha <= 0.0
         or config.dirichlet_epsilon <= 0.0
         or not node.children
-        or len(node.children) <= 1
+        or len(node.children) <= 1  # No noise needed if only one action
     ):
         return
 
@@ -56,12 +53,22 @@ def add_dirichlet_noise(node: Node, config: MCTSConfig):
     noise = np.random.dirichlet([config.dirichlet_alpha] * len(actions))
     eps = config.dirichlet_epsilon
 
+    noisy_priors_sum = 0.0
     for i, action in enumerate(actions):
         child = node.children[action]
+        original_prior = child.prior_probability  # Store original for logging if needed
         child.prior_probability = (1 - eps) * child.prior_probability + eps * noise[i]
+        noisy_priors_sum += child.prior_probability
+        # logger.debug(f"  Noise Action {action}: OrigP={original_prior:.4f}, Noise={noise[i]:.4f} -> NewP={child.prior_probability:.4f}")
+
+    # Optional: Re-normalize priors after adding noise (though dirichlet sum is 1, mixing might slightly change sum)
+    # if abs(noisy_priors_sum - 1.0) > 1e-6:
+    #     logger.debug(f"Re-normalizing priors after noise. Sum was {noisy_priors_sum:.6f}")
+    #     for action in actions:
+    #         node.children[action].prior_probability /= noisy_priors_sum
 
     logger.debug(
-        f"Added Dirichlet noise (alpha={config.dirichlet_alpha}, eps={eps}) to node priors."
+        f"Added Dirichlet noise (alpha={config.dirichlet_alpha}, eps={eps}) to {len(actions)} root node priors."
     )
 
 
@@ -73,40 +80,40 @@ def select_child_node(node: Node, config: MCTSConfig) -> Node:
     best_score = -float("inf")
     best_child: Optional[Node] = None
 
-    is_root = node.parent is None
-    log_limit = 5
-    logged_count = 0
-    # Log details only when selecting from the root node
-    if is_root:
-        logger.debug(
-            f"Selecting child for Node (Step {node.state.current_step}, Visits {node.visit_count}):"
-        )
+    # Enhanced logging for child selection - controlled by logger level
+    # Log the parent node's state before iterating children
+    log_msg_parent = f"  Selecting child for Node (Visits={node.visit_count}, Children={len(node.children)}, StateStep={node.state.current_step}):"
+    logger.debug(log_msg_parent)  # Keep detailed selection start as DEBUG
 
     children_items = list(node.children.items())
 
     for action, child in children_items:
-        log_this_child = is_root and logged_count < log_limit
+        # Always calculate components for potential logging
         score, q, exp_term = calculate_puct_score(
-            child, node.visit_count, config, log_details=log_this_child
+            child,
+            node.visit_count,
+            config,
+            log_details=True,  # Pass True to enable calculation, logging depends on level
         )
-        if log_this_child:
-            logged_count += 1
+        # Log the calculated score for each child if logger level is DEBUG
+        log_msg_child = f"    Child Action {action}: Q={q:.3f}, P={child.prior_probability:.4f}, N={child.visit_count}, ParentN={node.visit_count} -> ExpTerm={exp_term:.4f} -> PUCT={score:.4f}"
+        logger.debug(log_msg_child)  # Keep per-child PUCT as DEBUG
 
         if score > best_score:
             best_score = score
             best_child = child
 
     if best_child is None:
-        logger.error(
-            f"Could not select best child for node step {node.state.current_step}. Defaulting to random."
-        )
-        return np.random.choice(list(node.children.values()))
+        # This should ideally not happen if there are children.
+        # Could occur if all scores are -inf (e.g., invalid priors/values).
+        error_msg = f"Could not select best child for node step {node.state.current_step} (all scores -inf?). Defaulting to random."
+        logger.error(error_msg)
+        # Fallback to random choice among children
+        return random.choice(list(node.children.values()))
 
-    if is_root:
-        # Log the Q-value of the selected child
-        logger.debug(
-            f"Selected Child: Action {best_child.action_taken}, Score {best_score:.4f}, Q-value {best_child.value_estimate:.3f}"
-        )
+    # Log the selected child as DEBUG
+    log_msg_selected = f"  --> Selected Child: Action {best_child.action_taken}, Score {best_score:.4f}, Q-value {best_child.value_estimate:.3f}"
+    logger.debug(log_msg_selected)
 
     return best_child
 
@@ -114,23 +121,54 @@ def select_child_node(node: Node, config: MCTSConfig) -> Node:
 def traverse_to_leaf(root_node: Node, config: MCTSConfig) -> Tuple[Node, int]:
     """
     Traverses the tree from root to a leaf node using PUCT selection.
-    Returns the leaf node and the depth reached.
+    A leaf is defined as a node that is not expanded OR is terminal.
+    Stops also if the maximum search depth has been reached.
+    Returns the leaf node and the depth reached. Includes detailed logging.
     """
     current_node = root_node
     depth = 0
-    # logger.debug(f"--- Start Traverse (Root Visits: {root_node.visit_count}) ---")
-    while current_node.is_expanded:
-        if current_node.state.is_over():
-            # logger.debug(f"  Traverse hit terminal node at depth {depth}. Node: {current_node}")
-            break
+    # KEEP INFO: MCTS traversal start log
+    logger.info(f"--- Start Traverse (Root Visits: {root_node.visit_count}) ---")
+
+    # **MODIFIED LOOP CONDITION**
+    while current_node.is_expanded and not current_node.state.is_over():
+        # KEEP INFO: MCTS node consideration log
+        log_msg_consider = f"  Depth {depth}: Considering Node: {current_node}"
+        logger.info(log_msg_consider)
+
+        # Check max depth condition inside the loop
         if config.max_search_depth and depth >= config.max_search_depth:
-            logger.debug(f"  Traverse hit max depth {config.max_search_depth}.")
-            break
+            # KEEP INFO: MCTS max depth hit log
+            log_msg_break = f"  Depth {depth}: Hit MAX DEPTH ({config.max_search_depth}). Breaking traverse."
+            logger.info(log_msg_break)
+            break  # Stop traversal if max depth reached
 
-        selected_child = select_child_node(current_node, config)
-        # logger.debug(f"  Depth {depth}: Selected Action {selected_child.action_taken} -> Node Visits: {selected_child.visit_count}, Q: {selected_child.value_estimate:.3f}")
-        current_node = selected_child
-        depth += 1
+        # If node is expanded and non-terminal, select next child
+        log_msg_select = (
+            f"  Depth {depth}: Node is expanded and non-terminal. Selecting child..."
+        )
+        logger.debug(log_msg_select)  # Keep selection intent as DEBUG
+        try:
+            selected_child = select_child_node(current_node, config)
+            current_node = selected_child
+            depth += 1
+        except Exception as e:
+            log_msg_err = f"  Depth {depth}: Error during child selection: {e}. Breaking traverse."
+            logger.error(log_msg_err, exc_info=True)
+            break  # Stop traversal if selection fails
 
-    # logger.debug(f"--- End Traverse: Reached Leaf Depth {depth}. Node: {current_node} ---")
+    # After loop, current_node is either unexpanded, terminal, or at max depth
+    if not current_node.is_expanded and not current_node.state.is_over():
+        # KEEP INFO: MCTS leaf reached log
+        log_msg_break = f"  Depth {depth}: Node is LEAF (not expanded). Final node."
+        logger.info(log_msg_break)
+    elif current_node.state.is_over():
+        # KEEP INFO: MCTS terminal node reached log
+        log_msg_break = f"  Depth {depth}: Node is TERMINAL. Final node."
+        logger.info(log_msg_break)
+    # Max depth case logged inside loop
+
+    # KEEP INFO: MCTS traversal end log
+    log_msg_end = f"--- End Traverse: Reached Node at Depth {depth}. Final Node: {current_node} ---"
+    logger.info(log_msg_end)
     return current_node, depth

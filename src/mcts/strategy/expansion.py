@@ -33,6 +33,7 @@ def expand_node_with_policy(node: Node, action_policy: ActionPolicyMapping):
         logger.warning(
             f"Expanding node at step {node.state.current_step} with no valid actions but not terminal?"
         )
+        # Mark the node's state as game over if expansion reveals no moves
         node.state.game_over = True
         return
 
@@ -46,19 +47,21 @@ def expand_node_with_policy(node: Node, action_policy: ActionPolicyMapping):
             )
             prior = 0.0
         elif prior == 0.0:
+            # It's possible for the network to assign zero probability to a valid action
             logger.debug(f"Valid action {action} received prior=0 from network.")
 
         # Create child node - state is not strictly needed until selection/expansion of the child
         # Let's generate state here for simplicity.
         next_state_copy = node.state.copy()
         try:
+            # Step the copied state to represent the child's state
             _, _, _ = next_state_copy.step(action)
         except Exception as e:
             logger.error(
                 f"Error stepping state for child node expansion (action {action}): {e}",
                 exc_info=True,
             )
-            continue  # Skip this child
+            continue  # Skip creating this child if stepping fails
 
         child = Node(
             state=next_state_copy,
@@ -69,10 +72,10 @@ def expand_node_with_policy(node: Node, action_policy: ActionPolicyMapping):
         node.children[action] = child
         children_created += 1
 
-    logger.debug(f"Expanded node {node} with {children_created} children.")
+    # logger.debug(f"Expanded node {node} with {children_created} children.")
 
 
-# --- New function for simplified search ---
+# --- Function for simplified (non-batched) search - kept for potential debugging ---
 def expand_leaf_node(node: Node, network_evaluator: ActionPolicyValueEvaluator):
     """
     Evaluates a leaf node using the network and expands it.

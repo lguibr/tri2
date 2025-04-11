@@ -10,7 +10,7 @@ import pygame
 import torch
 import mlflow
 import ray
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TextIO
 
 # Ensure the src directory is in the Python path
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -27,15 +27,56 @@ from src import environment
 from src.stats import StatsCollectorActor
 
 # --- Configuration ---
+# CHANGE 1: Set log level back to INFO
 LOG_LEVEL = logging.INFO
+# Keep logger name retrieval before basicConfig
+logger = logging.getLogger(__name__)  # Get logger instance
+
+# Basic config setup - will be refined after config objects are loaded
 logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-    force=True,
+    handlers=[logging.StreamHandler(sys.stdout)],  # Start with stdout
+    force=True,  # Override existing handlers
 )
-logger = logging.getLogger(__name__)
+# Initial log message
 logger.info(f"Set main process root logger level to {logging.getLevelName(LOG_LEVEL)}")
+
+
+# --- Tee Class for redirecting stdout/stderr ---
+class Tee:
+    """Helper class to duplicate stream output to multiple targets."""
+
+    def __init__(self, *streams: TextIO):
+        self.streams = streams
+
+    def write(self, message: str):
+        for stream in self.streams:
+            try:
+                stream.write(message)
+            except Exception as e:
+                # Avoid errors within the Tee itself causing loops
+                print(
+                    f"Tee Error writing to stream {stream}: {e}", file=sys.__stderr__
+                )  # Use original stderr
+        self.flush()  # Flush after each write
+
+    def flush(self):
+        for stream in self.streams:
+            try:
+                if hasattr(stream, "flush"):
+                    stream.flush()
+            except Exception as e:
+                print(f"Tee Error flushing stream {stream}: {e}", file=sys.__stderr__)
+
+    def isatty(self) -> bool:
+        # Return True if any underlying stream is a TTY (e.g., console)
+        # This helps libraries that check isatty() for color output etc.
+        return any(getattr(s, "isatty", lambda: False)() for s in self.streams)
+
+
+# --- End Tee Class ---
+
 
 visual_state_queue: queue.Queue[Optional[Dict[int, Any]]] = queue.Queue(maxsize=5)
 
@@ -76,9 +117,13 @@ if __name__ == "__main__":
     ray_initialized = False
     error_logged_in_except_block = False
     stats_collector_actor = None
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    file_handler = None  # Initialize file_handler
 
     try:
         # --- Initialize Ray ---
+        # Keep log_to_driver=True so worker logs also appear in the main log file
         ray.init(logging_level=logging.WARNING, log_to_driver=True)
         ray_initialized = True
         logger.info(f"Ray initialized. Cluster resources: {ray.cluster_resources()}")
@@ -87,7 +132,7 @@ if __name__ == "__main__":
         train_config = config.TrainConfig()
         env_config = config.EnvConfig()
         model_config = config.ModelConfig()
-        mcts_config = MCTSConfig()  # Instantiate Pydantic model
+        mcts_config = MCTSConfig()
         persist_config = config.PersistenceConfig()
         vis_config = config.VisConfig()
 
@@ -95,23 +140,58 @@ if __name__ == "__main__":
         persist_config.RUN_NAME = train_config.RUN_NAME
         # Example: train_config.LOAD_CHECKPOINT_PATH = ".alphatriangle_data/runs/<PREVIOUS_RUN_NAME>/checkpoints/latest.pkl"
 
+        # --- Setup File Logging ---
+        run_base_dir = persist_config.get_run_base_dir()
+        log_dir = os.path.join(run_base_dir, persist_config.LOG_DIR_NAME)
+        os.makedirs(log_dir, exist_ok=True)
+        log_file_path = os.path.join(log_dir, f"{train_config.RUN_NAME}_visual.log")
+
+        # Reconfigure logging to include the file handler
+        file_handler = logging.FileHandler(
+            log_file_path, mode="w"
+        )  # 'w' to overwrite each run
+        formatter = logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+        )
+        file_handler.setFormatter(formatter)
+
+        # Get the root logger and add the file handler
+        # Keep the existing StreamHandler for console output
+        root_logger = logging.getLogger()
+        root_logger.setLevel(LOG_LEVEL)  # Ensure root logger level is INFO
+        # Add file handler if not already present (force=True might remove it)
+        root_logger.addHandler(file_handler)
+
+        logger.info(
+            f"Logging {logging.getLevelName(LOG_LEVEL)} and higher messages to: {log_file_path}"
+        )
+
+        # --- Redirect stdout/stderr using Tee ---
+        # Ensure file_handler.stream is available and open
+        if file_handler and hasattr(file_handler, "stream") and file_handler.stream:
+            sys.stdout = Tee(original_stdout, file_handler.stream)
+            sys.stderr = Tee(original_stderr, file_handler.stream)
+            print("--- Stdout/Stderr redirected to console and log file ---")
+            logger.info("Stdout/Stderr redirected to console and log file.")
+        else:
+            logger.error(
+                "Could not redirect stdout/stderr: File handler stream not available."
+            )
+        # --- End Redirection ---
+
         # --- Setup MLflow Tracking ---
-        # Get the absolute OS path first
         mlflow_abs_path = persist_config.get_mlflow_abs_path()
-        # Create the directory using the OS path
         os.makedirs(mlflow_abs_path, exist_ok=True)
         logger.info(f"Ensured MLflow directory exists: {mlflow_abs_path}")
-        # Get the correctly formatted file URI for setting the tracking URI
         mlflow_tracking_uri = persist_config.MLFLOW_TRACKING_URI
         mlflow.set_tracking_uri(mlflow_tracking_uri)
         logger.info(f"Set MLflow tracking URI to: {mlflow_tracking_uri}")
 
-        # --- Set Experiment (creates if not exists) ---
-        experiment_name = config.APP_NAME  # Use app name from config
+        experiment_name = config.APP_NAME
         mlflow.set_experiment(experiment_name)
         logger.info(f"Set MLflow experiment to: {experiment_name}")
 
-        config.print_config_info_and_validate(mcts_config)  # Pass Pydantic instance
+        config.print_config_info_and_validate(mcts_config)
 
         # --- Setup ---
         utils.set_random_seeds(train_config.RANDOM_SEED)
@@ -127,10 +207,8 @@ if __name__ == "__main__":
         neural_net = nn.NeuralNetwork(model_config, env_config, train_config, device)
         buffer = ExperienceBuffer(train_config)
         trainer = Trainer(neural_net, train_config, env_config)
-        # Pass train_config to DataManager for auto-resume logic
         data_manager = data.DataManager(persist_config, train_config)
 
-        # Initialize Orchestrator (it will handle loading state internally)
         orchestrator = TrainingOrchestrator(
             nn=neural_net,
             buffer=buffer,
@@ -139,7 +217,7 @@ if __name__ == "__main__":
             stats_collector_actor=stats_collector_actor,
             train_config=train_config,
             env_config=env_config,
-            mcts_config=mcts_config,  # Pass Pydantic instance
+            mcts_config=mcts_config,
             persist_config=persist_config,
             visual_state_queue=visual_state_queue,
         )
@@ -162,16 +240,13 @@ if __name__ == "__main__":
         )
         clock = pygame.time.Clock()
         fonts = visualization.load_fonts()
-        # Pass stats_collector_actor handle to GameRenderer
         game_renderer = visualization.GameRenderer(
             screen, vis_config, env_config, fonts, stats_collector_actor
         )
         current_worker_states: Dict[int, environment.GameState] = {}
         global_stats_for_hud: Dict[str, Any] = {}
-        has_received_states = False  # Flag: Have we received *any* dict from the queue?
-        has_received_worker_states = (
-            False  # Flag: Have we received a dict with actual worker states?
-        )
+        has_received_states = False
+        has_received_worker_states = False
 
         # --- Visualization Loop (Main Thread) ---
         running = True
@@ -186,7 +261,7 @@ if __name__ == "__main__":
                         w, h = max(640, event.w), max(480, event.h)
                         screen = pygame.display.set_mode((w, h), pygame.RESIZABLE)
                         game_renderer.screen = screen
-                        game_renderer.layout_rects = None  # Force layout recalc
+                        game_renderer.layout_rects = None
                     except pygame.error as e:
                         logger.error(f"Error resizing window: {e}")
 
@@ -198,11 +273,8 @@ if __name__ == "__main__":
                         running = False
                         logger.info("Received exit signal from training thread.")
                 elif isinstance(new_state_obj, dict):
-                    has_received_states = True  # Received something
-                    global_stats_for_hud = new_state_obj.pop(
-                        -1, {}
-                    )  # Extract global stats
-                    # Check if any worker states (keys >= 0) are present
+                    has_received_states = True
+                    global_stats_for_hud = new_state_obj.pop(-1, {})
                     worker_states_in_dict = {
                         k: v
                         for k, v in new_state_obj.items()
@@ -211,11 +283,8 @@ if __name__ == "__main__":
                         and isinstance(v, environment.GameState)
                     }
                     if worker_states_in_dict:
-                        has_received_worker_states = (
-                            True  # Received actual worker states
-                        )
+                        has_received_worker_states = True
                         current_worker_states = worker_states_in_dict
-                    # If only global stats were received, current_worker_states remains empty/unchanged
                 else:
                     logger.warning(
                         f"Received unexpected item from visual queue: {type(new_state_obj)}"
@@ -230,9 +299,7 @@ if __name__ == "__main__":
             screen.fill(visualization.colors.DARK_GRAY)
 
             if has_received_states:
-                # We have received at least global stats, render HUD/Plots/Progress
                 try:
-                    # Pass current_worker_states (might be empty) and global_stats
                     game_renderer.render(current_worker_states, global_stats_for_hud)
                 except Exception as render_err:
                     logger.error(f"Error during rendering: {render_err}", exc_info=True)
@@ -245,7 +312,6 @@ if __name__ == "__main__":
                         )
                         screen.blit(err_surf, (10, screen.get_height() // 2))
 
-                # Show specific message if we only have global stats so far
                 if not has_received_worker_states:
                     if fonts.get("help"):
                         wait_font = fonts["help"]
@@ -254,7 +320,6 @@ if __name__ == "__main__":
                             True,
                             visualization.colors.LIGHT_GRAY,
                         )
-                        # Position message somewhere sensible, e.g., top-center of worker area
                         layout_rects = game_renderer._calculate_layout()
                         worker_area = (
                             layout_rects.get("worker_grid")
@@ -267,7 +332,6 @@ if __name__ == "__main__":
                         screen.blit(wait_surf, wait_rect)
 
             else:
-                # Still waiting for the very first dictionary from the queue
                 if fonts.get("help"):
                     wait_font = fonts["help"]
                     wait_surf = wait_font.render(
@@ -298,7 +362,7 @@ if __name__ == "__main__":
         logger.critical(
             f"An unhandled error occurred in visual training script (main thread): {e}"
         )
-        traceback.print_exc()
+        traceback.print_exc()  # This will now go to console AND log file
         main_thread_exception = e
         if mlflow_run_active:
             try:
@@ -309,6 +373,12 @@ if __name__ == "__main__":
                 logger.error(f"Failed to log main thread error to MLflow: {mlf_err}")
 
     finally:
+        # --- Restore stdout/stderr ---
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        print("--- Restored stdout/stderr ---")
+        # --- End Restore ---
+
         logger.info("Initiating shutdown sequence...")
         if orchestrator:
             orchestrator.request_stop()
@@ -319,11 +389,9 @@ if __name__ == "__main__":
             if train_thread.is_alive():
                 logger.error("Training thread did not exit gracefully within timeout.")
 
-        # --- Force Save Final State (after thread join/timeout) ---
         if orchestrator:
             logger.info("Attempting to save final training state...")
-            orchestrator.save_final_state()  # Calls DataManager internally
-            # --- Perform Orchestrator Cleanup (kills actors) ---
+            orchestrator.save_final_state()
             orchestrator._final_cleanup()
 
         final_status = "INTERRUPTED"
@@ -358,4 +426,16 @@ if __name__ == "__main__":
 
         pygame.quit()
         logger.info("Visual training script finished.")
+        # Close the file handler explicitly
+        if file_handler:
+            try:
+                # Ensure all buffered output is written
+                file_handler.flush()
+                file_handler.close()
+                # Remove handler AFTER closing stream
+                root_logger.removeHandler(file_handler)
+            except Exception as e_close:
+                # Use original stderr for this final print
+                print(f"Error closing log file handler: {e_close}", file=sys.__stderr__)
+
         sys.exit(exit_code)

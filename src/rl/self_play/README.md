@@ -11,14 +11,14 @@ This submodule focuses specifically on generating game episodes through self-pla
     -   It receives configuration objects (`EnvConfig`, `MCTSConfig`, `ModelConfig`, `TrainConfig`) during initialization.
     -   It has a `set_weights` method allowing the `TrainingOrchestrator` to periodically update its local neural network with the latest trained weights from the central model.
     -   Its main method, `run_episode`, simulates a complete game episode:
-        -   Uses its local `NeuralNetwork` evaluator and `MCTSConfig` to run MCTS (`src.mcts.run_mcts_simulations`).
+        -   Uses its local `NeuralNetwork` evaluator and `MCTSConfig` to run MCTS (`src.mcts.run_mcts_simulations`), **reusing the search tree between moves**.
         -   Selects actions based on MCTS results (`src.mcts.strategy.policy.select_action_based_on_visits`).
         -   Generates policy targets (`src.mcts.strategy.policy.get_policy_target`).
         -   Stores `(GameState, policy_target, placeholder_value)` tuples.
         -   Steps its local game environment (`GameState.step`).
         -   Backfills the value target after the episode ends.
-        -   Returns the collected `Experience` list, final score, episode length, and final `GameState` to the orchestrator.
-    -   Optionally, one worker (typically worker 0) can be designated to collect intermediate `GameState` objects with attached statistics, which the orchestrator can then forward to the visualization queue.
+        -   Returns the collected `Experience` list, final score, episode length, and final `GameState` to the orchestrator via a `SelfPlayResult` object.
+    -   It pushes intermediate `GameState` objects to a central `VisualStateActor` for visualization purposes.
 
 ## Exposed Interfaces
 
@@ -28,7 +28,7 @@ This submodule focuses specifically on generating game episodes through self-pla
         -   `run_episode() -> SelfPlayResult`: Runs one episode and returns results.
         -   `set_weights(weights: Dict)`: Updates the actor's local network weights.
 -   **Types:**
-    -   `SelfPlayResult = Tuple[List[Experience], float, int, GameState]` (where `Experience` contains `GameState`).
+    -   `SelfPlayResult`: Pydantic model defined in `src.rl.types`.
 
 ## Dependencies
 
@@ -37,20 +37,24 @@ This submodule focuses specifically on generating game episodes through self-pla
 -   **`src.nn`**:
     -   `NeuralNetwork`: Instantiated locally within the actor.
 -   **`src.mcts`**:
-    -   Core MCTS functions and types.
+    -   Core MCTS functions and types. **MCTS uses batched evaluation.**
 -   **`src.environment`**:
     -   `GameState`, `EnvConfig`: Used to instantiate and step through the game simulation locally.
 -   **`src.utils`**:
     -   `types`: `Experience`, `ActionType`, `PolicyTargetMapping`.
     -   `helpers`: `get_device`, `set_random_seeds`.
+-   **`src.rl.core`**:
+    -   `VisualStateActor`: Handle used to push state updates.
+-   **`src.rl.types`**:
+    -   `SelfPlayResult`: Return type.
 -   **`numpy`**:
     -   Used by MCTS strategies.
 -   **`ray`**:
     -   The `@ray.remote` decorator makes this a Ray actor.
 -   **`torch`**:
     -   Used by the local `NeuralNetwork`.
--   **Standard Libraries:** `typing`, `logging`, `random`.
+-   **Standard Libraries:** `typing`, `logging`, `random`, `time`.
 
 ---
 
-**Note:** Please keep this README updated when changing the self-play episode generation logic within the actor, the data collected (`Experience`), or the interaction with MCTS or the environment. Accurate documentation is crucial for maintainability.
+**Note:** Please keep this README updated when changing the self-play episode generation logic within the actor, the data collected (`Experience`), or the interaction with MCTS or the environment, especially regarding tree reuse. Accurate documentation is crucial for maintainability.

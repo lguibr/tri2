@@ -50,4 +50,9 @@ StatsCollectorData = Dict[str, Deque[Tuple[int, float]]]
 # --- Pydantic Models for Data Transfer ---
 # SelfPlayResult moved to src/rl/types.py to resolve circular import
 
-# No model_rebuild needed here anymore
+# --- Prioritized Experience Replay Types ---
+# TypedDict for the output of the PER buffer's sample method
+class PERBatchSample(TypedDict):
+    batch: ExperienceBatch
+    indices: np.ndarray # Indices of the sampled experiences in the buffer
+    weights: np.ndarray # Importance sampling weights for each experience

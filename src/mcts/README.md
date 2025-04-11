@@ -7,7 +7,7 @@ This module implements the Monte Carlo Tree Search algorithm, a core component o
 
 -   **Core Components (`src.mcts.core`):**
     -   `Node`: Represents a state in the search tree, storing visit counts, value estimates, prior probabilities, and child nodes. Holds a `GameState` object.
-    -   `search`: Contains the main `run_mcts_simulations` function orchestrating the selection, expansion, and backpropagation phases. **This version uses batched neural network evaluation for potentially improved performance.**
+    -   `search`: Contains the main `run_mcts_simulations` function orchestrating the selection, expansion, and backpropagation phases. **This version uses batched neural network evaluation (`evaluate_batch`) for potentially improved performance.** It collects multiple leaf nodes before calling the network.
     -   `config`: Defines the `MCTSConfig` class holding hyperparameters like the number of simulations, PUCT coefficient, temperature settings, and Dirichlet noise parameters.
     -   `types`: Defines necessary type hints and protocols, notably `ActionPolicyValueEvaluator` which specifies the interface required for the neural network evaluator used by MCTS.
 -   **Strategy Components (`src.mcts.strategy`):**
@@ -39,8 +39,8 @@ This module implements the Monte Carlo Tree Search algorithm, a core component o
     -   `ActionType`, `PolicyValueOutput`: Used for actions and NN return types.
 -   **`numpy`**:
     -   Used for Dirichlet noise generation and potentially in policy calculations.
--   **Standard Libraries:** `typing`, `math`, `logging`, `numpy`.
+-   **Standard Libraries:** `typing`, `math`, `logging`, `numpy`, `time`.
 
 ---
 
-**Note:** Please keep this README updated when changing the MCTS algorithm phases (selection, expansion, backpropagation), the node structure, configuration options, or the interaction with the environment or neural network. Accurate documentation is crucial for maintainability.
+**Note:** Please keep this README updated when changing the MCTS algorithm phases (selection, expansion, backpropagation), the node structure, configuration options, or the interaction with the environment or neural network, especially regarding the batched evaluation. Accurate documentation is crucial for maintainability.

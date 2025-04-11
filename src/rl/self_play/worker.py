@@ -22,19 +22,23 @@ from src.utils import get_device, set_random_seeds
 
 # Experience type now expects GameState
 from src.utils.types import Experience, ActionType, PolicyTargetMapping
+
 # Import SelfPlayResult Pydantic model from local rl types
-from ..types import SelfPlayResult # Updated import
+from ..types import SelfPlayResult  # Updated import
 
 # Import handle type for VisualStateActor
 from ..core.visual_state_actor import VisualStateActor
 
+# Get the logger for this module *before* basicConfig potentially changes root logger
 logger = logging.getLogger(__name__)
+
 
 @ray.remote
 class SelfPlayWorker:
     """
     A Ray actor responsible for running self-play episodes using MCTS and a NN.
     Pushes its state periodically to a central VisualStateActor.
+    Implements MCTS tree reuse between steps.
     """
 
     def __init__(
@@ -46,7 +50,7 @@ class SelfPlayWorker:
         train_config: TrainConfig,
         initial_weights: Optional[Dict] = None,
         seed: Optional[int] = None,
-        worker_device_str: str = "cpu", # Accept device string from config
+        worker_device_str: str = "cpu",  # Accept device string from config
         visual_state_actor_handle: Optional[
             ray.actor.ActorHandle
         ] = None,  # Handle for vis actor
@@ -57,50 +61,56 @@ class SelfPlayWorker:
         self.model_config = model_config
         self.train_config = train_config
         self.seed = seed if seed is not None else random.randint(0, 1_000_000)
-        self.worker_device_str = worker_device_str # Store configured device string
+        self.worker_device_str = worker_device_str  # Store configured device string
         self.visual_state_actor = visual_state_actor_handle  # Store handle
 
         # --- Configure Logging within the Actor ---
-        worker_log_level = logging.INFO # Reduce default log level for workers
+        # CHANGE 1: Set default worker level to INFO
+        worker_log_level = logging.INFO
         log_format = (
             f"%(asctime)s [%(levelname)s] [W{self.actor_id}] %(name)s: %(message)s"
         )
-        # Use basicConfig with force=True to ensure it works in Ray actors
+        # Use force=True to ensure this config takes precedence in the Ray actor process
         logging.basicConfig(level=worker_log_level, format=log_format, force=True)
-        # Get logger instance *after* basicConfig
+        # Re-assign global logger for this actor instance AFTER basicConfig
         global logger
         logger = logging.getLogger(__name__)
-        # Set levels for other loggers if needed (e.g., reduce MCTS verbosity)
-        logging.getLogger("src.mcts.core.search").setLevel(logging.INFO)
-        logging.getLogger("src.mcts.strategy.selection").setLevel(logging.INFO)
-        logging.getLogger("src.mcts.strategy.expansion").setLevel(logging.INFO)
-        logging.getLogger("src.mcts.strategy.backpropagation").setLevel(logging.INFO)
+        # **Explicitly set levels for MCTS submodules to DEBUG to allow INFO messages to pass**
+        logging.getLogger("src.mcts.core.search").setLevel(logging.DEBUG)
+        logging.getLogger("src.mcts.strategy.selection").setLevel(logging.DEBUG)
+        logging.getLogger("src.mcts.strategy.expansion").setLevel(logging.DEBUG)
+        logging.getLogger("src.mcts.strategy.backpropagation").setLevel(logging.DEBUG)
         # -----------------------------------------
 
         set_random_seeds(self.seed)
 
-        # Use the configured device string for this worker
         self.device = get_device(self.worker_device_str)
         self.nn_evaluator = NeuralNetwork(
             model_config=self.model_config,
             env_config=self.env_config,
             train_config=self.train_config,
-            device=self.device, # Pass the determined device
+            device=self.device,
         )
         if initial_weights:
             self.set_weights(initial_weights)
         else:
             self.nn_evaluator.model.eval()
 
+        # Log MCTS config using logger
+        logger.debug(f"INIT: MCTS Config: {self.mcts_config.model_dump()}")
         logger.info(
             f"Worker initialized on device {self.device}. Seed: {self.seed}. LogLevel: {logging.getLevelName(logger.getEffectiveLevel())}"
+        )
+        # Check effective level of selection logger
+        selection_logger = logging.getLogger("src.mcts.strategy.selection")
+        logger.debug(
+            f"Selection logger effective level: {logging.getLevelName(selection_logger.getEffectiveLevel())}"
         )
         logger.debug("Worker init complete.")
 
     def set_weights(self, weights: Dict):
         """Updates the neural network weights."""
         try:
-            # Ensure weights are loaded to the worker's specific device
             self.nn_evaluator.set_weights(weights)
             logger.debug(f"Weights updated.")
         except Exception as e:
@@ -109,11 +119,13 @@ class SelfPlayWorker:
     def _push_visual_state(self, game_state: GameState):
         """Asynchronously pushes the current game state to the visual actor."""
         if self.visual_state_actor:
-            logger.debug(
-                f"Pushing state (step {game_state.current_step}) to visual actor."
-            )
+            # Reduce frequency or level of this specific log if too noisy
+            # logger.debug(f"Pushing state (step {game_state.current_step}) to visual actor.")
             try:
-                # Pass the game state directly, VisualStateActor handles it
+                # Pass a copy to avoid potential issues with the actor holding onto
+                # a reference that the worker modifies later.
+                # NOTE: Removing copy for performance, assuming visualizer is read-only
+                # state_copy = game_state.copy()
                 self.visual_state_actor.update_state.remote(self.actor_id, game_state)
             except Exception as e:
                 logger.error(f"Failed to push visual state: {e}")
@@ -121,27 +133,40 @@ class SelfPlayWorker:
     def run_episode(self) -> SelfPlayResult:
         """
         Runs a single episode of self-play using MCTS and the internal neural network.
+        Implements MCTS tree reuse.
         Pushes state updates to the visual actor. Returns a SelfPlayResult Pydantic model.
         """
         self.nn_evaluator.model.eval()
         episode_seed = self.seed + random.randint(0, 1000)
         game = GameState(self.env_config, initial_seed=episode_seed)
-        self._push_visual_state(game)  # Push initial state
+        self._push_visual_state(game)
         raw_experiences: List[Tuple[GameState, PolicyTargetMapping, float]] = []
-        logger.debug(f"Starting episode with seed {episode_seed}")
+        logger.info(f"Starting episode with seed {episode_seed}")  # Keep as INFO
+
+        root_node: Optional[Node] = Node(state=game.copy())
 
         while not game.is_over():
-            # Push state update before potentially long MCTS
+            if root_node is None:
+                logger.error(
+                    "MCTS root node became None unexpectedly. Aborting episode."
+                )
+                break
+
             self._push_visual_state(game)
 
-            root_node = Node(state=game)
-            logger.debug(f"Running MCTS for step {game.current_step}...")
+            logger.info(f"Running MCTS for step {game.current_step}...")  # Keep as INFO
             mcts_max_depth = run_mcts_simulations(
                 root_node, self.mcts_config, self.nn_evaluator
             )
-            logger.debug(
+            logger.info(  # Keep as INFO
                 f"MCTS finished for step {game.current_step}. Max Depth: {mcts_max_depth}"
             )
+
+            if not root_node.children:
+                logger.warning(
+                    f"MCTS finished but root node has no children at step {game.current_step}. Game likely over or stuck."
+                )
+                break
 
             temp = (
                 self.mcts_config.temperature_initial
@@ -155,7 +180,6 @@ class SelfPlayWorker:
                 logger.error(
                     f"MCTS failed to select action at step {game.current_step}. State: {game}. Aborting."
                 )
-                game.game_over = True
                 break
 
             display_stats: Dict[str, Any] = {
@@ -173,15 +197,31 @@ class SelfPlayWorker:
             raw_experiences.append((state_to_store, policy_target, 0.0))
 
             _, _, done = game.step(action)
+            logger.debug(
+                f"STEP {game.current_step}: Action {action} taken. Done: {done}"
+            )
 
-            # Attach stats to the main game object for the *next* state push
+            if not done:
+                next_root_node = root_node.children.get(action)
+                if next_root_node:
+                    root_node = next_root_node
+                    root_node.parent = None
+                    logger.debug(f"Reused MCTS subtree for action {action}.")
+                else:
+                    logger.warning(
+                        f"Child node for action {action} not found in MCTS tree. Resetting MCTS root."
+                    )
+                    root_node = Node(state=game.copy())
+            else:
+                root_node = None
+
             game.display_stats = display_stats
 
             if done:
                 break
 
         final_outcome = game.get_outcome()
-        logger.debug(
+        logger.info(  # Keep as INFO
             f"Episode finished. Outcome: {final_outcome}, Steps: {game.current_step}"
         )
 
@@ -189,7 +229,6 @@ class SelfPlayWorker:
             (gs, policy, final_outcome) for gs, policy, _ in raw_experiences
         ]
 
-        # Prepare final state for return and push final update
         if not hasattr(game, "display_stats") or not game.display_stats:
             game.display_stats = {}
         game.display_stats["game_step"] = game.current_step
@@ -201,9 +240,8 @@ class SelfPlayWorker:
             else "?"
         )
         game.display_stats["mcts_tree_depth"] = last_mcts_depth
-        self._push_visual_state(game)  # Push final state
+        self._push_visual_state(game)
 
-        # Return the Pydantic model instance
         return SelfPlayResult(
             episode_experiences=processed_experiences,
             final_score=final_outcome,

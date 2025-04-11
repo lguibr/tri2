@@ -16,6 +16,8 @@ This module provides common utility functions and type definitions used across v
     -   `Experience`: A tuple representing `(GameState, PolicyTargetMapping, float)` stored in the replay buffer.
     -   `ExperienceBatch`: A list of `Experience` tuples.
     -   `PolicyValueOutput`: A tuple representing `(PolicyTargetMapping, float)` returned by the NN's `evaluate` method.
+    -   **`PERBatchSample`**: A `TypedDict` defining the output of the PER buffer's sample method, including the batch, indices, and importance sampling weights.
+    -   `StatsCollectorData`: Type alias for the data structure holding collected statistics.
 -   **Geometry Utilities (`geometry.py`):** Contains geometric helper functions.
     -   `is_point_in_polygon`: Checks if a 2D point lies inside a given polygon.
 
@@ -33,6 +35,8 @@ This module provides common utility functions and type definitions used across v
     -   `Experience` (TypeAlias for `Tuple[GameState, PolicyTargetMapping, float]`)
     -   `ExperienceBatch` (TypeAlias for `List[Experience]`)
     -   `PolicyValueOutput` (TypeAlias for `Tuple[Mapping[ActionType, float], float]`)
+    -   `PERBatchSample` (TypedDict)
+    -   `StatsCollectorData` (TypeAlias for `Dict[str, Deque[Tuple[int, float]]]`)
 
 ## Dependencies
 
@@ -42,7 +46,7 @@ This module provides common utility functions and type definitions used across v
     -   Used by `set_random_seeds` and potentially in type definitions (`np.ndarray`).
 -   **`src.environment`**:
     -   `GameState` (used in `Experience` type hint via TYPE_CHECKING).
--   **Standard Libraries:** `typing`, `random`, `os`, `math`, `logging`.
+-   **Standard Libraries:** `typing`, `random`, `os`, `math`, `logging`, `collections.deque`.
 
 ---
 

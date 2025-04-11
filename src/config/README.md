@@ -16,7 +16,7 @@ This module centralizes all configuration parameters for the AlphaTriangle proje
 -   **Pydantic Models:**
     -   `EnvConfig`: Environment parameters (grid size, shapes).
     -   `ModelConfig`: Neural network architecture parameters.
-    -   `TrainConfig`: Training loop hyperparameters (batch size, learning rate, workers, etc.).
+    -   `TrainConfig`: Training loop hyperparameters (batch size, learning rate, workers, **PER settings**, etc.).
     -   `VisConfig`: Visualization parameters (screen size, FPS, layout).
     -   `PersistenceConfig`: Data saving/loading parameters (directories, filenames).
     -   `MCTSConfig`: MCTS parameters (simulations, exploration constants, temperature). - *Note: Defined in `src.mcts.core.config` but often used alongside other configs.*
