@@ -11,17 +11,20 @@ from typing import List, Tuple, Optional, Generator, Any, Dict
 from src.environment import GameState, EnvConfig
 from src.mcts import (
     Node,
-    MCTSConfig,
+    # MCTSConfig, # No longer needed directly, use config from src.config
     run_mcts_simulations,
     select_action_based_on_visits,
     get_policy_target,
 )
 from src.nn import NeuralNetwork
-from src.config import ModelConfig, TrainConfig
-from src.utils import get_device, set_random_seeds
 
-# Experience type now expects GameState
-from src.utils.types import Experience, ActionType, PolicyTargetMapping
+# Change: Import MCTSConfig from the central config location
+from src.config import ModelConfig, TrainConfig, MCTSConfig
+from src.utils import get_device, set_random_seeds
+from src.features import extract_state_features  # Import feature extractor
+
+# Experience type now expects StateType
+from src.utils.types import Experience, ActionType, PolicyTargetMapping, StateType
 
 # Import SelfPlayResult Pydantic model from local rl types
 from ..types import SelfPlayResult  # Updated import
@@ -39,13 +42,14 @@ class SelfPlayWorker:
     A Ray actor responsible for running self-play episodes using MCTS and a NN.
     Pushes its state periodically to a central VisualStateActor.
     Implements MCTS tree reuse between steps.
+    Stores extracted features (StateType) in the experience buffer.
     """
 
     def __init__(
         self,
         actor_id: int,
         env_config: EnvConfig,
-        mcts_config: MCTSConfig,
+        mcts_config: MCTSConfig,  # Type hint uses the imported config
         model_config: ModelConfig,
         train_config: TrainConfig,
         initial_weights: Optional[Dict] = None,
@@ -65,7 +69,7 @@ class SelfPlayWorker:
         self.visual_state_actor = visual_state_actor_handle  # Store handle
 
         # --- Configure Logging within the Actor ---
-        # CHANGE 1: Set default worker level to INFO
+        # Set default worker level to INFO
         worker_log_level = logging.INFO
         log_format = (
             f"%(asctime)s [%(levelname)s] [W{self.actor_id}] %(name)s: %(message)s"
@@ -75,11 +79,17 @@ class SelfPlayWorker:
         # Re-assign global logger for this actor instance AFTER basicConfig
         global logger
         logger = logging.getLogger(__name__)
-        # **Explicitly set levels for MCTS submodules to DEBUG to allow INFO messages to pass**
-        logging.getLogger("src.mcts.core.search").setLevel(logging.DEBUG)
-        logging.getLogger("src.mcts.strategy.selection").setLevel(logging.DEBUG)
-        logging.getLogger("src.mcts.strategy.expansion").setLevel(logging.DEBUG)
-        logging.getLogger("src.mcts.strategy.backpropagation").setLevel(logging.DEBUG)
+
+        # **Set levels for MCTS submodules to WARNING (default) to reduce noise**
+        # **Change to INFO or DEBUG temporarily for specific debugging if needed**
+        mcts_log_level = logging.WARNING  # Default: WARNING
+        # mcts_log_level = logging.INFO # Uncomment for more MCTS details
+        # mcts_log_level = logging.DEBUG # Uncomment for very detailed MCTS logs
+
+        logging.getLogger("src.mcts.core.search").setLevel(mcts_log_level)
+        logging.getLogger("src.mcts.strategy.selection").setLevel(mcts_log_level)
+        logging.getLogger("src.mcts.strategy.expansion").setLevel(mcts_log_level)
+        logging.getLogger("src.mcts.strategy.backpropagation").setLevel(mcts_log_level)
         # -----------------------------------------
 
         set_random_seeds(self.seed)
@@ -134,14 +144,22 @@ class SelfPlayWorker:
         """
         Runs a single episode of self-play using MCTS and the internal neural network.
         Implements MCTS tree reuse.
-        Pushes state updates to the visual actor. Returns a SelfPlayResult Pydantic model.
+        Pushes state updates to the visual actor.
+        Stores extracted features (StateType) in the experience buffer.
+        Returns a SelfPlayResult Pydantic model including aggregated stats.
         """
         self.nn_evaluator.model.eval()
         episode_seed = self.seed + random.randint(0, 1000)
         game = GameState(self.env_config, initial_seed=episode_seed)
         self._push_visual_state(game)
-        raw_experiences: List[Tuple[GameState, PolicyTargetMapping, float]] = []
-        logger.info(f"Starting episode with seed {episode_seed}")  # Keep as INFO
+        # Store tuples of (StateType, PolicyTargetMapping, float)
+        raw_experiences: List[Tuple[StateType, PolicyTargetMapping, float]] = []
+        # Keep track of MCTS stats per step
+        step_root_visits: List[int] = []
+        step_tree_depths: List[int] = []
+        step_simulations: List[int] = []
+
+        logger.info(f"Starting episode with seed {episode_seed}")
 
         root_node: Optional[Node] = Node(state=game.copy())
 
@@ -154,11 +172,14 @@ class SelfPlayWorker:
 
             self._push_visual_state(game)
 
-            logger.info(f"Running MCTS for step {game.current_step}...")  # Keep as INFO
+            # Store the GameState *before* MCTS runs for this step's stats
+            # game_state_copy_for_stats = game.copy() # No longer needed here
+
+            logger.info(f"Running MCTS for step {game.current_step}...")
             mcts_max_depth = run_mcts_simulations(
                 root_node, self.mcts_config, self.nn_evaluator
             )
-            logger.info(  # Keep as INFO
+            logger.info(
                 f"MCTS finished for step {game.current_step}. Max Depth: {mcts_max_depth}"
             )
 
@@ -182,6 +203,27 @@ class SelfPlayWorker:
                 )
                 break
 
+            # --- Extract features for the *current* state BEFORE taking the action ---
+            try:
+                state_features: StateType = extract_state_features(
+                    game, self.model_config
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error extracting features at step {game.current_step}: {e}",
+                    exc_info=True,
+                )
+                break  # Abort episode if feature extraction fails
+
+            # Store the extracted features along with policy target
+            raw_experiences.append((state_features, policy_target, 0.0))
+
+            # Store MCTS stats for this step
+            step_simulations.append(self.mcts_config.num_simulations)
+            step_root_visits.append(root_node.visit_count)
+            step_tree_depths.append(mcts_max_depth)
+
+            # Attach MCTS stats to the GameState copy for this step for visualization
             display_stats: Dict[str, Any] = {
                 "game_step": game.current_step + 1,
                 "mcts_simulations": self.mcts_config.num_simulations,
@@ -191,16 +233,16 @@ class SelfPlayWorker:
                 "mcts_selected_action": action,
                 "mcts_tree_depth": mcts_max_depth,
             }
+            # game_state_copy_for_stats.display_stats = display_stats.copy() # No longer needed
+            # game_states_for_stats.append(game_state_copy_for_stats) # No longer needed
 
-            state_to_store = game.copy()
-            state_to_store.display_stats = display_stats.copy()
-            raw_experiences.append((state_to_store, policy_target, 0.0))
-
+            # --- Take the action ---
             _, _, done = game.step(action)
             logger.debug(
                 f"STEP {game.current_step}: Action {action} taken. Done: {done}"
             )
 
+            # --- Update MCTS root for next step (Tree Reuse) ---
             if not done:
                 next_root_node = root_node.children.get(action)
                 if next_root_node:
@@ -215,30 +257,35 @@ class SelfPlayWorker:
             else:
                 root_node = None
 
+            # Attach display stats to the *current* game state for visualization
             game.display_stats = display_stats
 
             if done:
                 break
 
         final_outcome = game.get_outcome()
-        logger.info(  # Keep as INFO
+        logger.info(
             f"Episode finished. Outcome: {final_outcome}, Steps: {game.current_step}"
         )
 
+        # Backfill the final outcome into the stored experiences
         processed_experiences: List[Experience] = [
-            (gs, policy, final_outcome) for gs, policy, _ in raw_experiences
+            (state_type, policy, final_outcome)
+            for state_type, policy, _ in raw_experiences
         ]
 
+        # Calculate aggregated stats
+        total_sims_episode = sum(step_simulations)
+        avg_visits_episode = np.mean(step_root_visits) if step_root_visits else 0.0
+        avg_depth_episode = np.mean(step_tree_depths) if step_tree_depths else 0.0
+
+        # Update final game state display stats
         if not hasattr(game, "display_stats") or not game.display_stats:
             game.display_stats = {}
         game.display_stats["game_step"] = game.current_step
         game.display_stats["final_score"] = final_outcome
         game.display_stats.pop("mcts_selected_action", None)
-        last_mcts_depth = (
-            raw_experiences[-1][0].display_stats.get("mcts_tree_depth", "?")
-            if raw_experiences
-            else "?"
-        )
+        last_mcts_depth = step_tree_depths[-1] if step_tree_depths else "?"
         game.display_stats["mcts_tree_depth"] = last_mcts_depth
         self._push_visual_state(game)
 
@@ -246,5 +293,9 @@ class SelfPlayWorker:
             episode_experiences=processed_experiences,
             final_score=final_outcome,
             episode_steps=game.current_step,
-            final_game_state=game,
+            final_game_state=game,  # Still return final GameState for potential analysis
+            # Add aggregated stats
+            total_simulations=total_sims_episode,
+            avg_root_visits=avg_visits_episode,
+            avg_tree_depth=avg_depth_episode,
         )

@@ -16,7 +16,7 @@ if src_dir not in sys.path:
 # Updated imports
 from src import config, utils, nn, data
 from src.rl import TrainingOrchestrator, ExperienceBuffer, Trainer
-from src.mcts import MCTSConfig  # Import Pydantic MCTSConfig
+from src.config import MCTSConfig  # Import Pydantic MCTSConfig from central location
 from src.stats import StatsCollectorActor
 
 # --- Configuration ---
@@ -79,7 +79,8 @@ if __name__ == "__main__":
         logger.info(f"MLflow Run started (ID: {mlflow.active_run().info.run_id}).")
 
         # --- Initialize Components ---
-        stats_collector_actor = StatsCollectorActor.remote(max_history=1000)
+        # Change: Increase max_history for StatsCollectorActor
+        stats_collector_actor = StatsCollectorActor.remote(max_history=100_000)
         neural_net = nn.NeuralNetwork(model_config, env_config, train_config, device)
         buffer = ExperienceBuffer(train_config)
         trainer = Trainer(neural_net, train_config, env_config)

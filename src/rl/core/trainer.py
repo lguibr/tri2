@@ -11,9 +11,10 @@ from typing import List, Dict, Optional, Tuple
 # --- Package Imports ---
 from src.config import TrainConfig, EnvConfig, ModelConfig
 from src.nn import NeuralNetwork
-from src.environment import GameState
 
-# Use core types - ExperienceBatch contains GameState now
+# Removed GameState import as it's no longer needed for batch prep
+
+# Use core types - ExperienceBatch contains StateType now
 # Import PERBatchSample for the sample result type
 from src.utils.types import (
     ExperienceBatch,
@@ -22,7 +23,9 @@ from src.utils.types import (
     StateType,
     PERBatchSample,
 )
-from src.features import extract_state_features
+
+# Removed feature extractor import as features are pre-extracted
+# from src.features import extract_state_features
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +99,10 @@ class Trainer:
     def _prepare_batch(
         self, batch: ExperienceBatch
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Extracts features from GameStates and converts experiences into tensors."""
+        """
+        Converts a batch of experiences (containing StateType) into tensors.
+        No feature extraction needed here anymore.
+        """
         batch_size = len(batch)
         grids = []
         other_features = []
@@ -107,12 +113,10 @@ class Trainer:
             device=self.device,
         )
 
-        for i, (game_state, policy_target_map, value_target) in enumerate(batch):
-            state_dict: StateType = extract_state_features(
-                game_state, self.model_config
-            )
-            grids.append(state_dict["grid"])
-            other_features.append(state_dict["other_features"])
+        for i, (state_features, policy_target_map, value_target) in enumerate(batch):
+            # Directly use the stored features
+            grids.append(state_features["grid"])
+            other_features.append(state_features["other_features"])
             value_targets.append(value_target)
             for action, prob in policy_target_map.items():
                 if 0 <= action < self.env_config.ACTION_DIM:

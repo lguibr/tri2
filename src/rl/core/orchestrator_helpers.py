@@ -89,19 +89,6 @@ def process_self_play_result(
     """Processes the result (SelfPlayResult Pydantic model) from a completed self-play episode."""
     # Access data using Pydantic model attributes
     if result.episode_experiences:
-        episode_total_sims = 0
-        episode_root_visits = []
-        episode_tree_depths = []
-        for exp_state, _, _ in result.episode_experiences:
-            if hasattr(exp_state, "display_stats") and exp_state.display_stats:
-                episode_total_sims += exp_state.display_stats.get("mcts_simulations", 0)
-                episode_root_visits.append(
-                    exp_state.display_stats.get("mcts_root_visits", 0)
-                )
-                episode_tree_depths.append(
-                    exp_state.display_stats.get("mcts_tree_depth", 0)
-                )
-
         # Add experiences to buffer (add_batch handles PER priority assignment internally)
         orchestrator.buffer.add_batch(result.episode_experiences)
 
@@ -110,13 +97,14 @@ def process_self_play_result(
                 len(orchestrator.buffer)
             )
         orchestrator.episodes_played += 1
-        orchestrator.total_simulations_run += episode_total_sims
+        # Use aggregated stats from the result object
+        orchestrator.total_simulations_run += result.total_simulations
         _log_self_play_results_async(
             orchestrator,
             result.final_score,
             result.episode_steps,
-            episode_root_visits,
-            episode_tree_depths,
+            result.avg_root_visits,  # Use aggregated value
+            result.avg_tree_depth,  # Use aggregated value
             worker_id,
         )
     elif not orchestrator.stop_requested.is_set():
@@ -129,13 +117,13 @@ def _log_self_play_results_async(
     orchestrator: "TrainingOrchestrator",
     final_score: float,
     episode_steps: int,
-    root_visits: list,
-    tree_depths: list,
+    avg_root_visits: float,  # Changed parameter name
+    avg_tree_depth: float,  # Changed parameter name
     worker_id: int,
 ):
     """Logs self-play results asynchronously."""
-    avg_root_visits = np.mean(root_visits) if root_visits else 0
-    avg_tree_depth = np.mean(tree_depths) if tree_depths else 0
+    # avg_root_visits = np.mean(root_visits) if root_visits else 0 # No longer needed
+    # avg_tree_depth = np.mean(tree_depths) if tree_depths else 0 # No longer needed
     episode_num = orchestrator.episodes_played
     global_step = orchestrator.global_step
     buffer_size = len(orchestrator.buffer)

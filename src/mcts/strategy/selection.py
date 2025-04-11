@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING, Tuple, Optional
 
 # Use relative imports within mcts package
 from ..core.node import Node
-from ..core.config import MCTSConfig
+
+# Change: Import MCTSConfig from the central config location
+from src.config import MCTSConfig
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +17,7 @@ logger = logging.getLogger(__name__)
 def calculate_puct_score(
     child_node: Node,
     parent_visit_count: int,
-    config: MCTSConfig,
+    config: MCTSConfig,  # Type hint uses the imported config
     log_details: bool = False,  # Keep log_details flag
 ) -> Tuple[float, float, float]:  # Return components for logging
     """Calculates the PUCT score and its components for a child node."""
@@ -39,7 +41,9 @@ def calculate_puct_score(
     return score, q_value, exploration_term
 
 
-def add_dirichlet_noise(node: Node, config: MCTSConfig):
+def add_dirichlet_noise(
+    node: Node, config: MCTSConfig
+):  # Type hint uses the imported config
     """Adds Dirichlet noise to the prior probabilities of the children of this node."""
     if (
         config.dirichlet_alpha <= 0.0
@@ -72,7 +76,9 @@ def add_dirichlet_noise(node: Node, config: MCTSConfig):
     )
 
 
-def select_child_node(node: Node, config: MCTSConfig) -> Node:
+def select_child_node(
+    node: Node, config: MCTSConfig
+) -> Node:  # Type hint uses the imported config
     """Selects the child node with the highest PUCT score. Assumes noise already added if root."""
     if not node.children:
         raise ValueError("Cannot select child from a node with no children.")
@@ -118,7 +124,9 @@ def select_child_node(node: Node, config: MCTSConfig) -> Node:
     return best_child
 
 
-def traverse_to_leaf(root_node: Node, config: MCTSConfig) -> Tuple[Node, int]:
+def traverse_to_leaf(
+    root_node: Node, config: MCTSConfig
+) -> Tuple[Node, int]:  # Type hint uses the imported config
     """
     Traverses the tree from root to a leaf node using PUCT selection.
     A leaf is defined as a node that is not expanded OR is terminal.
@@ -127,20 +135,20 @@ def traverse_to_leaf(root_node: Node, config: MCTSConfig) -> Tuple[Node, int]:
     """
     current_node = root_node
     depth = 0
-    # KEEP INFO: MCTS traversal start log
-    logger.info(f"--- Start Traverse (Root Visits: {root_node.visit_count}) ---")
+    # CHANGE: MCTS traversal start log to DEBUG
+    logger.debug(f"--- Start Traverse (Root Visits: {root_node.visit_count}) ---")
 
     # **MODIFIED LOOP CONDITION**
     while current_node.is_expanded and not current_node.state.is_over():
-        # KEEP INFO: MCTS node consideration log
+        # CHANGE: MCTS node consideration log to DEBUG
         log_msg_consider = f"  Depth {depth}: Considering Node: {current_node}"
-        logger.info(log_msg_consider)
+        logger.debug(log_msg_consider)
 
         # Check max depth condition inside the loop
         if config.max_search_depth and depth >= config.max_search_depth:
-            # KEEP INFO: MCTS max depth hit log
+            # CHANGE: MCTS max depth hit log to DEBUG
             log_msg_break = f"  Depth {depth}: Hit MAX DEPTH ({config.max_search_depth}). Breaking traverse."
-            logger.info(log_msg_break)
+            logger.debug(log_msg_break)
             break  # Stop traversal if max depth reached
 
         # If node is expanded and non-terminal, select next child
@@ -159,16 +167,16 @@ def traverse_to_leaf(root_node: Node, config: MCTSConfig) -> Tuple[Node, int]:
 
     # After loop, current_node is either unexpanded, terminal, or at max depth
     if not current_node.is_expanded and not current_node.state.is_over():
-        # KEEP INFO: MCTS leaf reached log
+        # CHANGE: MCTS leaf reached log to DEBUG
         log_msg_break = f"  Depth {depth}: Node is LEAF (not expanded). Final node."
-        logger.info(log_msg_break)
+        logger.debug(log_msg_break)
     elif current_node.state.is_over():
-        # KEEP INFO: MCTS terminal node reached log
+        # CHANGE: MCTS terminal node reached log to DEBUG
         log_msg_break = f"  Depth {depth}: Node is TERMINAL. Final node."
-        logger.info(log_msg_break)
+        logger.debug(log_msg_break)
     # Max depth case logged inside loop
 
-    # KEEP INFO: MCTS traversal end log
+    # CHANGE: MCTS traversal end log to DEBUG
     log_msg_end = f"--- End Traverse: Reached Node at Depth {depth}. Final Node: {current_node} ---"
-    logger.info(log_msg_end)
+    logger.debug(log_msg_end)
     return current_node, depth

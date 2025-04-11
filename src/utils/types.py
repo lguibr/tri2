@@ -1,6 +1,10 @@
 # File: src/utils/types.py
-from typing import Dict, Any, List, Tuple, Mapping, TypedDict, Optional, Deque
+from typing import Dict, Any, List, Tuple, Mapping, Optional, Deque
+
+# Change: Import TypedDict from typing_extensions
+from typing_extensions import TypedDict
 import numpy as np
+
 # Removed Pydantic imports as they are no longer needed here for SelfPlayResult
 # from pydantic import BaseModel, Field, ConfigDict
 
@@ -29,10 +33,9 @@ ActionType = int
 PolicyTargetMapping = Mapping[ActionType, float]
 
 # Experience tuple stored in buffer
-# Now stores the raw GameState object instead of extracted features.
+# NOW stores the extracted StateType (features) instead of the raw GameState object.
 # Kept as Tuple for performance in buffer operations.
-# Use forward reference string "GameState" to avoid runtime import
-Experience = Tuple["GameState", PolicyTargetMapping, float]
+Experience = Tuple[StateType, PolicyTargetMapping, float]
 
 # Batch of experiences for training
 ExperienceBatch = List[Experience]
@@ -50,9 +53,10 @@ StatsCollectorData = Dict[str, Deque[Tuple[int, float]]]
 # --- Pydantic Models for Data Transfer ---
 # SelfPlayResult moved to src/rl/types.py to resolve circular import
 
+
 # --- Prioritized Experience Replay Types ---
 # TypedDict for the output of the PER buffer's sample method
 class PERBatchSample(TypedDict):
     batch: ExperienceBatch
-    indices: np.ndarray # Indices of the sampled experiences in the buffer
-    weights: np.ndarray # Importance sampling weights for each experience
+    indices: np.ndarray  # Indices of the sampled experiences in the buffer
+    weights: np.ndarray  # Importance sampling weights for each experience

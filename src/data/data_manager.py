@@ -16,11 +16,14 @@ from pydantic import ValidationError
 
 # Import Pydantic models and Experience type
 from .schemas import CheckpointData, BufferData, LoadedTrainingState
-from src.utils.types import Experience
+from src.utils.types import Experience, StateType  # Import StateType
 
 if TYPE_CHECKING:
     from src.nn import NeuralNetwork
-    from src.rl.core.buffer import ExperienceBuffer  # Import buffer type
+    from src.rl.core.buffer import (
+        ExperienceBuffer,
+        SumTree,
+    )  # Import buffer type and SumTree
     from src.config import PersistenceConfig, TrainConfig, MCTSConfig
     from src.stats import StatsCollectorActor
     from torch.optim import Optimizer
@@ -247,6 +250,33 @@ class DataManager:
                     with open(buffer_to_load, "rb") as f:
                         loaded_buffer_model = cloudpickle.load(f)
                     if isinstance(loaded_buffer_model, BufferData):
+                        # Validate the structure of the loaded experiences
+                        valid_experiences = []
+                        invalid_count = 0
+                        for i, exp in enumerate(loaded_buffer_model.buffer_list):
+                            if (
+                                isinstance(exp, tuple)
+                                and len(exp) == 3
+                                and isinstance(exp[0], dict)
+                                and "grid" in exp[0]
+                                and "other_features" in exp[0]
+                                and isinstance(exp[0]["grid"], np.ndarray)
+                                and isinstance(exp[0]["other_features"], np.ndarray)
+                                and isinstance(exp[1], dict)
+                                and isinstance(exp[2], (float, int))
+                            ):
+                                valid_experiences.append(exp)
+                            else:
+                                invalid_count += 1
+                                logger.warning(
+                                    f"Skipping invalid experience structure at index {i} in loaded buffer: {type(exp)}"
+                                )
+                        if invalid_count > 0:
+                            logger.warning(
+                                f"Found {invalid_count} invalid experience structures in loaded buffer."
+                            )
+
+                        loaded_buffer_model.buffer_list = valid_experiences
                         loaded_state.buffer_data = loaded_buffer_model
                         logger.info(
                             f"Buffer loaded and validated. Size: {len(loaded_state.buffer_data.buffer_list)}"
@@ -373,17 +403,50 @@ class DataManager:
                 if buffer.use_per:
                     # For PER, save the data stored in the SumTree leaves
                     # Need to handle potential empty slots if buffer not full
-                    buffer_list = [
-                        buffer.tree.data[i]
-                        for i in range(buffer.tree.n_entries)
-                        if buffer.tree.data[i] != 0
-                    ]
+                    # Ensure buffer.tree exists and is a SumTree instance
+                    if hasattr(buffer, "tree") and isinstance(buffer.tree, SumTree):
+                        buffer_list = [
+                            buffer.tree.data[i]
+                            for i in range(buffer.tree.n_entries)
+                            if buffer.tree.data[i] != 0  # Check for non-empty slots
+                        ]
+                    else:
+                        logger.error(
+                            "PER buffer tree is missing or invalid during save."
+                        )
+                        buffer_list = []
                 else:
                     # For uniform buffer, use the deque
                     buffer_list = list(buffer.buffer)
                 # --- END FIX ---
 
-                buffer_data = BufferData(buffer_list=buffer_list)
+                # Validate experience structure before saving
+                valid_experiences = []
+                invalid_count = 0
+                for i, exp in enumerate(buffer_list):
+                    if (
+                        isinstance(exp, tuple)
+                        and len(exp) == 3
+                        and isinstance(exp[0], dict)
+                        and "grid" in exp[0]
+                        and "other_features" in exp[0]
+                        and isinstance(exp[0]["grid"], np.ndarray)
+                        and isinstance(exp[0]["other_features"], np.ndarray)
+                        and isinstance(exp[1], dict)
+                        and isinstance(exp[2], (float, int))
+                    ):
+                        valid_experiences.append(exp)
+                    else:
+                        invalid_count += 1
+                        logger.warning(
+                            f"Skipping invalid experience structure at index {i} during save: {type(exp)}"
+                        )
+                if invalid_count > 0:
+                    logger.warning(
+                        f"Found {invalid_count} invalid experience structures before saving buffer."
+                    )
+
+                buffer_data = BufferData(buffer_list=valid_experiences)
                 os.makedirs(os.path.dirname(buffer_path), exist_ok=True)
                 with open(buffer_path, "wb") as f:
                     cloudpickle.dump(buffer_data, f)

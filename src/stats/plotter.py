@@ -28,7 +28,8 @@ class Plotter:
         self.plot_surface_cache: Optional[pygame.Surface] = None
         self.last_plot_update_time: float = 0.0
         self.plot_update_interval: float = plot_update_interval
-        self.rolling_window_sizes: List[int] = [10, 50]
+        # Change: Update rolling window sizes
+        self.rolling_window_sizes: List[int] = [10, 50, 100, 500, 1000, 5000]
         self.colors = self._init_colors()
 
         self.fig: Optional[plt.Figure] = None

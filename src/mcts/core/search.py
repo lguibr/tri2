@@ -6,7 +6,9 @@ from typing import TYPE_CHECKING, List, Tuple, Set, Dict
 # Use relative imports within the mcts package
 from ..strategy import selection, expansion, backpropagation
 from .node import Node
-from .config import MCTSConfig
+
+# Change: Import MCTSConfig from the central config location
+from src.config import MCTSConfig
 from .types import ActionPolicyValueEvaluator, ActionPolicyMapping, PolicyValueOutput
 
 # Use TYPE_CHECKING to avoid circular import at runtime
@@ -21,7 +23,7 @@ MCTS_BATCH_SIZE = 8  # How many leaves to collect before evaluating
 
 def run_mcts_simulations(
     root_node: Node,
-    config: MCTSConfig,
+    config: MCTSConfig,  # Type hint uses the imported config
     network_evaluator: ActionPolicyValueEvaluator,
 ) -> int:
     """
@@ -61,8 +63,8 @@ def run_mcts_simulations(
         backpropagation.backpropagate_value(root_node, root_node.value_estimate)
 
     # --- Main Simulation Loop ---
-    # KEEP INFO: Core MCTS loop start log
-    logger.info(
+    # CHANGE: MCTS loop start log to DEBUG
+    logger.debug(
         f"Starting MCTS loop for {config.num_simulations} simulations (Batch Size: {MCTS_BATCH_SIZE})..."
     )
     sim_count = 0
@@ -76,8 +78,8 @@ def run_mcts_simulations(
         unique_leaves_in_batch: Set[Node] = set()
 
         # 1. Selection Phase (Collect a batch of leaves)
-        # KEEP INFO: MCTS batch start log
-        logger.info(
+        # CHANGE: MCTS batch start log to DEBUG
+        logger.debug(
             f"--- MCTS Batch Starting (Sim {sim_count+1} / {config.num_simulations}) ---"
         )
         selection_start_time = time.monotonic()
@@ -89,8 +91,8 @@ def run_mcts_simulations(
             and sim_count < config.num_simulations
         ):
             sim_count += 1
-            # KEEP INFO: MCTS simulation selection start log
-            logger.info(f"  Starting Sim {sim_count} Selection...")
+            # CHANGE: MCTS simulation selection start log to DEBUG
+            logger.debug(f"  Starting Sim {sim_count} Selection...")
             try:
                 leaf_node, depth = selection.traverse_to_leaf(root_node, config)
                 max_depth_reached = max(max_depth_reached, depth)
@@ -98,13 +100,13 @@ def run_mcts_simulations(
                 if leaf_node.state.is_over():
                     outcome = leaf_node.state.get_outcome()
                     terminal_leaves.append((leaf_node, outcome))
-                    # KEEP INFO: MCTS terminal leaf log
-                    logger.info(
+                    # CHANGE: MCTS terminal leaf log to DEBUG
+                    logger.debug(
                         f"  Sim {sim_count}: Selected TERMINAL leaf at depth {depth}. Outcome: {outcome:.3f}"
                     )
                 elif leaf_node.is_expanded:
-                    # KEEP INFO: MCTS expanded leaf hit log
-                    logger.info(
+                    # CHANGE: MCTS expanded leaf hit log to DEBUG
+                    logger.debug(
                         f"  Sim {sim_count}: Selected EXPANDED leaf at depth {depth}. Value: {leaf_node.value_estimate:.3f}. Backpropagating immediately."
                     )
                     backpropagation.backpropagate_value(
@@ -117,15 +119,15 @@ def run_mcts_simulations(
                         leaves_to_evaluate.append(leaf_node)
                         unique_leaves_in_batch.add(leaf_node)
                         num_collected_for_batch += 1
-                        # KEEP INFO: MCTS unique leaf found log
-                        logger.info(
+                        # CHANGE: MCTS unique leaf found log to DEBUG
+                        logger.debug(
                             f"  Sim {sim_count}: Selected UNIQUE leaf for EVALUATION at depth {depth}. Node: {leaf_node}. Batch size now: {num_collected_for_batch}"
                         )
                     else:
                         # If node is already in batch, we still need to backpropagate *something*
                         # Using its current estimate is reasonable, similar to hitting an expanded node.
-                        # KEEP INFO: MCTS duplicate leaf in batch log
-                        logger.info(
+                        # CHANGE: MCTS duplicate leaf in batch log to DEBUG
+                        logger.debug(
                             f"  Sim {sim_count}: Selected leaf ALREADY IN BATCH at depth {depth}. Value: {leaf_node.value_estimate:.3f}. Backpropagating immediately."
                         )
                         backpropagation.backpropagate_value(
@@ -142,16 +144,16 @@ def run_mcts_simulations(
                 # Continue to next simulation
 
         selection_duration = time.monotonic() - selection_start_time
-        # KEEP INFO: MCTS selection phase summary log
-        logger.info(
+        # CHANGE: MCTS selection phase summary log to DEBUG
+        logger.debug(
             f"Selection phase finished. Collected {len(leaves_to_evaluate)} unique leaves for NN eval, {len(terminal_leaves)} terminal. Duration: {selection_duration:.4f}s"
         )
 
         # 2. Batch Evaluation & Expansion
         evaluation_start_time = time.monotonic()
         if leaves_to_evaluate:
-            # KEEP INFO: MCTS batch evaluation start log
-            logger.info(
+            # CHANGE: MCTS batch evaluation start log to DEBUG
+            logger.debug(
                 f"  Evaluating batch of {len(leaves_to_evaluate)} unique leaves..."
             )
             try:
@@ -181,8 +183,8 @@ def run_mcts_simulations(
                         )
 
                     node._temp_value_for_backprop = value  # type: ignore
-                # KEEP INFO: MCTS batch evaluation summary log
-                logger.info(
+                # CHANGE: MCTS batch evaluation summary log to DEBUG
+                logger.debug(
                     f"  Batch evaluated and expanded {len(leaves_to_evaluate)} unique leaves."
                 )
 
@@ -195,15 +197,15 @@ def run_mcts_simulations(
                     node._temp_value_for_backprop = 0.0  # type: ignore
 
         evaluation_duration = time.monotonic() - evaluation_start_time
-        # KEEP INFO: MCTS evaluation phase duration log
-        logger.info(
+        # CHANGE: MCTS evaluation phase duration log to DEBUG
+        logger.debug(
             f"Evaluation/Expansion phase finished. Duration: {evaluation_duration:.4f}s"
         )
 
         # 3. Backpropagation
         backprop_start_time = time.monotonic()
-        # KEEP INFO: MCTS backpropagation start log
-        logger.info(
+        # CHANGE: MCTS backpropagation start log to DEBUG
+        logger.debug(
             f"  Backpropagating {len(leaves_to_evaluate)} evaluated leaves and {len(terminal_leaves)} terminal leaves..."
         )
         # Backpropagate values from evaluated leaves (unique ones that were evaluated)
@@ -221,8 +223,8 @@ def run_mcts_simulations(
 
         backprop_duration = time.monotonic() - backprop_start_time
         batch_duration = time.monotonic() - start_time_batch
-        # KEEP INFO: MCTS backpropagation phase summary log
-        logger.info(
+        # CHANGE: MCTS backpropagation phase summary log to DEBUG
+        logger.debug(
             f"Backpropagation phase finished. Duration: {backprop_duration:.4f}s. Total Batch Duration: {batch_duration:.4f}s"
         )
         # --- End of Batch ---

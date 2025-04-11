@@ -9,8 +9,14 @@ from typing import Optional, Dict, Any, List
 from collections import deque
 
 # --- Package Imports ---
-from src.config import TrainConfig, EnvConfig, PersistenceConfig, ModelConfig
-from src.mcts import MCTSConfig  # Import Pydantic MCTSConfig
+# Change: Import MCTSConfig from the central config location
+from src.config import (
+    TrainConfig,
+    EnvConfig,
+    PersistenceConfig,
+    ModelConfig,
+    MCTSConfig,
+)
 from src.nn import NeuralNetwork
 
 # Import DataManager and the Pydantic schema for loaded state
@@ -56,7 +62,7 @@ class TrainingOrchestrator:
         stats_collector_actor: StatsCollectorActor,
         train_config: TrainConfig,
         env_config: EnvConfig,
-        mcts_config: MCTSConfig,  # Use Pydantic MCTSConfig
+        mcts_config: MCTSConfig,  # Use Pydantic MCTSConfig from central location
         persist_config: PersistenceConfig,
         visual_state_queue: Optional[queue.Queue[Optional[Dict[int, Any]]]] = None,
     ):
@@ -213,7 +219,7 @@ class TrainingOrchestrator:
             worker = SelfPlayWorker.options(num_cpus=1).remote(
                 actor_id=i,
                 env_config=self.env_config,
-                mcts_config=self.mcts_config,
+                mcts_config=self.mcts_config,  # Pass the unified config
                 model_config=self.nn.model_config,
                 train_config=self.train_config,
                 initial_weights=weights_ref,

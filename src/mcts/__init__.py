@@ -7,7 +7,9 @@ Provides the core algorithm and components for game tree search.
 # Core MCTS components
 from .core.node import Node
 from .core.search import run_mcts_simulations
-from .core.config import MCTSConfig # Import Pydantic MCTSConfig
+
+# Change: Import MCTSConfig from the central config location
+from src.config import MCTSConfig
 from .core.types import ActionPolicyValueEvaluator, ActionPolicyMapping
 
 # Action selection and policy generation strategies
@@ -17,7 +19,7 @@ __all__ = [
     # Core
     "Node",
     "run_mcts_simulations",
-    "MCTSConfig", # Export Pydantic MCTSConfig
+    "MCTSConfig",  # Export Pydantic MCTSConfig
     "ActionPolicyValueEvaluator",
     "ActionPolicyMapping",
     # Strategy
