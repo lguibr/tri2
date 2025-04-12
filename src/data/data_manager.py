@@ -18,12 +18,14 @@ from pydantic import ValidationError
 from .schemas import CheckpointData, BufferData, LoadedTrainingState
 from src.utils.types import Experience, StateType  # Import StateType
 
+# Import SumTree from its new location
+from src.utils.sumtree import SumTree
+
 if TYPE_CHECKING:
     from src.nn import NeuralNetwork
     from src.rl.core.buffer import (
         ExperienceBuffer,
-        SumTree,
-    )  # Import buffer type and SumTree
+    )  # Import buffer type
     from src.config import PersistenceConfig, TrainConfig, MCTSConfig
     from src.stats import StatsCollectorActor
     from torch.optim import Optimizer
@@ -399,7 +401,7 @@ class DataManager:
             )
             default_buffer_path = self.get_buffer_path(run_name=run_name)
             try:
-                # --- FIX: Access buffer data correctly based on PER ---
+                # --- Access buffer data correctly based on PER ---
                 if buffer.use_per:
                     # For PER, save the data stored in the SumTree leaves
                     # Need to handle potential empty slots if buffer not full
@@ -418,7 +420,7 @@ class DataManager:
                 else:
                     # For uniform buffer, use the deque
                     buffer_list = list(buffer.buffer)
-                # --- END FIX ---
+                # --- END Access buffer data ---
 
                 # Validate experience structure before saving
                 valid_experiences = []
@@ -529,6 +531,5 @@ class DataManager:
 
                 json.dump(configs, f, indent=4, default=default_serializer)
             mlflow.log_artifact(config_path, artifact_path="config")
-            logger.info("Logged combined config JSON to MLflow.")
         except Exception as e:
             logger.error(f"Failed to save/log run config JSON: {e}", exc_info=True)

@@ -7,9 +7,10 @@ from .types import (
     ExperienceBatch,
     PolicyValueOutput,
     StatsCollectorData,
-    # Removed SelfPlayResult import/export
+    PERBatchSample,  # Added PERBatchSample export
 )
-from .geometry import is_point_in_polygon  # Export the new geometry function
+from .geometry import is_point_in_polygon
+from .sumtree import SumTree  # Import SumTree from new file
 
 __all__ = [
     # helpers
@@ -23,7 +24,9 @@ __all__ = [
     "ExperienceBatch",
     "PolicyValueOutput",
     "StatsCollectorData",
-    # Removed SelfPlayResult export
+    "PERBatchSample",  # Added PERBatchSample export
     # geometry
     "is_point_in_polygon",
+    # structures
+    "SumTree",  # Export SumTree
 ]

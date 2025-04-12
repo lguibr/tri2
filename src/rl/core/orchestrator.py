@@ -293,7 +293,8 @@ class TrainingOrchestrator:
     def _log_progress_eta(self):
         """Logs progress and ETA."""
         if self.global_step % 20 != 0 and not self.target_steps_reached:
-            return
+            # Only log ETA if target not reached, but log progress always
+            pass
         if not self.train_step_progress:
             return
 
@@ -304,8 +305,8 @@ class TrainingOrchestrator:
         target_steps_str = str(target_steps) if target_steps else "inf"
         eta_str = (
             format_eta(self.train_step_progress.get_eta_seconds())
-            if not self.target_steps_reached
-            else "N/A (Target Reached)"
+            if not self.target_steps_reached and target_steps is not None
+            else "N/A"
         )
         progress_str = f"Step {self.global_step}/{target_steps_str}"
         if self.target_steps_reached:
@@ -446,19 +447,20 @@ class TrainingOrchestrator:
                     self.worker_tasks[task_ref] = i
 
             while not self.stop_requested.is_set():
+                # Check if target steps reached (for logging purposes)
                 if (
                     not self.target_steps_reached
                     and self.train_config.MAX_TRAINING_STEPS
                     and self.global_step >= self.train_config.MAX_TRAINING_STEPS
                 ):
                     logger.info(
-                        f"Reached target training steps ({self.train_config.MAX_TRAINING_STEPS})."
+                        f"Reached target training steps ({self.train_config.MAX_TRAINING_STEPS}). Training continues..."
                     )
-                    self.target_steps_reached = True
+                    self.target_steps_reached = True  # Set flag but continue
 
-                # --- Training Step (only if target not reached) ---
-                if self.buffer.is_ready() and not self.target_steps_reached:
-                    # Use helper which now handles PER priority updates internally
+                # --- Training Step ---
+                # CHANGE: Removed 'not self.target_steps_reached' condition
+                if self.buffer.is_ready():
                     trained_this_cycle = helpers.run_training_step(self)
                     if trained_this_cycle and (
                         self.global_step % self.train_config.WORKER_UPDATE_FREQ_STEPS
@@ -510,10 +512,10 @@ class TrainingOrchestrator:
 
                 self._update_visual_states()
 
-                # --- Periodic Checkpointing (only if target not reached) ---
+                # --- Periodic Checkpointing ---
+                # CHANGE: Removed 'not self.target_steps_reached' condition
                 if (
-                    not self.target_steps_reached
-                    and self.global_step > 0
+                    self.global_step > 0
                     and self.global_step % self.train_config.CHECKPOINT_SAVE_FREQ_STEPS
                     == 0
                 ):
@@ -539,10 +541,17 @@ class TrainingOrchestrator:
             self.training_exception = e
             self.request_stop()
         finally:
+            # Determine final status based on whether target was reached or error occurred
             if self.training_exception:
                 self.training_complete = False
             elif self.stop_requested.is_set():
+                # If stopped manually, consider complete only if target was reached
                 self.training_complete = self.target_steps_reached
             else:
-                self.training_complete = self.target_steps_reached
+                # If loop finished naturally (e.g., infinite steps), mark as complete
+                # Or if target steps were set and reached.
+                self.training_complete = self.target_steps_reached or (
+                    self.train_config.MAX_TRAINING_STEPS is None
+                )
+
             # Cleanup is called externally by the script that ran the orchestrator
